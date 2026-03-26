@@ -175,8 +175,7 @@ public actor ToolRuntime {
         // Guard: core selectors can only be swizzled if marked swizzlable.
         try selectorNamespace.assertNoShadowing(toolClass.name, [selector.canonical])
 
-        let original = toolClass.dispatchTable[selector.canonical]
-        toolClass.dispatchTable[selector.canonical] = newImp
+        let original = toolClass.swizzleMethod(selector, newImp: newImp)
 
         // Flush cache entries for this selector -- critical!
         await cache.flushSelector(selector)
