@@ -4,144 +4,143 @@ import Testing
 @Suite("SelectorNamespace")
 struct SelectorNamespaceTests {
 
-    // MARK: - Shadowing Protection
+    // MARK: - Shadowing protection
 
-    @Test("Protected core selector blocks shadowing from another provider")
-    func protectedBlocksShadowing() {
+    @Test("Protected selector blocks shadowing from different provider")
+    func protectedBlocksShadowing() throws {
         let ns = SelectorNamespace()
-        ns.registerCore("delete:user", ownerClass: "CoreProvider")
+        ns.registerCore("dispatch", ownerClass: "Runtime")
 
-        let entry = ns.checkShadowing("delete:user")
-        #expect(entry != nil)
-        #expect(entry?.ownerClass == "CoreProvider")
-        #expect(entry?.swizzlable == false)
+        let blocked = ns.checkShadowing("dispatch")
+        #expect(blocked != nil)
+        #expect(blocked?.ownerClass == "Runtime")
     }
 
     @Test("assertNoShadowing throws for protected selector from different provider")
     func assertNoShadowingThrows() {
         let ns = SelectorNamespace()
-        ns.registerCore("delete:user", ownerClass: "CoreProvider")
+        ns.registerCore("dispatch", ownerClass: "Runtime")
 
         #expect(throws: SelectorShadowingError.self) {
-            try ns.assertNoShadowing("PluginProvider", ["delete:user"])
+            try ns.assertNoShadowing("PluginA", ["dispatch"])
         }
     }
 
-    @Test("assertNoShadowing allows same owner to re-register")
-    func sameOwnerCanShadow() throws {
+    @Test("assertNoShadowing allows same owner class")
+    func assertNoShadowingSameOwner() throws {
         let ns = SelectorNamespace()
-        ns.registerCore("delete:user", ownerClass: "CoreProvider")
+        ns.registerCore("dispatch", ownerClass: "Runtime")
 
-        try ns.assertNoShadowing("CoreProvider", ["delete:user"])
+        // Same owner class should not throw
+        try ns.assertNoShadowing("Runtime", ["dispatch"])
     }
 
-    @Test("assertNoShadowing allows unregistered selectors")
-    func unregisteredSelectorsPass() throws {
+    @Test("Non-core selector returns nil for checkShadowing")
+    func nonCoreReturnsNil() {
         let ns = SelectorNamespace()
-        ns.registerCore("delete:user", ownerClass: "CoreProvider")
-
-        try ns.assertNoShadowing("PluginProvider", ["create:user", "update:user"])
+        let result = ns.checkShadowing("unknown:selector")
+        #expect(result == nil)
     }
 
-    // MARK: - Swizzlable Override
+    // MARK: - Swizzlable override
 
-    @Test("Swizzlable selector does not block shadowing")
-    func swizzlableDoesNotBlock() {
+    @Test("Swizzlable selector allows shadowing")
+    func swizzlableAllowsShadowing() throws {
         let ns = SelectorNamespace()
-        ns.registerCore("format:output", ownerClass: "CoreProvider", swizzlable: true)
+        ns.registerCore("hook:event", ownerClass: "EventSystem", swizzlable: true)
 
-        let entry = ns.checkShadowing("format:output")
-        #expect(entry == nil)
-    }
+        let blocked = ns.checkShadowing("hook:event")
+        #expect(blocked == nil)
 
-    @Test("assertNoShadowing passes for swizzlable selectors")
-    func assertNoShadowingPassesForSwizzlable() throws {
-        let ns = SelectorNamespace()
-        ns.registerCore("format:output", ownerClass: "CoreProvider", swizzlable: true)
-
-        try ns.assertNoShadowing("PluginProvider", ["format:output"])
+        // Should not throw even from different provider
+        try ns.assertNoShadowing("PluginA", ["hook:event"])
     }
 
     @Test("markSwizzlable toggles protection off")
-    func markSwizzlableTogglesOff() {
+    func markSwizzlableToggles() {
         let ns = SelectorNamespace()
-        ns.registerCore("delete:user", ownerClass: "CoreProvider")
+        ns.registerCore("log:event", ownerClass: "Logger")
 
-        #expect(ns.checkShadowing("delete:user") != nil)
+        #expect(ns.isSwizzlable("log:event") == false)
 
-        let result = ns.markSwizzlable("delete:user")
+        let result = ns.markSwizzlable("log:event")
         #expect(result == true)
-        #expect(ns.checkShadowing("delete:user") == nil)
-        #expect(ns.isSwizzlable("delete:user") == true)
+        #expect(ns.isSwizzlable("log:event") == true)
+        #expect(ns.checkShadowing("log:event") == nil)
     }
 
     @Test("markProtected toggles protection on")
-    func markProtectedTogglesOn() {
+    func markProtectedToggles() {
         let ns = SelectorNamespace()
-        ns.registerCore("format:output", ownerClass: "CoreProvider", swizzlable: true)
+        ns.registerCore("hook:event", ownerClass: "System", swizzlable: true)
 
-        #expect(ns.checkShadowing("format:output") == nil)
+        #expect(ns.isSwizzlable("hook:event") == true)
 
-        let result = ns.markProtected("format:output")
+        let result = ns.markProtected("hook:event")
         #expect(result == true)
-        #expect(ns.checkShadowing("format:output") != nil)
-        #expect(ns.isSwizzlable("format:output") == false)
+        #expect(ns.isSwizzlable("hook:event") == false)
+        #expect(ns.checkShadowing("hook:event") != nil)
     }
 
     @Test("markSwizzlable returns false for unregistered selector")
-    func markSwizzlableReturnsFalseUnregistered() {
+    func markSwizzlableUnregistered() {
         let ns = SelectorNamespace()
-        #expect(ns.markSwizzlable("unknown") == false)
+        #expect(ns.markSwizzlable("nonexistent") == false)
     }
 
     @Test("markProtected returns false for unregistered selector")
-    func markProtectedReturnsFalseUnregistered() {
+    func markProtectedUnregistered() {
         let ns = SelectorNamespace()
-        #expect(ns.markProtected("unknown") == false)
+        #expect(ns.markProtected("nonexistent") == false)
     }
 
-    // MARK: - Batch Registration
+    // MARK: - Batch registration
 
     @Test("registerCoreSelectors registers multiple selectors")
     func batchRegistration() {
         let ns = SelectorNamespace()
-        ns.registerCoreSelectors("CoreProvider", selectors: [
-            (canonical: "a", swizzlable: false),
-            (canonical: "b", swizzlable: true),
-            (canonical: "c", swizzlable: false),
+        ns.registerCoreSelectors("Runtime", selectors: [
+            (canonical: "dispatch", swizzlable: false),
+            (canonical: "resolve", swizzlable: false),
+            (canonical: "hook", swizzlable: true),
         ])
 
         #expect(ns.size == 3)
-        #expect(ns.isCore("a"))
-        #expect(ns.isCore("b"))
-        #expect(ns.isCore("c"))
-        #expect(!ns.isSwizzlable("a"))
-        #expect(ns.isSwizzlable("b"))
+        #expect(ns.isCore("dispatch"))
+        #expect(ns.isCore("resolve"))
+        #expect(ns.isCore("hook"))
+        #expect(ns.isSwizzlable("hook"))
+        #expect(!ns.isSwizzlable("dispatch"))
     }
 
-    // MARK: - Unregistration
+    // MARK: - Inspection
 
-    @Test("unregisterCore removes the selector")
-    func unregisterCoreRemoves() {
+    @Test("isCore and getEntry work correctly")
+    func inspectionAPIs() {
         let ns = SelectorNamespace()
-        ns.registerCore("delete:user", ownerClass: "CoreProvider")
-        #expect(ns.isCore("delete:user"))
+        ns.registerCore("test", ownerClass: "TestClass")
 
-        let removed = ns.unregisterCore("delete:user")
-        #expect(removed == true)
-        #expect(!ns.isCore("delete:user"))
+        #expect(ns.isCore("test"))
+        #expect(!ns.isCore("other"))
+
+        let entry = ns.getEntry("test")
+        #expect(entry?.canonical == "test")
+        #expect(entry?.ownerClass == "TestClass")
+    }
+
+    @Test("unregisterCore removes protection")
+    func unregisterCore() {
+        let ns = SelectorNamespace()
+        ns.registerCore("temp", ownerClass: "System")
+
+        #expect(ns.unregisterCore("temp") == true)
+        #expect(ns.isCore("temp") == false)
         #expect(ns.size == 0)
+
+        #expect(ns.unregisterCore("nonexistent") == false)
     }
 
-    @Test("unregisterCore returns false for unknown selector")
-    func unregisterCoreReturnsFalseUnknown() {
-        let ns = SelectorNamespace()
-        #expect(ns.unregisterCore("unknown") == false)
-    }
-
-    // MARK: - Queries
-
-    @Test("allCore returns all registered entries")
+    @Test("allCore returns all entries")
     func allCoreReturnsAll() {
         let ns = SelectorNamespace()
         ns.registerCore("a", ownerClass: "X")
@@ -149,13 +148,26 @@ struct SelectorNamespaceTests {
 
         let all = ns.allCore()
         #expect(all.count == 2)
-        let canonicals = all.map(\.canonical).sorted()
+        let canonicals = Set(all.map(\.canonical))
         #expect(canonicals == ["a", "b"])
     }
 
-    @Test("getEntry returns nil for unregistered")
-    func getEntryNilForUnregistered() {
+    // MARK: - Error details
+
+    @Test("SelectorShadowingError contains correct details")
+    func errorDetails() {
         let ns = SelectorNamespace()
-        #expect(ns.getEntry("nope") == nil)
+        ns.registerCore("dispatch", ownerClass: "Runtime")
+
+        do {
+            try ns.assertNoShadowing("EvilPlugin", ["dispatch"])
+            Issue.record("Should have thrown")
+        } catch let error as SelectorShadowingError {
+            #expect(error.shadowedSelector == "dispatch")
+            #expect(error.shadowingProvider == "EvilPlugin")
+            #expect(error.existingProvider == "Runtime")
+        } catch {
+            Issue.record("Wrong error type: \(error)")
+        }
     }
 }

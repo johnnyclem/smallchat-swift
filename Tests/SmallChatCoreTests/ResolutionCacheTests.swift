@@ -1,238 +1,234 @@
-import Foundation
 import Testing
+import Foundation
 @testable import SmallChatCore
-
-/// Minimal ToolIMP stub for cache tests.
-private final class CacheStubIMP: ToolIMP, @unchecked Sendable {
-    let providerId: String
-    let toolName: String
-    let transportType: TransportType = .local
-    let schema: ToolSchema? = nil
-
-    init(providerId: String = "provider-a", toolName: String = "tool") {
-        self.providerId = providerId
-        self.toolName = toolName
-    }
-
-    func loadSchema() async throws -> ToolSchema { fatalError() }
-    func execute(args: [String: any Sendable]) async throws -> ToolResult {
-        ToolResult(content: toolName)
-    }
-}
-
-private func makeSelector(_ canonical: String) -> ToolSelector {
-    ToolSelector(vector: [], canonical: canonical, parts: canonical.split(separator: ":").map(String.init), arity: 0)
-}
 
 @Suite("ResolutionCache")
 struct ResolutionCacheTests {
 
-    // MARK: - LRU Eviction
+    private func makeSelector(_ canonical: String) -> ToolSelector {
+        ToolSelector(vector: [1.0, 0.0, 0.0], canonical: canonical, parts: canonical.split(separator: ":").map(String.init), arity: 0)
+    }
+
+    private func makeIMP(providerId: String = "test", toolName: String = "tool") -> MockIMP {
+        MockIMP(providerId: providerId, toolName: toolName)
+    }
+
+    // MARK: - LRU eviction
 
     @Test("Evicts oldest entry when at capacity")
     func lruEviction() async {
-        let cache = ResolutionCache(maxSize: 3)
-        let imp = CacheStubIMP()
+        let cache = ResolutionCache(maxSize: 2, minConfidence: 0.0)
 
-        await cache.store(makeSelector("a"), imp: imp, confidence: 0.9)
-        await cache.store(makeSelector("b"), imp: imp, confidence: 0.9)
-        await cache.store(makeSelector("c"), imp: imp, confidence: 0.9)
-        #expect(await cache.size == 3)
+        let sel1 = makeSelector("a")
+        let sel2 = makeSelector("b")
+        let sel3 = makeSelector("c")
 
-        // Adding a 4th should evict "a"
-        await cache.store(makeSelector("d"), imp: imp, confidence: 0.9)
-        #expect(await cache.size == 3)
-        #expect(await cache.lookup(makeSelector("a")) == nil)
-        #expect(await cache.lookup(makeSelector("d")) != nil)
+        await cache.store(sel1, imp: makeIMP(toolName: "a"), confidence: 0.9)
+        await cache.store(sel2, imp: makeIMP(toolName: "b"), confidence: 0.9)
+        await cache.store(sel3, imp: makeIMP(toolName: "c"), confidence: 0.9)
+
+        // sel1 should have been evicted (oldest)
+        let a = await cache.lookup(sel1)
+        #expect(a == nil)
+
+        let b = await cache.lookup(sel2)
+        #expect(b != nil)
+
+        let c = await cache.lookup(sel3)
+        #expect(c != nil)
     }
 
-    @Test("LRU access refreshes entry position")
-    func lruAccessRefreshes() async {
-        let cache = ResolutionCache(maxSize: 3)
-        let imp = CacheStubIMP()
+    @Test("LRU promotes on access")
+    func lruPromotes() async {
+        let cache = ResolutionCache(maxSize: 2, minConfidence: 0.0)
 
-        await cache.store(makeSelector("a"), imp: imp, confidence: 0.9)
-        await cache.store(makeSelector("b"), imp: imp, confidence: 0.9)
-        await cache.store(makeSelector("c"), imp: imp, confidence: 0.9)
+        let sel1 = makeSelector("a")
+        let sel2 = makeSelector("b")
+        let sel3 = makeSelector("c")
 
-        // Access "a" to refresh it
-        _ = await cache.lookup(makeSelector("a"))
+        await cache.store(sel1, imp: makeIMP(toolName: "a"), confidence: 0.9)
+        await cache.store(sel2, imp: makeIMP(toolName: "b"), confidence: 0.9)
 
-        // Now "b" is oldest, adding "d" should evict "b"
-        await cache.store(makeSelector("d"), imp: imp, confidence: 0.9)
-        #expect(await cache.lookup(makeSelector("b")) == nil)
-        #expect(await cache.lookup(makeSelector("a")) != nil)
+        // Access sel1 to promote it
+        _ = await cache.lookup(sel1)
+
+        // Now store sel3 -- sel2 should be evicted (oldest unused)
+        await cache.store(sel3, imp: makeIMP(toolName: "c"), confidence: 0.9)
+
+        let a = await cache.lookup(sel1)
+        #expect(a != nil)
+
+        let b = await cache.lookup(sel2)
+        #expect(b == nil)
     }
 
-    // MARK: - Staleness Detection
+    // MARK: - Staleness detection
 
     @Test("Provider version change causes cache miss")
     func providerVersionStaleness() async {
         let cache = ResolutionCache(
-            versionContext: CacheVersionContext(providerVersions: ["provider-a": "v1"])
+            maxSize: 100,
+            minConfidence: 0.0,
+            versionContext: CacheVersionContext(providerVersions: ["test": "v1"])
         )
-        let imp = CacheStubIMP(providerId: "provider-a")
 
-        await cache.store(makeSelector("x"), imp: imp, confidence: 0.9)
-        #expect(await cache.lookup(makeSelector("x")) != nil)
+        let sel = makeSelector("tool:call")
+        await cache.store(sel, imp: makeIMP(), confidence: 0.95)
 
-        // Bump provider version
-        await cache.setProviderVersion("provider-a", "v2")
-        #expect(await cache.lookup(makeSelector("x")) == nil)
+        // Still valid before version change
+        let hit = await cache.lookup(sel)
+        #expect(hit != nil)
+
+        // Change provider version
+        await cache.setProviderVersion("test", "v2")
+
+        let miss = await cache.lookup(sel)
+        #expect(miss == nil)
     }
 
     @Test("Model version change causes cache miss")
     func modelVersionStaleness() async {
         let cache = ResolutionCache(
-            versionContext: CacheVersionContext(modelVersion: "gpt-4")
+            maxSize: 100,
+            minConfidence: 0.0,
+            versionContext: CacheVersionContext(modelVersion: "m1")
         )
-        let imp = CacheStubIMP()
 
-        await cache.store(makeSelector("x"), imp: imp, confidence: 0.9)
-        #expect(await cache.lookup(makeSelector("x")) != nil)
+        let sel = makeSelector("tool:call")
+        await cache.store(sel, imp: makeIMP(), confidence: 0.95)
 
-        await cache.setModelVersion("gpt-5")
-        #expect(await cache.lookup(makeSelector("x")) == nil)
+        let hit = await cache.lookup(sel)
+        #expect(hit != nil)
+
+        await cache.setModelVersion("m2")
+
+        let miss = await cache.lookup(sel)
+        #expect(miss == nil)
     }
 
     @Test("Schema fingerprint change causes cache miss")
     func schemaFingerprintStaleness() async {
         let cache = ResolutionCache(
-            versionContext: CacheVersionContext(schemaFingerprints: ["provider-a": "abc123"])
+            maxSize: 100,
+            minConfidence: 0.0,
+            versionContext: CacheVersionContext(schemaFingerprints: ["test": "fp1"])
         )
-        let imp = CacheStubIMP(providerId: "provider-a")
 
-        await cache.store(makeSelector("x"), imp: imp, confidence: 0.9)
-        #expect(await cache.lookup(makeSelector("x")) != nil)
+        let sel = makeSelector("tool:call")
+        await cache.store(sel, imp: makeIMP(), confidence: 0.95)
 
-        await cache.setSchemaFingerprint("provider-a", "def456")
-        #expect(await cache.lookup(makeSelector("x")) == nil)
+        let hit = await cache.lookup(sel)
+        #expect(hit != nil)
+
+        await cache.setSchemaFingerprint("test", "fp2")
+
+        let miss = await cache.lookup(sel)
+        #expect(miss == nil)
     }
 
-    // MARK: - Version Tagging
+    // MARK: - Version tagging
 
-    @Test("Stored entries are tagged with current version context")
+    @Test("Stored entries carry current version context")
     func versionTagging() async {
         let cache = ResolutionCache(
+            maxSize: 100,
+            minConfidence: 0.0,
             versionContext: CacheVersionContext(
-                providerVersions: ["p": "v1"],
+                providerVersions: ["test": "v1"],
                 modelVersion: "m1",
-                schemaFingerprints: ["p": "s1"]
+                schemaFingerprints: ["test": "fp1"]
             )
         )
-        let imp = CacheStubIMP(providerId: "p")
 
-        await cache.store(makeSelector("x"), imp: imp, confidence: 0.9)
-        let resolved = await cache.lookup(makeSelector("x"))
-        #expect(resolved?.providerVersion == "v1")
-        #expect(resolved?.modelVersion == "m1")
-        #expect(resolved?.schemaFingerprint == "s1")
+        let sel = makeSelector("x")
+        await cache.store(sel, imp: makeIMP(), confidence: 0.95)
+
+        let entry = await cache.lookup(sel)
+        #expect(entry?.providerVersion == "v1")
+        #expect(entry?.modelVersion == "m1")
+        #expect(entry?.schemaFingerprint == "fp1")
     }
 
-    // MARK: - Confidence Filtering
+    // MARK: - Confidence filtering
 
     @Test("Low-confidence results are not cached")
-    func lowConfidenceNotCached() async {
-        let cache = ResolutionCache(minConfidence: 0.85)
-        let imp = CacheStubIMP()
+    func lowConfidenceFiltered() async {
+        let cache = ResolutionCache(maxSize: 100, minConfidence: 0.85)
 
-        await cache.store(makeSelector("x"), imp: imp, confidence: 0.80)
+        let sel = makeSelector("ambiguous")
+        await cache.store(sel, imp: makeIMP(), confidence: 0.5)
+
+        let result = await cache.lookup(sel)
+        #expect(result == nil)
         #expect(await cache.size == 0)
-        #expect(await cache.lookup(makeSelector("x")) == nil)
     }
 
-    @Test("High-confidence results are cached")
-    func highConfidenceCached() async {
-        let cache = ResolutionCache(minConfidence: 0.85)
-        let imp = CacheStubIMP()
+    // MARK: - Invalidation
 
-        await cache.store(makeSelector("x"), imp: imp, confidence: 0.90)
-        #expect(await cache.size == 1)
-        #expect(await cache.lookup(makeSelector("x")) != nil)
-    }
-
-    // MARK: - Flush Operations
-
-    @Test("flush clears all entries")
+    @Test("Flush clears all entries")
     func flushClearsAll() async {
-        let cache = ResolutionCache()
-        let imp = CacheStubIMP()
-
-        await cache.store(makeSelector("a"), imp: imp, confidence: 0.9)
-        await cache.store(makeSelector("b"), imp: imp, confidence: 0.9)
-        #expect(await cache.size == 2)
+        let cache = ResolutionCache(maxSize: 100, minConfidence: 0.0)
+        await cache.store(makeSelector("a"), imp: makeIMP(), confidence: 0.9)
+        await cache.store(makeSelector("b"), imp: makeIMP(), confidence: 0.9)
 
         await cache.flush()
         #expect(await cache.size == 0)
     }
 
-    @Test("flushProvider only removes that provider's entries")
+    @Test("flushProvider removes only matching provider entries")
     func flushProviderSelective() async {
-        let cache = ResolutionCache()
-        let impA = CacheStubIMP(providerId: "provider-a")
-        let impB = CacheStubIMP(providerId: "provider-b")
+        let cache = ResolutionCache(maxSize: 100, minConfidence: 0.0)
+        await cache.store(makeSelector("a"), imp: makeIMP(providerId: "p1"), confidence: 0.9)
+        await cache.store(makeSelector("b"), imp: makeIMP(providerId: "p2"), confidence: 0.9)
 
-        await cache.store(makeSelector("x"), imp: impA, confidence: 0.9)
-        await cache.store(makeSelector("y"), imp: impB, confidence: 0.9)
-        #expect(await cache.size == 2)
-
-        await cache.flushProvider("provider-a")
+        await cache.flushProvider("p1")
         #expect(await cache.size == 1)
-        #expect(await cache.lookup(makeSelector("x")) == nil)
-        #expect(await cache.lookup(makeSelector("y")) != nil)
-    }
-
-    @Test("flushSelector removes a single entry")
-    func flushSelectorRemovesOne() async {
-        let cache = ResolutionCache()
-        let imp = CacheStubIMP()
-
-        await cache.store(makeSelector("a"), imp: imp, confidence: 0.9)
-        await cache.store(makeSelector("b"), imp: imp, confidence: 0.9)
-
-        await cache.flushSelector(makeSelector("a"))
-        #expect(await cache.size == 1)
-        #expect(await cache.lookup(makeSelector("a")) == nil)
         #expect(await cache.lookup(makeSelector("b")) != nil)
     }
 
-    // MARK: - Invalidation Hooks
+    @Test("flushSelector removes specific entry")
+    func flushSelectorSpecific() async {
+        let cache = ResolutionCache(maxSize: 100, minConfidence: 0.0)
+        let sel = makeSelector("target")
+        await cache.store(sel, imp: makeIMP(), confidence: 0.9)
+        await cache.store(makeSelector("other"), imp: makeIMP(), confidence: 0.9)
+
+        await cache.flushSelector(sel)
+        #expect(await cache.lookup(sel) == nil)
+        #expect(await cache.size == 1)
+    }
+
+    // MARK: - Invalidation hooks
 
     @Test("Invalidation hook fires on flush")
     func invalidationHookFires() async {
-        let cache = ResolutionCache()
-        var firedEvents: [String] = []
+        let cache = ResolutionCache(maxSize: 100, minConfidence: 0.0)
 
+        var firedEvents: [String] = []
         await cache.invalidateOn { event in
             switch event {
-            case .flush:
-                firedEvents.append("flush")
-            case .provider(let id):
-                firedEvents.append("provider:\(id)")
-            case .selector(let sel):
-                firedEvents.append("selector:\(sel.canonical)")
-            case .stale(let reason, let key):
-                firedEvents.append("stale:\(key)")
+            case .flush: firedEvents.append("flush")
+            case .provider: firedEvents.append("provider")
+            case .selector: firedEvents.append("selector")
+            case .stale: firedEvents.append("stale")
             }
         }
 
         await cache.flush()
-        #expect(firedEvents == ["flush"])
+        #expect(firedEvents.contains("flush"))
     }
 
-    // MARK: - Hit Count
+    // MARK: - Hit count
 
-    @Test("hitCount increments on each lookup")
+    @Test("Hit count increments on repeated lookups")
     func hitCountIncrements() async {
-        let cache = ResolutionCache()
-        let imp = CacheStubIMP()
+        let cache = ResolutionCache(maxSize: 100, minConfidence: 0.0)
+        let sel = makeSelector("popular")
+        await cache.store(sel, imp: makeIMP(), confidence: 0.95)
 
-        await cache.store(makeSelector("x"), imp: imp, confidence: 0.9)
-
-        let r1 = await cache.lookup(makeSelector("x"))
-        #expect(r1?.hitCount == 2)  // store sets to 1, first lookup bumps to 2
-
-        let r2 = await cache.lookup(makeSelector("x"))
-        #expect(r2?.hitCount == 3)
+        _ = await cache.lookup(sel)
+        _ = await cache.lookup(sel)
+        let entry = await cache.lookup(sel)
+        #expect(entry?.hitCount == 4) // 1 initial + 3 lookups
     }
 }

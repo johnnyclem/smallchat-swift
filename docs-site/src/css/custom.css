@@ -1,0 +1,141 @@
+/**
+ * smallchat-swift documentation theme
+ *
+ * Colors inspired by Swift's orange and the smallchat brand.
+ */
+
+:root {
+  --ifm-color-primary: #f05138;
+  --ifm-color-primary-dark: #ee3a1e;
+  --ifm-color-primary-darker: #e42f13;
+  --ifm-color-primary-darkest: #bc270f;
+  --ifm-color-primary-light: #f26852;
+  --ifm-color-primary-lighter: #f37766;
+  --ifm-color-primary-lightest: #f69d90;
+  --ifm-code-font-size: 95%;
+  --ifm-font-family-base: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --ifm-font-family-monospace: "SF Mono", SFMono-Regular, ui-monospace, Menlo,
+    Monaco, Consolas, monospace;
+  --ifm-heading-font-weight: 700;
+  --docusaurus-highlighted-code-line-bg: rgba(240, 81, 56, 0.1);
+}
+
+[data-theme="dark"] {
+  --ifm-color-primary: #f37766;
+  --ifm-color-primary-dark: #f15c4d;
+  --ifm-color-primary-darker: #f04f3e;
+  --ifm-color-primary-darkest: #ec2912;
+  --ifm-color-primary-light: #f5927f;
+  --ifm-color-primary-lighter: #f69f8e;
+  --ifm-color-primary-lightest: #fac5bb;
+  --ifm-background-color: #1a1a2e;
+  --ifm-background-surface-color: #16213e;
+  --docusaurus-highlighted-code-line-bg: rgba(243, 119, 102, 0.15);
+}
+
+/* Hero section on landing page */
+.hero {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  padding: 4rem 0;
+}
+
+.hero__title {
+  font-size: 3.5rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.hero__subtitle {
+  font-size: 1.4rem;
+  opacity: 0.9;
+  max-width: 640px;
+}
+
+/* Feature cards */
+.feature-card {
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: 12px;
+  padding: 1.5rem;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.feature-card:hover {
+  border-color: var(--ifm-color-primary);
+  box-shadow: 0 4px 24px rgba(240, 81, 56, 0.08);
+}
+
+/* Code blocks */
+.prism-code {
+  border-radius: 8px;
+}
+
+/* API reference styling */
+.api-method {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.9rem;
+  background: var(--ifm-code-background);
+  padding: 0.8rem 1rem;
+  border-radius: 8px;
+  border-left: 3px solid var(--ifm-color-primary);
+  margin-bottom: 1rem;
+  overflow-x: auto;
+}
+
+/* Module badge */
+.module-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: var(--ifm-font-family-monospace);
+  background: var(--ifm-color-primary);
+  color: white;
+  margin-right: 0.5rem;
+  vertical-align: middle;
+}
+
+/* Architecture table */
+table {
+  display: table;
+  width: 100%;
+}
+
+table th {
+  background: var(--ifm-color-emphasis-100);
+}
+
+/* Sidebar customization */
+.theme-doc-sidebar-menu .menu__link {
+  font-size: 0.9rem;
+}
+
+/* Admonition tweaks */
+.admonition {
+  border-radius: 8px;
+}
+
+/* Swift keyword highlighting in prose */
+code {
+  border-radius: 4px;
+}
+
+/* Landing page feature grid */
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.5rem;
+  margin: 2rem 0;
+}
+
+/* Dependency graph styling */
+.dep-graph {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.85rem;
+  line-height: 1.6;
+  background: var(--ifm-code-background);
+  padding: 1.5rem;
+  border-radius: 8px;
+  overflow-x: auto;
+}

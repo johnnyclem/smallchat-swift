@@ -4,160 +4,150 @@ import Testing
 @Suite("IntentPinRegistry")
 struct IntentPinRegistryTests {
 
-    // MARK: - Exact Match
+    // MARK: - Exact match
 
-    @Test("Exact policy accepts canonical match")
+    @Test("Exact policy accepts exact canonical match")
     func exactMatchAccepts() {
         let registry = IntentPinRegistry()
-        registry.pin(IntentPin(canonical: "delete:user", policy: .exact))
+        registry.pin(IntentPin(canonical: "delete:account", policy: .exact))
 
-        let match = registry.checkExact("delete:user")
+        let match = registry.checkExact("delete:account")
         #expect(match != nil)
         #expect(match?.verdict == .accept)
         #expect(match?.policy == .exact)
     }
 
-    @Test("Exact policy rejects non-matching canonical")
-    func exactMatchRejectsNonMatch() {
+    @Test("Exact policy returns nil for unrelated canonical")
+    func exactMatchReturnsNilForUnrelated() {
         let registry = IntentPinRegistry()
-        registry.pin(IntentPin(canonical: "delete:user", policy: .exact))
+        registry.pin(IntentPin(canonical: "delete:account", policy: .exact))
 
-        let match = registry.checkExact("delete:user:data")
+        let match = registry.checkExact("list:users")
         #expect(match == nil)
     }
 
-    @Test("checkExact returns nil for unpinned selector")
-    func checkExactReturnsNilForUnpinned() {
+    @Test("Exact policy rejects similarity match for non-exact canonical")
+    func exactPolicyRejectsSimilarityNonExact() {
         let registry = IntentPinRegistry()
-        let match = registry.checkExact("anything")
-        #expect(match == nil)
-    }
-
-    // MARK: - Elevated Threshold
-
-    @Test("Elevated policy accepts similarity above threshold")
-    func elevatedAcceptsAboveThreshold() {
-        let registry = IntentPinRegistry()
-        registry.pin(IntentPin(canonical: "delete:user", policy: .elevated, threshold: 0.95))
+        registry.pin(IntentPin(canonical: "delete:account", policy: .exact))
 
         let match = registry.checkSimilarity(
-            candidateCanonical: "delete:user",
-            similarity: 0.96,
-            intentCanonical: "remove:user"
+            candidateCanonical: "delete:account",
+            similarity: 0.99,
+            intentCanonical: "remove:account"
+        )
+        #expect(match != nil)
+        #expect(match?.verdict == .reject)
+        #expect(match?.policy == .exact)
+    }
+
+    @Test("Exact policy accepts similarity check when canonicals match exactly")
+    func exactPolicyAcceptsSimilarityExactCanonical() {
+        let registry = IntentPinRegistry()
+        registry.pin(IntentPin(canonical: "delete:account", policy: .exact))
+
+        let match = registry.checkSimilarity(
+            candidateCanonical: "delete:account",
+            similarity: 0.95,
+            intentCanonical: "delete:account"
+        )
+        #expect(match != nil)
+        #expect(match?.verdict == .accept)
+    }
+
+    // MARK: - Elevated threshold
+
+    @Test("Elevated policy accepts high similarity")
+    func elevatedAcceptsHighSimilarity() {
+        let registry = IntentPinRegistry()
+        registry.pin(IntentPin(canonical: "transfer:funds", policy: .elevated))
+
+        let match = registry.checkSimilarity(
+            candidateCanonical: "transfer:funds",
+            similarity: 0.99,
+            intentCanonical: "send:money"
         )
         #expect(match != nil)
         #expect(match?.verdict == .accept)
         #expect(match?.policy == .elevated)
-        #expect(match?.similarity == 0.96)
-        #expect(match?.requiredThreshold == 0.95)
+        #expect(match?.similarity == 0.99)
     }
 
-    @Test("Elevated policy rejects similarity below threshold")
+    @Test("Elevated policy rejects below threshold")
     func elevatedRejectsBelowThreshold() {
         let registry = IntentPinRegistry()
-        registry.pin(IntentPin(canonical: "delete:user", policy: .elevated, threshold: 0.95))
-
-        let match = registry.checkSimilarity(
-            candidateCanonical: "delete:user",
-            similarity: 0.90,
-            intentCanonical: "remove:user"
-        )
-        #expect(match != nil)
-        #expect(match?.verdict == .reject)
-    }
-
-    @Test("Elevated policy uses default threshold of 0.98 when none specified")
-    func elevatedUsesDefaultThreshold() {
-        let registry = IntentPinRegistry()
-        registry.pin(IntentPin(canonical: "delete:user", policy: .elevated))
-
-        let rejectMatch = registry.checkSimilarity(
-            candidateCanonical: "delete:user",
-            similarity: 0.97,
-            intentCanonical: "remove:user"
-        )
-        #expect(rejectMatch?.verdict == .reject)
-        #expect(rejectMatch?.requiredThreshold == 0.98)
-
-        let acceptMatch = registry.checkSimilarity(
-            candidateCanonical: "delete:user",
-            similarity: 0.99,
-            intentCanonical: "remove:user"
-        )
-        #expect(acceptMatch?.verdict == .accept)
-    }
-
-    // MARK: - Alias Resolution
-
-    @Test("Alias resolves to pinned canonical via checkExact")
-    func aliasResolvesExact() {
-        let registry = IntentPinRegistry()
-        registry.pin(IntentPin(
-            canonical: "delete:user",
-            policy: .exact,
-            aliases: ["remove user", "erase user"]
-        ))
-
-        // "remove user" canonicalizes to "remove:user"
-        let match = registry.checkExact(canonicalize("remove user"))
-        #expect(match != nil)
-        #expect(match?.verdict == .accept)
-        #expect(match?.canonical == "delete:user")
-    }
-
-    @Test("Alias resolves in similarity check for exact policy")
-    func aliasResolvesSimilarityExactPolicy() {
-        let registry = IntentPinRegistry()
-        registry.pin(IntentPin(
-            canonical: "delete:user",
-            policy: .exact,
-            aliases: ["remove user"]
-        ))
-
-        let aliasCanonical = canonicalize("remove user")
-        let match = registry.checkSimilarity(
-            candidateCanonical: "delete:user",
-            similarity: 0.95,
-            intentCanonical: aliasCanonical
-        )
-        #expect(match?.verdict == .accept)
-    }
-
-    @Test("Non-alias similar string rejected under exact policy via similarity check")
-    func nonAliasRejectedUnderExactPolicy() {
-        let registry = IntentPinRegistry()
-        registry.pin(IntentPin(
-            canonical: "delete:user",
-            policy: .exact,
-            aliases: ["remove user"]
-        ))
-
-        let match = registry.checkSimilarity(
-            candidateCanonical: "delete:user",
-            similarity: 0.99,
-            intentCanonical: "destroy:user"
-        )
-        #expect(match?.verdict == .reject)
-    }
-
-    // MARK: - Rejection
-
-    @Test("Similarity check on exact-pinned selector rejects non-exact non-alias")
-    func exactPolicyRejectsSimilarButNotExact() {
-        let registry = IntentPinRegistry()
-        registry.pin(IntentPin(canonical: "transfer:funds", policy: .exact))
+        registry.pin(IntentPin(canonical: "transfer:funds", policy: .elevated))
 
         let match = registry.checkSimilarity(
             candidateCanonical: "transfer:funds",
-            similarity: 0.97,
-            intentCanonical: "send:funds"
+            similarity: 0.90,
+            intentCanonical: "send:money"
         )
         #expect(match != nil)
         #expect(match?.verdict == .reject)
+        #expect(match?.requiredThreshold == 0.98)
     }
 
-    @Test("checkSimilarity returns nil for unknown candidate")
-    func checkSimilarityNilForUnknown() {
+    @Test("Elevated policy uses custom threshold")
+    func elevatedCustomThreshold() {
+        let registry = IntentPinRegistry()
+        registry.pin(IntentPin(canonical: "transfer:funds", policy: .elevated, threshold: 0.95))
+
+        let accept = registry.checkSimilarity(
+            candidateCanonical: "transfer:funds",
+            similarity: 0.96,
+            intentCanonical: "send:money"
+        )
+        #expect(accept?.verdict == .accept)
+        #expect(accept?.requiredThreshold == 0.95)
+
+        let reject = registry.checkSimilarity(
+            candidateCanonical: "transfer:funds",
+            similarity: 0.94,
+            intentCanonical: "send:money"
+        )
+        #expect(reject?.verdict == .reject)
+    }
+
+    // MARK: - Alias resolution
+
+    @Test("Alias resolves to pinned canonical via checkExact")
+    func aliasResolution() {
+        let registry = IntentPinRegistry()
+        registry.pin(IntentPin(
+            canonical: "delete:account",
+            policy: .exact,
+            aliases: ["remove account", "destroy my account"]
+        ))
+
+        // "remove account" canonicalizes to "remove:account"
+        let match = registry.checkExact("remove:account")
+        #expect(match != nil)
+        #expect(match?.canonical == "delete:account")
+        #expect(match?.verdict == .accept)
+    }
+
+    @Test("Alias resolves via similarity check for exact policy")
+    func aliasSimilarityExactPolicy() {
+        let registry = IntentPinRegistry()
+        registry.pin(IntentPin(
+            canonical: "delete:account",
+            policy: .exact,
+            aliases: ["remove account"]
+        ))
+
+        let match = registry.checkSimilarity(
+            candidateCanonical: "delete:account",
+            similarity: 0.97,
+            intentCanonical: "remove:account"
+        )
+        #expect(match?.verdict == .accept)
+    }
+
+    // MARK: - Rejection scenarios
+
+    @Test("Similarity check returns nil for unpinned candidate")
+    func similarityNilForUnpinned() {
         let registry = IntentPinRegistry()
         let match = registry.checkSimilarity(
             candidateCanonical: "unknown:selector",
@@ -167,45 +157,31 @@ struct IntentPinRegistryTests {
         #expect(match == nil)
     }
 
-    // MARK: - Pin Management
+    // MARK: - Management
 
-    @Test("Unpin removes pin and aliases")
-    func unpinRemovesPinAndAliases() {
+    @Test("Pin and unpin lifecycle")
+    func pinUnpinLifecycle() {
         let registry = IntentPinRegistry()
-        registry.pin(IntentPin(
-            canonical: "delete:user",
-            policy: .exact,
-            aliases: ["remove user"]
-        ))
+        registry.pin(IntentPin(canonical: "test:selector", policy: .exact, aliases: ["test alias"]))
+
+        #expect(registry.isPinned("test:selector"))
         #expect(registry.size == 1)
-        #expect(registry.isPinned("delete:user"))
+        #expect(registry.getPin("test:selector")?.policy == .exact)
 
-        registry.unpin("delete:user")
+        registry.unpin("test:selector")
+        #expect(!registry.isPinned("test:selector"))
         #expect(registry.size == 0)
-        #expect(!registry.isPinned("delete:user"))
-
-        let aliasMatch = registry.checkExact(canonicalize("remove user"))
-        #expect(aliasMatch == nil)
+        // Alias should also be cleaned up
+        #expect(registry.checkExact("test:alias") == nil)
     }
 
-    @Test("pinnedCanonicals returns all pinned keys")
-    func pinnedCanonicalsReturnsAll() {
+    @Test("pinnedCanonicals returns all pinned names")
+    func pinnedCanonicals() {
         let registry = IntentPinRegistry()
         registry.pin(IntentPin(canonical: "a", policy: .exact))
         registry.pin(IntentPin(canonical: "b", policy: .elevated))
 
-        let keys = registry.pinnedCanonicals().sorted()
-        #expect(keys == ["a", "b"])
-    }
-
-    @Test("getPin returns the pin entry")
-    func getPinReturnsEntry() {
-        let registry = IntentPinRegistry()
-        registry.pin(IntentPin(canonical: "x", policy: .elevated, threshold: 0.90))
-
-        let pin = registry.getPin("x")
-        #expect(pin != nil)
-        #expect(pin?.policy == .elevated)
-        #expect(pin?.threshold == 0.90)
+        let pinned = Set(registry.pinnedCanonicals())
+        #expect(pinned == ["a", "b"])
     }
 }

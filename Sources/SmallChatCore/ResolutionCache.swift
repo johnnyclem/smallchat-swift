@@ -181,14 +181,28 @@ public actor ResolutionCache {
 /// Compute a deterministic fingerprint for a provider's tool schemas.
 /// Uses DJB2 hash over sorted JSON representation -- fast enough for the
 /// hot path, collision-resistant enough for versioning.
+///
+/// Encodes the full schema (properties, required, enum, description, etc.)
+/// so that any structural change invalidates stale cache entries.
 public func computeSchemaFingerprint(_ schemas: [(name: String, inputSchema: JSONSchemaType)]) -> String {
     let sorted = schemas.sorted { $0.name < $1.name }
 
-    // Build a deterministic string representation
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+
+    // Build a deterministic string representation including full schema content
     var content = "["
     for (i, schema) in sorted.enumerated() {
         if i > 0 { content += "," }
-        content += "{\"name\":\"\(schema.name)\",\"type\":\"\(schema.inputSchema.type)\"}"
+        let schemaJSON: String
+        if let data = try? encoder.encode(schema.inputSchema),
+           let str = String(data: data, encoding: .utf8) {
+            schemaJSON = str
+        } else {
+            // Fallback: at minimum include the type
+            schemaJSON = "{\"type\":\"\(schema.inputSchema.type)\"}"
+        }
+        content += "{\"name\":\"\(schema.name)\",\"schema\":\(schemaJSON)}"
     }
     content += "]"
 

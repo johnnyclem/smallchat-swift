@@ -1,234 +1,196 @@
-import Foundation
 import Testing
+import Foundation
 @testable import SmallChatCore
 
-/// Minimal ToolIMP for testing overload resolution.
-private final class StubIMP: ToolIMP, @unchecked Sendable {
+/// Minimal mock IMP for testing overload resolution.
+final class MockIMP: ToolIMP, @unchecked Sendable {
     let providerId: String
     let toolName: String
     let transportType: TransportType = .local
     let schema: ToolSchema? = nil
 
-    init(providerId: String = "test", toolName: String) {
+    init(providerId: String = "test", toolName: String = "mock") {
         self.providerId = providerId
         self.toolName = toolName
     }
 
     func loadSchema() async throws -> ToolSchema {
-        fatalError("not used in tests")
+        ToolSchema(name: toolName, description: "", inputSchema: JSONSchemaType(type: "object"))
     }
 
     func execute(args: [String: any Sendable]) async throws -> ToolResult {
-        ToolResult(content: toolName)
+        ToolResult(content: "ok")
     }
 }
 
 @Suite("OverloadTable")
 struct OverloadTableTests {
 
-    // MARK: - Resolution Priority
+    // MARK: - Resolution priority
 
     @Test("Exact type match wins over any-typed overload")
     func exactWinsOverAny() throws {
         let table = OverloadTable(selectorCanonical: "search")
 
-        let anySignature = SCMethodSignature(parameters: [
-            param("query", 0, .any),
-        ])
-        let stringSignature = SCMethodSignature(parameters: [
-            param("query", 0, .primitive(.string)),
-        ])
+        // Overload 1: (string)
+        let sig1 = createSignature([param("query", 0, SCType.string())])
+        try table.register(sig1, imp: MockIMP(toolName: "searchByString"))
 
-        try table.register(anySignature, imp: StubIMP(toolName: "search_any"))
-        try table.register(stringSignature, imp: StubIMP(toolName: "search_string"))
+        // Overload 2: (any)
+        let sig2 = createSignature([param("query", 0, SCType.any())])
+        try table.register(sig2, imp: MockIMP(toolName: "searchByAny"))
 
         let result = try table.resolve(["hello" as any Sendable])
-        #expect(result != nil)
-        #expect(result?.entry.originalToolName == nil)
+        #expect(result?.entry.imp.toolName == "searchByString")
         #expect(result?.matchQuality == .exact)
-        #expect((result?.imp as? StubIMP)?.toolName == "search_string")
     }
 
-    @Test("Higher arity preferred on tie")
+    @Test("Higher arity preferred as tiebreaker")
     func higherArityPreferred() throws {
         let table = OverloadTable(selectorCanonical: "format")
 
-        let oneParam = SCMethodSignature(parameters: [
-            param("text", 0, .primitive(.string)),
-        ])
-        let twoParam = SCMethodSignature(parameters: [
-            param("text", 0, .primitive(.string)),
-            param("style", 1, .primitive(.string)),
-        ])
+        // Overload 1: (string)
+        let sig1 = createSignature([param("text", 0, SCType.string())])
+        try table.register(sig1, imp: MockIMP(toolName: "formatSimple"))
 
-        try table.register(oneParam, imp: StubIMP(toolName: "format_1"))
-        try table.register(twoParam, imp: StubIMP(toolName: "format_2"))
+        // Overload 2: (string, number)
+        let sig2 = createSignature([
+            param("text", 0, SCType.string()),
+            param("width", 1, SCType.number()),
+        ])
+        try table.register(sig2, imp: MockIMP(toolName: "formatWithWidth"))
 
-        let result = try table.resolve(["hello" as any Sendable, "bold" as any Sendable])
-        #expect(result != nil)
-        #expect((result?.imp as? StubIMP)?.toolName == "format_2")
+        let result = try table.resolve(["hello" as any Sendable, 80 as any Sendable])
+        #expect(result?.entry.imp.toolName == "formatWithWidth")
     }
 
-    // MARK: - Ambiguity Detection
+    // MARK: - Ambiguity detection
 
-    @Test("Ambiguous overloads throw OverloadAmbiguityError")
-    func ambiguityThrows() throws {
+    @Test("Ambiguous overloads with same arity and score throw error")
+    func ambiguityDetected() throws {
         let table = OverloadTable(selectorCanonical: "process")
 
-        let sig1 = SCMethodSignature(parameters: [
-            param("input", 0, .any),
-        ])
-        let sig2 = SCMethodSignature(parameters: [
-            param("data", 0, .any),
-        ])
+        let sig1 = createSignature([param("input", 0, SCType.any())])
+        try table.register(sig1, imp: MockIMP(toolName: "processA"))
 
-        // These have different signatureKeys because param names don't affect key (both "id")
-        // Actually both map to "id" so we need different types
-        // Both are .any -> same signatureKey "id", so register will throw DuplicateOverloadError
-        // Let's use semantic overloads to test ambiguity differently
-
-        // Use union vs any to get same score
-        let unionSig = SCMethodSignature(parameters: [
-            param("input", 0, .union([.primitive(.string), .primitive(.number)])),
-        ])
-        let unionSig2 = SCMethodSignature(parameters: [
-            param("data", 0, .union([.primitive(.number), .primitive(.string)])),
-        ])
-
-        try table.register(unionSig, imp: StubIMP(toolName: "process_a"))
-        try table.register(unionSig2, imp: StubIMP(toolName: "process_b"))
+        let sig2 = createSignature([param("data", 0, SCType.any())])
+        try table.register(sig2, imp: MockIMP(toolName: "processB"))
 
         #expect(throws: OverloadAmbiguityError.self) {
             _ = try table.resolve(["test" as any Sendable])
         }
     }
 
-    @Test("Developer-defined overload preferred over semantic overload on tie")
-    func devDefinedPreferredOverSemantic() throws {
-        let table = OverloadTable(selectorCanonical: "query")
+    @Test("Developer-defined overload wins over semantic overload in ambiguity")
+    func devDefinedWinsOverSemantic() throws {
+        let table = OverloadTable(selectorCanonical: "run")
 
-        let sig1 = SCMethodSignature(parameters: [
-            param("text", 0, .primitive(.string)),
-        ])
-        let sig2 = SCMethodSignature(parameters: [
-            param("text", 0, .primitive(.string)),
-            param("limit", 1, .primitive(.number), required: false),
-        ])
+        let sig1 = createSignature([param("cmd", 0, SCType.string())])
+        try table.register(sig1, imp: MockIMP(toolName: "devRun"), isSemanticOverload: false)
 
-        try table.register(sig1, imp: StubIMP(toolName: "query_dev"), isSemanticOverload: false)
-        try table.register(sig2, imp: StubIMP(toolName: "query_semantic"), isSemanticOverload: true)
+        let sig2 = createSignature([param("command", 0, SCType.any())])
+        try table.register(sig2, imp: MockIMP(toolName: "semanticRun"), isSemanticOverload: true)
 
-        // With just a string arg, both match. Same score, sig2 has higher arity -> sig2 preferred by arity.
-        // With both args, sig2 wins by arity
-        let result = try table.resolve(["hello" as any Sendable, 10 as any Sendable])
-        #expect(result != nil)
-        #expect((result?.imp as? StubIMP)?.toolName == "query_semantic")
+        let result = try table.resolve(["ls" as any Sendable])
+        #expect(result?.entry.imp.toolName == "devRun")
     }
 
-    // MARK: - Validation (Hardened Path)
+    // MARK: - Duplicate registration
 
-    @Test("validateAndResolve throws on type mismatch")
-    func validateAndResolveThrowsOnMismatch() throws {
-        let table = OverloadTable(selectorCanonical: "delete")
+    @Test("Duplicate signature key throws DuplicateOverloadError")
+    func duplicateRegistrationThrows() throws {
+        let table = OverloadTable(selectorCanonical: "test")
 
-        let sig = SCMethodSignature(parameters: [
-            param("id", 0, .primitive(.number)),
-        ])
-        try table.register(sig, imp: StubIMP(toolName: "delete"))
+        let sig = createSignature([param("x", 0, SCType.string())])
+        try table.register(sig, imp: MockIMP(toolName: "first"))
 
-        // .any matches number in scoring, but validateArgumentTypes will catch string != number
-        // Actually, scoreSignatureMatch will return -1 for string vs number, so resolve returns nil
-        // Let's test with excess args instead
-        let sigAny = SCMethodSignature(parameters: [
-            param("id", 0, .any),
-        ])
-        let table2 = OverloadTable(selectorCanonical: "delete2")
-        try table2.register(sigAny, imp: StubIMP(toolName: "delete2"))
-
-        // resolve finds a match via .any, but validateAndResolve should still pass since .any accepts everything
-        let result = try table2.validateAndResolve(["hello" as any Sendable])
-        #expect(result != nil)
+        #expect(throws: DuplicateOverloadError.self) {
+            try table.register(sig, imp: MockIMP(toolName: "second"))
+        }
     }
 
-    @Test("validateAndResolveNamed throws on unknown named args")
-    func validateAndResolveNamedThrowsOnUnknown() throws {
-        let table = OverloadTable(selectorCanonical: "update")
+    // MARK: - Validation (hardened path)
 
-        let sig = SCMethodSignature(parameters: [
-            param("name", 0, .primitive(.string)),
+    @Test("validateAndResolve rejects type mismatch")
+    func validateAndResolveRejects() throws {
+        let table = OverloadTable(selectorCanonical: "send")
+
+        let sig = createSignature([param("message", 0, SCType.string())])
+        try table.register(sig, imp: MockIMP(toolName: "send"))
+
+        #expect(throws: SignatureValidationError.self) {
+            _ = try table.validateAndResolve([42 as any Sendable])
+        }
+    }
+
+    @Test("validateAndResolve passes for correct types")
+    func validateAndResolveAccepts() throws {
+        let table = OverloadTable(selectorCanonical: "send")
+
+        let sig = createSignature([param("message", 0, SCType.string())])
+        try table.register(sig, imp: MockIMP(toolName: "send"))
+
+        let result = try table.validateAndResolve(["hello" as any Sendable])
+        #expect(result != nil)
+        #expect(result?.matchQuality == .exact)
+    }
+
+    // MARK: - Named argument resolution
+
+    @Test("resolveNamed maps named args to positional")
+    func resolveNamedMaps() throws {
+        let table = OverloadTable(selectorCanonical: "greet")
+
+        let sig = createSignature([
+            param("name", 0, SCType.string()),
+            param("age", 1, SCType.number()),
         ])
-        try table.register(sig, imp: StubIMP(toolName: "update"))
+        try table.register(sig, imp: MockIMP(toolName: "greet"))
+
+        let result = try table.resolveNamed(["name": "Alice" as any Sendable, "age": 30 as any Sendable])
+        #expect(result != nil)
+        #expect(result?.entry.imp.toolName == "greet")
+    }
+
+    @Test("validateAndResolveNamed rejects unknown argument names")
+    func validateAndResolveNamedRejectsUnknown() throws {
+        let table = OverloadTable(selectorCanonical: "greet")
+
+        let sig = createSignature([param("name", 0, SCType.string())])
+        try table.register(sig, imp: MockIMP(toolName: "greet"))
 
         #expect(throws: SignatureValidationError.self) {
             _ = try table.validateAndResolveNamed([
                 "name": "Alice" as any Sendable,
-                "injected": "evil" as any Sendable,
+                "injection": "payload" as any Sendable,
             ])
         }
     }
 
-    // MARK: - Duplicate Registration
+    // MARK: - Inspection
 
-    @Test("Duplicate signatureKey throws DuplicateOverloadError")
-    func duplicateThrows() throws {
-        let table = OverloadTable(selectorCanonical: "test")
-        let sig = SCMethodSignature(parameters: [
-            param("x", 0, .primitive(.string)),
-        ])
-
-        try table.register(sig, imp: StubIMP(toolName: "a"))
-        #expect(throws: DuplicateOverloadError.self) {
-            try table.register(sig, imp: StubIMP(toolName: "b"))
-        }
-    }
-
-    // MARK: - No Match
-
-    @Test("resolve returns nil when no overload matches")
-    func resolveReturnsNilOnNoMatch() throws {
-        let table = OverloadTable(selectorCanonical: "test")
-        let sig = SCMethodSignature(parameters: [
-            param("name", 0, .primitive(.string)),
-        ])
-        try table.register(sig, imp: StubIMP(toolName: "test"))
-
-        let result = try table.resolve([42 as any Sendable])
-        #expect(result == nil)
-    }
-
-    // MARK: - Queries
-
-    @Test("size and hasSignature report correctly")
-    func sizeAndHasSignature() throws {
+    @Test("allOverloads and size report correctly")
+    func inspection() throws {
         let table = OverloadTable(selectorCanonical: "test")
         #expect(table.size == 0)
 
-        let sig = SCMethodSignature(parameters: [
-            param("x", 0, .primitive(.string)),
-        ])
-        try table.register(sig, imp: StubIMP(toolName: "a"))
+        let sig = createSignature([param("x", 0, SCType.string())])
+        try table.register(sig, imp: MockIMP())
+
         #expect(table.size == 1)
-        #expect(table.hasSignature(sig.signatureKey))
-        #expect(!table.hasSignature("nonexistent"))
+        #expect(table.allOverloads().count == 1)
+        #expect(table.hasSignature("string"))
+        #expect(!table.hasSignature("number"))
     }
 
-    // MARK: - Named Resolution
+    @Test("Returns nil when no overload matches")
+    func noMatchReturnsNil() throws {
+        let table = OverloadTable(selectorCanonical: "test")
 
-    @Test("resolveNamed maps names to positions")
-    func resolveNamedMapsCorrectly() throws {
-        let table = OverloadTable(selectorCanonical: "create")
+        let sig = createSignature([param("x", 0, SCType.number())])
+        try table.register(sig, imp: MockIMP())
 
-        let sig = SCMethodSignature(parameters: [
-            param("name", 0, .primitive(.string)),
-            param("age", 1, .primitive(.number)),
-        ])
-        try table.register(sig, imp: StubIMP(toolName: "create_user"))
-
-        let result = try table.resolveNamed([
-            "age": 25 as any Sendable,
-            "name": "Bob" as any Sendable,
-        ])
-        #expect(result != nil)
-        #expect((result?.imp as? StubIMP)?.toolName == "create_user")
+        let result = try table.resolve(["not a number" as any Sendable])
+        #expect(result == nil)
     }
 }

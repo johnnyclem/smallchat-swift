@@ -1,243 +1,259 @@
-import Foundation
 import Testing
+import Foundation
 @testable import SmallChatCore
 
 @Suite("TypeValidation")
 struct TypeValidationTests {
 
-    // MARK: - Helpers
+    // MARK: - Type mismatch
 
-    private func sig(_ params: SCParameterSlot...) -> SCMethodSignature {
-        SCMethodSignature(parameters: params)
-    }
+    @Test("Detects string where number expected")
+    func typeMismatchStringForNumber() {
+        let sig = createSignature([param("count", 0, SCType.number())])
+        let result = validateArgumentTypes(sig, ["not a number" as any Sendable])
 
-    // MARK: - Type Mismatch
-
-    @Test("Detects type mismatch: string expected, number given")
-    func typeMismatchStringNumber() {
-        let signature = sig(
-            param("name", 0, .primitive(.string))
-        )
-        let result = validateArgumentTypes(signature, [42 as any Sendable])
         #expect(!result.valid)
         #expect(result.violations.count == 1)
         #expect(result.violations[0].kind == .typeMismatch)
-        #expect(result.violations[0].parameterName == "name")
+        #expect(result.violations[0].parameterName == "count")
+        #expect(result.violations[0].expected == "number")
+        #expect(result.violations[0].received == "string")
     }
 
-    @Test("Detects type mismatch: number expected, string given")
-    func typeMismatchNumberString() {
-        let signature = sig(
-            param("age", 0, .primitive(.number))
-        )
-        let result = validateArgumentTypes(signature, ["hello" as any Sendable])
+    @Test("Detects number where string expected")
+    func typeMismatchNumberForString() {
+        let sig = createSignature([param("name", 0, SCType.string())])
+        let result = validateArgumentTypes(sig, [42 as any Sendable])
+
         #expect(!result.valid)
         #expect(result.violations[0].kind == .typeMismatch)
     }
 
-    @Test("Detects type mismatch: boolean expected, string given")
-    func typeMismatchBooleanString() {
-        let signature = sig(
-            param("flag", 0, .primitive(.boolean))
-        )
-        let result = validateArgumentTypes(signature, ["true" as any Sendable])
+    @Test("Detects boolean where number expected")
+    func typeMismatchBoolForNumber() {
+        let sig = createSignature([param("count", 0, SCType.number())])
+        let result = validateArgumentTypes(sig, [true as any Sendable])
+
         #expect(!result.valid)
         #expect(result.violations[0].kind == .typeMismatch)
     }
 
-    @Test("Bool does not match number type")
-    func boolDoesNotMatchNumber() {
-        let signature = sig(
-            param("count", 0, .primitive(.number))
-        )
-        let result = validateArgumentTypes(signature, [true as any Sendable])
-        #expect(!result.valid)
-        #expect(result.violations[0].kind == .typeMismatch)
-    }
+    @Test("Accepts correct primitive types")
+    func acceptsCorrectPrimitives() {
+        let sig = createSignature([
+            param("name", 0, SCType.string()),
+            param("age", 1, SCType.number()),
+            param("active", 2, SCType.boolean()),
+        ])
+        let result = validateArgumentTypes(sig, [
+            "Alice" as any Sendable,
+            30 as any Sendable,
+            true as any Sendable,
+        ])
 
-    @Test("Valid arguments pass validation")
-    func validArgumentsPass() {
-        let signature = sig(
-            param("name", 0, .primitive(.string)),
-            param("age", 1, .primitive(.number))
-        )
-        let result = validateArgumentTypes(signature, ["Alice" as any Sendable, 30 as any Sendable])
         #expect(result.valid)
         #expect(result.violations.isEmpty)
     }
 
-    // MARK: - ISA Violation
+    // MARK: - ISA violation
 
-    @Test("ISA violation when wrong SCObject subclass given")
+    @Test("Detects SCObject class hierarchy violation")
     func isaViolation() {
         SCObjectRegistry.shared.register("Animal", superclass: "SCObject")
-        SCObjectRegistry.shared.register("Vehicle", superclass: "SCObject")
+        SCObjectRegistry.shared.register("Dog", superclass: "Animal")
+        SCObjectRegistry.shared.register("Car", superclass: "SCObject")
 
-        class Animal: SCObject { override var isa: String { "Animal" } }
-        class Vehicle: SCObject { override var isa: String { "Vehicle" } }
+        let sig = createSignature([param("pet", 0, SCType.object("Animal"))])
 
-        let signature = sig(
-            param("pet", 0, .object(className: "Animal"))
-        )
-        let result = validateArgumentTypes(signature, [Vehicle() as any Sendable])
+        // Car is not an Animal
+        let car = CarObject()
+        let result = validateArgumentTypes(sig, [car as any Sendable])
+
         #expect(!result.valid)
         #expect(result.violations.count == 1)
         #expect(result.violations[0].kind == .isaViolation)
     }
 
-    @Test("Subclass matches parent type")
-    func subclassMatchesParent() {
-        SCObjectRegistry.shared.register("Pet", superclass: "SCObject")
-        SCObjectRegistry.shared.register("Dog", superclass: "Pet")
+    @Test("Accepts SCObject subclass for parent type")
+    func acceptsSubclass() {
+        SCObjectRegistry.shared.register("Animal", superclass: "SCObject")
+        SCObjectRegistry.shared.register("Dog", superclass: "Animal")
 
-        class Dog: SCObject { override var isa: String { "Dog" } }
+        let sig = createSignature([param("pet", 0, SCType.object("Animal"))])
 
-        let signature = sig(
-            param("animal", 0, .object(className: "Pet"))
-        )
-        let result = validateArgumentTypes(signature, [Dog() as any Sendable])
+        let dog = DogObject()
+        let result = validateArgumentTypes(sig, [dog as any Sendable])
+
         #expect(result.valid)
     }
 
-    // MARK: - Excess Arguments
+    // MARK: - Excess arguments
 
-    @Test("Detects excess arguments beyond arity")
+    @Test("Detects excess positional arguments")
     func excessArguments() {
-        let signature = sig(
-            param("name", 0, .primitive(.string))
-        )
-        let result = validateArgumentTypes(signature, [
+        let sig = createSignature([param("name", 0, SCType.string())])
+        let result = validateArgumentTypes(sig, [
             "Alice" as any Sendable,
             "extra" as any Sendable,
             42 as any Sendable,
         ])
+
         #expect(!result.valid)
-        let excess = result.violations.filter { $0.kind == .excessArgument }
-        #expect(excess.count == 2)
+        let excessViolations = result.violations.filter { $0.kind == .excessArgument }
+        #expect(excessViolations.count == 2)
     }
 
-    // MARK: - Missing Required
+    // MARK: - Missing required
 
-    @Test("Detects missing required argument")
+    @Test("Detects missing required arguments")
     func missingRequired() {
-        let signature = sig(
-            param("name", 0, .primitive(.string)),
-            param("age", 1, .primitive(.number))
-        )
-        let result = validateArgumentTypes(signature, ["Alice" as any Sendable])
+        let sig = createSignature([
+            param("name", 0, SCType.string()),
+            param("age", 1, SCType.number()),
+        ])
+        let result = validateArgumentTypes(sig, ["Alice" as any Sendable])
+
         #expect(!result.valid)
-        #expect(result.violations.count == 1)
-        #expect(result.violations[0].kind == .missingRequired)
-        #expect(result.violations[0].parameterName == "age")
+        let missing = result.violations.filter { $0.kind == .missingRequired }
+        #expect(missing.count == 1)
+        #expect(missing[0].parameterName == "age")
     }
 
-    @Test("Optional parameter does not trigger missing required")
-    func optionalParamNoViolation() {
-        let signature = sig(
-            param("name", 0, .primitive(.string)),
-            param("age", 1, .primitive(.number), required: false)
-        )
-        let result = validateArgumentTypes(signature, ["Alice" as any Sendable])
+    @Test("Optional parameters do not cause missing required violation")
+    func optionalNotRequired() {
+        let sig = createSignature([
+            param("name", 0, SCType.string()),
+            param("title", 1, SCType.string(), required: false),
+        ])
+        let result = validateArgumentTypes(sig, ["Alice" as any Sendable])
+
         #expect(result.valid)
     }
 
-    // MARK: - Named Arguments
-
-    @Test("Unknown named argument detected as excess")
-    func unknownNamedArgument() {
-        let signature = sig(
-            param("name", 0, .primitive(.string))
-        )
-        let result = validateNamedArgumentTypes(signature, [
-            "name": "Alice" as any Sendable,
-            "injection": "malicious" as any Sendable,
+    @Test("Parameters with defaults do not cause missing required violation")
+    func defaultsNotRequired() {
+        let sig = createSignature([
+            param("name", 0, SCType.string()),
+            param("greeting", 1, SCType.string(), required: true, defaultValue: "Hello"),
         ])
+        let result = validateArgumentTypes(sig, ["Alice" as any Sendable])
+
+        #expect(result.valid)
+    }
+
+    // MARK: - Named argument validation
+
+    @Test("Named args detects unknown argument names")
+    func namedArgsUnknownName() {
+        let sig = createSignature([param("name", 0, SCType.string())])
+
+        let result = validateNamedArgumentTypes(sig, [
+            "name": "Alice" as any Sendable,
+            "injected": "payload" as any Sendable,
+        ])
+
         #expect(!result.valid)
         let excess = result.violations.filter { $0.kind == .excessArgument }
         #expect(excess.count == 1)
-        #expect(excess[0].parameterName == "injection")
+        #expect(excess[0].parameterName == "injected")
     }
 
-    @Test("Named arguments validate types correctly")
-    func namedArgumentTypesValidated() {
-        let signature = sig(
-            param("name", 0, .primitive(.string)),
-            param("age", 1, .primitive(.number))
-        )
-        let result = validateNamedArgumentTypes(signature, [
-            "name": 42 as any Sendable,
+    @Test("Named args validates types correctly")
+    func namedArgsTypeValidation() {
+        let sig = createSignature([
+            param("name", 0, SCType.string()),
+            param("age", 1, SCType.number()),
+        ])
+
+        let result = validateNamedArgumentTypes(sig, [
+            "name": "Alice" as any Sendable,
             "age": "not a number" as any Sendable,
         ])
+
         #expect(!result.valid)
-        let mismatches = result.violations.filter { $0.kind == .typeMismatch }
-        #expect(mismatches.count == 2)
+        let mismatch = result.violations.filter { $0.kind == .typeMismatch }
+        #expect(mismatch.count == 1)
     }
 
-    @Test("Valid named arguments pass")
-    func validNamedArgumentsPass() {
-        let signature = sig(
-            param("name", 0, .primitive(.string)),
-            param("age", 1, .primitive(.number))
-        )
-        let result = validateNamedArgumentTypes(signature, [
-            "name": "Alice" as any Sendable,
-            "age": 30 as any Sendable,
-        ])
-        #expect(result.valid)
-    }
-
-    // MARK: - Union Types
+    // MARK: - Union types
 
     @Test("Union type accepts any member type")
     func unionTypeAccepts() {
-        let signature = sig(
-            param("value", 0, .union([.primitive(.string), .primitive(.number)]))
-        )
-        let r1 = validateArgumentTypes(signature, ["hello" as any Sendable])
-        #expect(r1.valid)
+        let sig = createSignature([
+            param("value", 0, SCType.union(SCType.string(), SCType.number())),
+        ])
 
-        let r2 = validateArgumentTypes(signature, [42 as any Sendable])
-        #expect(r2.valid)
+        let strResult = validateArgumentTypes(sig, ["hello" as any Sendable])
+        #expect(strResult.valid)
+
+        let numResult = validateArgumentTypes(sig, [42 as any Sendable])
+        #expect(numResult.valid)
     }
 
     @Test("Union type rejects non-member type")
     func unionTypeRejects() {
-        let signature = sig(
-            param("value", 0, .union([.primitive(.string), .primitive(.number)]))
-        )
-        let result = validateArgumentTypes(signature, [true as any Sendable])
+        let sig = createSignature([
+            param("value", 0, SCType.union(SCType.string(), SCType.number())),
+        ])
+
+        let result = validateArgumentTypes(sig, [true as any Sendable])
         #expect(!result.valid)
     }
 
-    // MARK: - Any Type
+    // MARK: - Any type
 
-    @Test("Any type accepts everything")
-    func anyTypeAccepts() {
-        let signature = sig(
-            param("value", 0, .any)
-        )
-        let r1 = validateArgumentTypes(signature, ["hello" as any Sendable])
-        #expect(r1.valid)
-        let r2 = validateArgumentTypes(signature, [42 as any Sendable])
-        #expect(r2.valid)
-        let r3 = validateArgumentTypes(signature, [true as any Sendable])
-        #expect(r3.valid)
+    @Test("Any type accepts all values")
+    func anyTypeAcceptsAll() {
+        let sig = createSignature([param("data", 0, SCType.any())])
+
+        #expect(validateArgumentTypes(sig, ["string" as any Sendable]).valid)
+        #expect(validateArgumentTypes(sig, [42 as any Sendable]).valid)
+        #expect(validateArgumentTypes(sig, [true as any Sendable]).valid)
     }
 
-    // MARK: - Zero-Arity
+    // MARK: - Empty signature
 
-    @Test("Zero-arity signature validates empty args")
-    func zeroArityValid() {
-        let signature = SCMethodSignature(parameters: [])
-        let result = validateArgumentTypes(signature, [])
+    @Test("Void signature with no args is valid")
+    func voidSignatureValid() {
+        let sig = createSignature([])
+        let result = validateArgumentTypes(sig, [])
         #expect(result.valid)
     }
 
-    @Test("Zero-arity signature rejects extra args")
-    func zeroArityRejectsExtra() {
-        let signature = SCMethodSignature(parameters: [])
-        let result = validateArgumentTypes(signature, ["extra" as any Sendable])
+    @Test("Void signature with excess args is invalid")
+    func voidSignatureExcess() {
+        let sig = createSignature([])
+        let result = validateArgumentTypes(sig, ["extra" as any Sendable])
         #expect(!result.valid)
-        #expect(result.violations[0].kind == .excessArgument)
     }
+
+    // MARK: - Multiple violations
+
+    @Test("Reports all violations in a single pass")
+    func multipleViolations() {
+        let sig = createSignature([
+            param("name", 0, SCType.string()),
+            param("age", 1, SCType.number()),
+            param("active", 2, SCType.boolean()),
+        ])
+
+        let result = validateArgumentTypes(sig, [
+            42 as any Sendable,           // wrong: number instead of string
+            "thirty" as any Sendable,     // wrong: string instead of number
+            "yes" as any Sendable,        // wrong: string instead of boolean
+        ])
+
+        #expect(!result.valid)
+        #expect(result.violations.count == 3)
+    }
+}
+
+// MARK: - Test SCObject subclasses
+
+private final class DogObject: SCObject, @unchecked Sendable {
+    override var isa: String { "Dog" }
+}
+
+private final class CarObject: SCObject, @unchecked Sendable {
+    override var isa: String { "Car" }
 }

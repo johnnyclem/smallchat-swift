@@ -256,7 +256,8 @@ public actor MCPStdioTransport: Transport {
             process.terminate()
 
             // Give it a moment, then force kill
-            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { [weak process] in
+            Task { [weak process] in
+                try? await Task.sleep(for: .seconds(3))
                 if let process, process.isRunning {
                     process.terminate()
                 }

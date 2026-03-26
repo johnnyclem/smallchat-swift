@@ -22,12 +22,16 @@ public enum AnyCodableValue: Sendable, Codable, Equatable, Hashable {
             self = .bool(b)
             return
         }
-        if let i = try? container.decode(Int.self) {
-            self = .int(i)
-            return
-        }
         if let d = try? container.decode(Double.self) {
-            self = .double(d)
+            // Prefer .int when the JSON number has no fractional part and fits
+            // in Int, so that plain integers like 42 or 1 decode as .int.
+            // Values like 1.5 or numbers outside Int range stay as .double.
+            let isInteger = d.truncatingRemainder(dividingBy: 1) == 0
+            if isInteger, let i = try? container.decode(Int.self) {
+                self = .int(i)
+            } else {
+                self = .double(d)
+            }
             return
         }
         if let s = try? container.decode(String.self) {
@@ -65,11 +69,16 @@ public enum AnyCodableValue: Sendable, Codable, Equatable, Hashable {
 
 // MARK: - Box (indirect wrapper for recursive Codable struct)
 
+@dynamicMemberLookup
 public final class Box<T: Sendable & Codable & Equatable>: Sendable, Codable, Equatable {
     public let value: T
 
     public init(_ value: T) {
         self.value = value
+    }
+
+    public subscript<U>(dynamicMember keyPath: KeyPath<T, U>) -> U {
+        value[keyPath: keyPath]
     }
 
     public static func == (lhs: Box<T>, rhs: Box<T>) -> Bool {

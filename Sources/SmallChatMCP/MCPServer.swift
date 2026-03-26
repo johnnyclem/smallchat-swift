@@ -27,6 +27,8 @@ public struct MCPServerConfig: Sendable {
     public let enableAudit: Bool
     /// Session TTL in milliseconds.
     public let sessionTTLMs: Int
+    /// Allowed CORS origin for Access-Control-Allow-Origin header.
+    public let corsOrigin: String
 
     public init(
         port: Int = 3000,
@@ -37,7 +39,8 @@ public struct MCPServerConfig: Sendable {
         enableRateLimit: Bool = false,
         rateLimitRPM: Int = 600,
         enableAudit: Bool = false,
-        sessionTTLMs: Int = 86_400_000
+        sessionTTLMs: Int = 86_400_000,
+        corsOrigin: String = "http://127.0.0.1"
     ) {
         self.port = port
         self.host = host
@@ -48,6 +51,7 @@ public struct MCPServerConfig: Sendable {
         self.rateLimitRPM = rateLimitRPM
         self.enableAudit = enableAudit
         self.sessionTTLMs = sessionTTLMs
+        self.corsOrigin = corsOrigin
     }
 }
 
@@ -136,7 +140,7 @@ public actor MCPServer {
             .serverChannelOption(reuseAddrOpt, value: 1)
             .childChannelInitializer { channel in
                 channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(MCPHTTPHandler(server: self))
+                    channel.pipeline.addHandler(MCPHTTPHandler(server: self, corsOrigin: self.config.corsOrigin))
                 }
             }
             .childChannelOption(reuseAddrOpt, value: 1)
@@ -292,13 +296,15 @@ private final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias OutboundOut = HTTPServerResponsePart
 
     private let server: MCPServer
+    private let corsOrigin: String
     private var requestMethod: HTTPMethod = .GET
     private var requestURI: String = "/"
     private var requestHeaders: HTTPHeaders = HTTPHeaders()
     private var bodyBuffer: ByteBuffer = ByteBuffer()
 
-    init(server: MCPServer) {
+    init(server: MCPServer, corsOrigin: String) {
         self.server = server
+        self.corsOrigin = corsOrigin
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -346,7 +352,7 @@ private final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     ) async {
         // CORS headers
         var responseHeaders = HTTPHeaders()
-        responseHeaders.add(name: "Access-Control-Allow-Origin", value: "*")
+        responseHeaders.add(name: "Access-Control-Allow-Origin", value: corsOrigin)
         responseHeaders.add(name: "Access-Control-Allow-Methods", value: "POST, GET, OPTIONS")
         responseHeaders.add(name: "Access-Control-Allow-Headers", value: "Content-Type, Accept, Authorization, Mcp-Session-Id")
         responseHeaders.add(name: "Access-Control-Expose-Headers", value: "Mcp-Session-Id")
