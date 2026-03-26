@@ -53,9 +53,13 @@ struct ChannelCommand: AsyncParsableCommand {
 
         // Keep running until signal
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            signal(SIGINT) { _ in
+            signal(SIGINT, SIG_IGN)
+            let sigSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+            sigSource.setEventHandler {
+                sigSource.cancel()
                 continuation.resume()
             }
+            sigSource.resume()
         }
     }
 }
