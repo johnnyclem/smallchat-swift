@@ -64,6 +64,8 @@ public actor SemanticRateLimiter {
     private var window: [WindowEntry] = []
     private var pairwiseSimilaritySum: Float = 0
     private var pairwiseCount: Int = 0
+    private var evictionsSinceRecompute: Int = 0
+    private let recomputeInterval: Int = 100
 
     public init(options: SemanticRateLimiterOptions = .init()) {
         self.options = options
@@ -162,6 +164,7 @@ public actor SemanticRateLimiter {
         window = []
         pairwiseSimilaritySum = 0
         pairwiseCount = 0
+        evictionsSinceRecompute = 0
     }
 
     /// Internal check for getMetrics to avoid side effects from check(_:) which calls evictStale.
@@ -187,8 +190,10 @@ public actor SemanticRateLimiter {
     private func evictStale() {
         let cutoff = Date().addingTimeInterval(-Double(options.windowMs) / 1000.0)
 
+        var evictedAny = false
         while !window.isEmpty && window[0].timestamp < cutoff {
             let removed = window.removeFirst()
+            evictedAny = true
 
             // Subtract pairwise similarities involving the evicted entry
             for remaining in window {
@@ -196,6 +201,26 @@ public actor SemanticRateLimiter {
                 pairwiseSimilaritySum -= sim
                 pairwiseCount -= 1
             }
+
+            evictionsSinceRecompute += 1
         }
+
+        // Periodically recompute from scratch to correct floating-point drift
+        if evictedAny && evictionsSinceRecompute >= recomputeInterval {
+            recomputePairwiseSimilarity()
+        }
+    }
+
+    /// Recompute pairwiseSimilaritySum and pairwiseCount from scratch.
+    private func recomputePairwiseSimilarity() {
+        pairwiseSimilaritySum = 0
+        pairwiseCount = 0
+        for i in 0..<window.count {
+            for j in (i + 1)..<window.count {
+                pairwiseSimilaritySum += cosineSimilarity(window[i].vector, window[j].vector)
+                pairwiseCount += 1
+            }
+        }
+        evictionsSinceRecompute = 0
     }
 }
