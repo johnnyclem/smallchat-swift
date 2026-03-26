@@ -37,6 +37,23 @@ struct ServeCommand: AsyncParsableCommand {
 
     func run() async throws {
         print("Loading toolkit from \(source)...")
+
+        let sessionTTLMs = Int(sessionTtl * 3_600_000)
+
+        let config = MCPServerConfig(
+            port: port,
+            host: host,
+            sourcePath: source,
+            dbPath: dbPath,
+            enableAuth: auth,
+            enableRateLimit: rateLimit,
+            rateLimitRPM: rateLimitRpm,
+            enableAudit: audit,
+            sessionTTLMs: sessionTTLMs
+        )
+
+        let server = try MCPServer(config: config)
+
         print("Starting smallchat MCP server on \(host):\(port)")
         print("  Auth: \(auth ? "enabled" : "disabled")")
         print("  Rate limiting: \(rateLimit ? "enabled (\(rateLimitRpm) rpm)" : "disabled")")
@@ -44,14 +61,15 @@ struct ServeCommand: AsyncParsableCommand {
         print("  Session TTL: \(sessionTtl)h")
         print("  Database: \(dbPath)")
 
-        // Server lifecycle
+        try await server.start()
+
         print("\nServer running. Press Ctrl+C to stop.")
         print("  Discovery: http://\(host):\(port)/.well-known/mcp.json")
         print("  JSON-RPC:  http://\(host):\(port)/")
         print("  SSE:       http://\(host):\(port)/sse")
         print("  Health:    http://\(host):\(port)/health")
 
-        // Keep running until signal
+        // Keep running until signal, then shut down gracefully
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             signal(SIGINT, SIG_IGN)
             let sigSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
@@ -62,5 +80,7 @@ struct ServeCommand: AsyncParsableCommand {
             }
             sigSource.resume()
         }
+
+        try await server.stop()
     }
 }
