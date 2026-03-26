@@ -44,6 +44,26 @@ struct ChannelCommand: AsyncParsableCommand {
             ))
         }
 
+        let parsedAllowlist = senderAllowlist?
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        let config = ChannelServerConfig(
+            channelName: name,
+            twoWay: twoWay,
+            replyToolName: replyTool,
+            permissionRelay: permissionRelay,
+            instructions: instructions,
+            httpBridge: httpBridge,
+            httpBridgePort: httpBridgePort,
+            httpBridgeHost: httpBridgeHost,
+            senderAllowlist: parsedAllowlist
+        )
+
+        let server = ChannelServer(config: config)
+        await server.start()
+
         FileHandle.standardError.write(Data(
             ("[channel] \(name) channel server started (stdio)\n" +
              "  Two-way: \(twoWay ? "yes" : "no")\n" +
@@ -51,11 +71,61 @@ struct ChannelCommand: AsyncParsableCommand {
              "  HTTP bridge: \(httpBridge ? "http://\(httpBridgeHost):\(httpBridgePort)" : "disabled")\n").utf8
         ))
 
-        // Keep running until signal
+        // Forward outbound messages to stdout
+        let outboundTask = Task {
+            for await message in await server.outboundMessages {
+                print(message)
+                fflush(stdout)
+            }
+        }
+
+        // Log server events to stderr
+        let eventsTask = Task {
+            for await event in await server.events {
+                switch event {
+                case .reply(let channel, let message, let timestamp):
+                    FileHandle.standardError.write(Data(
+                        "[channel] [\(timestamp)] reply on \(channel): \(message)\n".utf8
+                    ))
+                case .permissionRequestReceived(let request):
+                    FileHandle.standardError.write(Data(
+                        "[channel] permission request \(request.requestId): \(request.description)\n".utf8
+                    ))
+                case .permissionVerdictSent(let verdict):
+                    FileHandle.standardError.write(Data(
+                        "[channel] permission verdict \(verdict.requestId): \(verdict.behavior.rawValue)\n".utf8
+                    ))
+                case .senderRejected(let sender):
+                    FileHandle.standardError.write(Data(
+                        "[channel] sender rejected: \(sender ?? "unknown")\n".utf8
+                    ))
+                case .payloadTooLarge(let size, let limit):
+                    FileHandle.standardError.write(Data(
+                        "[channel] payload too large: \(size) bytes (limit: \(limit))\n".utf8
+                    ))
+                default:
+                    break
+                }
+            }
+        }
+
+        // Read stdin lines and feed them to the server
+        let stdinTask = Task {
+            while let line = readLine(strippingNewline: false) {
+                await server.handleLine(line)
+            }
+        }
+
+        // Wait for stdin EOF or SIGINT
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             signal(SIGINT) { _ in
                 continuation.resume()
             }
         }
+
+        stdinTask.cancel()
+        outboundTask.cancel()
+        eventsTask.cancel()
+        await server.shutdown()
     }
 }
