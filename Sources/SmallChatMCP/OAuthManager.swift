@@ -1,5 +1,6 @@
 // MARK: - OAuthManager — OAuth 2.1 flow management
 
+import CryptoKit
 import Foundation
 
 // MARK: - Token Types
@@ -183,10 +184,11 @@ public actor OAuthManager {
         return client
     }
 
-    /// Authenticate a client with credentials.
+    /// Authenticate a client with credentials using constant-time comparison.
     public func authenticateClient(clientId: String, clientSecret: String) -> OAuthClient? {
         guard let client = clients[clientId], client.active else { return nil }
-        guard client.clientSecretHash == hashSecret(clientSecret) else { return nil }
+        let providedHash = hashSecret(clientSecret)
+        guard constantTimeEqual(client.clientSecretHash, providedHash) else { return nil }
         return client
     }
 
@@ -354,35 +356,24 @@ public actor OAuthManager {
 // MARK: - Helpers
 
 private func generateToken() -> String {
-    // SHA-256 hash of a UUID for a cryptographically random-looking token
-    let uuid = UUID().uuidString
-    guard let data = uuid.data(using: .utf8) else { return uuid }
-    // Simple hash using built-in facilities
-    var hash = [UInt8](repeating: 0, count: 32)
-    data.withUnsafeBytes { buffer in
-        let bytes = buffer.bindMemory(to: UInt8.self)
-        for i in 0..<min(bytes.count, 32) {
-            hash[i] = bytes[i]
-        }
-        // XOR fold for additional mixing
-        for i in 32..<bytes.count {
-            hash[i % 32] ^= bytes[i]
-        }
-    }
-    return hash.map { String(format: "%02x", $0) }.joined()
+    var bytes = [UInt8](repeating: 0, count: 32)
+    _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+    return Data(bytes).map { String(format: "%02x", $0) }.joined()
 }
 
 private func hashSecret(_ secret: String) -> String {
-    guard let data = secret.data(using: .utf8) else { return secret }
-    var hash = [UInt8](repeating: 0, count: 32)
-    data.withUnsafeBytes { buffer in
-        let bytes = buffer.bindMemory(to: UInt8.self)
-        for i in 0..<min(bytes.count, 32) {
-            hash[i] = bytes[i]
-        }
-        for i in 32..<bytes.count {
-            hash[i % 32] ^= bytes[i]
-        }
+    let digest = SHA256.hash(data: Data(secret.utf8))
+    return digest.map { String(format: "%02x", $0) }.joined()
+}
+
+/// Constant-time string comparison to prevent timing attacks.
+private func constantTimeEqual(_ a: String, _ b: String) -> Bool {
+    let aBytes = Array(a.utf8)
+    let bBytes = Array(b.utf8)
+    guard aBytes.count == bBytes.count else { return false }
+    var result: UInt8 = 0
+    for i in 0..<aBytes.count {
+        result |= aBytes[i] ^ bBytes[i]
     }
-    return hash.map { String(format: "%02x", $0) }.joined()
+    return result == 0
 }
