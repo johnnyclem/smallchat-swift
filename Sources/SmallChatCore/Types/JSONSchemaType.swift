@@ -65,11 +65,16 @@ public enum AnyCodableValue: Sendable, Codable, Equatable, Hashable {
 
 // MARK: - Box (indirect wrapper for recursive Codable struct)
 
+@dynamicMemberLookup
 public final class Box<T: Sendable & Codable & Equatable>: Sendable, Codable, Equatable {
     public let value: T
 
     public init(_ value: T) {
         self.value = value
+    }
+
+    public subscript<U>(dynamicMember keyPath: KeyPath<T, U>) -> U {
+        value[keyPath: keyPath]
     }
 
     public static func == (lhs: Box<T>, rhs: Box<T>) -> Bool {
