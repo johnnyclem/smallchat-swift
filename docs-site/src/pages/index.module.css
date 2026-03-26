@@ -1,0 +1,44 @@
+.heroBanner {
+  padding: 4rem 0;
+  text-align: left;
+  position: relative;
+  overflow: hidden;
+}
+
+.buttons {
+  display: flex;
+  align-items: center;
+  margin-top: 1.5rem;
+}
+
+.codePreview {
+  margin-top: 2.5rem;
+  max-width: 600px;
+}
+
+.codePreview pre {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 1.5rem;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: #e0e0e0;
+  backdrop-filter: blur(10px);
+}
+
+.features {
+  padding: 3rem 0;
+}
+
+.quickInstall {
+  padding: 3rem 0;
+  background: var(--ifm-background-surface-color);
+}
+
+.quickInstall pre {
+  max-width: 600px;
+  border-radius: 8px;
+  padding: 1.5rem;
+  font-size: 0.9rem;
+}
