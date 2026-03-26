@@ -1,31 +1,35 @@
+import Foundation
+
 public final class SCArray: SCObject, @unchecked Sendable {
     private static let registered: Bool = {
         SCObjectRegistry.shared.register("SCArray", superclass: "SCObject")
         return true
     }()
 
-    private var items: [SCObject]
+    private let storage: OSAllocatedUnfairLock<[SCObject]>
 
     override public var isa: String { "SCArray" }
 
     public init(items: [SCObject] = []) {
-        self.items = items
+        self.storage = OSAllocatedUnfairLock(initialState: items)
         super.init()
         _ = Self.registered
     }
 
-    public var count: Int { items.count }
+    public var count: Int { storage.withLock { $0.count } }
 
     public func objectAtIndex(_ index: Int) -> SCObject? {
-        items.indices.contains(index) ? items[index] : nil
+        storage.withLock { items in
+            items.indices.contains(index) ? items[index] : nil
+        }
     }
 
     public func addObject(_ obj: SCObject) {
-        items.append(obj)
+        storage.withLock { $0.append(obj) }
     }
 
     public func allObjects() -> [SCObject] {
-        items
+        storage.withLock { $0 }
     }
 
     override public var description: String {
@@ -33,6 +37,8 @@ public final class SCArray: SCObject, @unchecked Sendable {
     }
 
     override public func unwrap() -> any Sendable {
-        items.map { $0.unwrap() } as [any Sendable]
+        storage.withLock { items in
+            items.map { $0.unwrap() } as [any Sendable]
+        }
     }
 }
