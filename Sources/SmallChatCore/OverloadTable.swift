@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// An entry in the overload table
 public struct OverloadEntry: @unchecked Sendable {
@@ -48,9 +49,12 @@ public struct OverloadResolutionResult: @unchecked Sendable {
 ///   - Exact type match > superclass match > union match > any (id)
 ///   - Higher arity match preferred when scores are equal
 ///   - Ambiguous matches (equal score, same arity) reported as errors
+///
+/// All mutable state is protected by an `OSAllocatedUnfairLock` to prevent
+/// data races when accessed concurrently.
 public final class OverloadTable: @unchecked Sendable {
     public let selectorCanonical: String
-    private var entries: [OverloadEntry] = []
+    private let lock = OSAllocatedUnfairLock(initialState: [OverloadEntry]())
 
     public init(selectorCanonical: String) {
         self.selectorCanonical = selectorCanonical
@@ -64,20 +68,22 @@ public final class OverloadTable: @unchecked Sendable {
         originalToolName: String? = nil,
         isSemanticOverload: Bool = false
     ) throws {
-        let existing = entries.first { $0.signature.signatureKey == signature.signatureKey }
-        if existing != nil {
-            throw DuplicateOverloadError(
-                selector: selectorCanonical,
-                signatureKey: signature.signatureKey
-            )
-        }
+        try lock.withLock { entries in
+            let existing = entries.first { $0.signature.signatureKey == signature.signatureKey }
+            if existing != nil {
+                throw DuplicateOverloadError(
+                    selector: selectorCanonical,
+                    signatureKey: signature.signatureKey
+                )
+            }
 
-        entries.append(OverloadEntry(
-            signature: signature,
-            imp: imp,
-            originalToolName: originalToolName,
-            isSemanticOverload: isSemanticOverload
-        ))
+            entries.append(OverloadEntry(
+                signature: signature,
+                imp: imp,
+                originalToolName: originalToolName,
+                isSemanticOverload: isSemanticOverload
+            ))
+        }
     }
 
     /// Resolve the best matching overload for positional args.
@@ -85,6 +91,8 @@ public final class OverloadTable: @unchecked Sendable {
     /// Arguments are passed as a positional array. Named arguments
     /// should be converted to positional form before calling this method.
     public func resolve(_ args: [any Sendable]) throws -> OverloadResolutionResult? {
+        let entries = lock.withLock { Array($0) }
+
         var bestScore = -1
         var bestEntries: [OverloadEntry] = []
 
@@ -143,6 +151,8 @@ public final class OverloadTable: @unchecked Sendable {
             let positional = namedToPositional(namedArgs, signature: signature)
             return try resolve(positional)
         }
+
+        let entries = lock.withLock { Array($0) }
 
         // Try all overloads with name-to-position mapping
         var bestResult: OverloadResolutionResult? = nil
@@ -226,17 +236,19 @@ public final class OverloadTable: @unchecked Sendable {
 
     /// Get all registered overloads
     public func allOverloads() -> [OverloadEntry] {
-        entries
+        lock.withLock { Array($0) }
     }
 
     /// Number of registered overloads
     public var size: Int {
-        entries.count
+        lock.withLock { $0.count }
     }
 
     /// Check if a specific signature is registered
     public func hasSignature(_ key: String) -> Bool {
-        entries.contains { $0.signature.signatureKey == key }
+        lock.withLock { entries in
+            entries.contains { $0.signature.signatureKey == key }
+        }
     }
 
     // MARK: - Private
