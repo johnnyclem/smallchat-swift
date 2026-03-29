@@ -38,6 +38,7 @@ struct SmallChatCLI: AsyncParsableCommand {
             DocsCommand.self,
             DoctorCommand.self,
             SetupCommand.self,
+            DreamCommand.self,
         ]
     )
 }
