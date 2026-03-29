@@ -6,3 +6,4 @@
 @_exported import SmallChatTransport
 @_exported import SmallChatMCP
 @_exported import SmallChatChannel
+@_exported import SmallChatDream

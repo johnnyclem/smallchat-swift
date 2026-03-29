@@ -12,6 +12,7 @@ let package = Package(
         .library(name: "SmallChatTransport", targets: ["SmallChatTransport"]),
         .library(name: "SmallChatMCP", targets: ["SmallChatMCP"]),
         .library(name: "SmallChatChannel", targets: ["SmallChatChannel"]),
+        .library(name: "SmallChatDream", targets: ["SmallChatDream"]),
         .library(name: "SmallChat", targets: ["SmallChat"]),
         .executable(name: "smallchat", targets: ["SmallChatCLI"]),
     ],
@@ -70,6 +71,11 @@ let package = Package(
             name: "SmallChatChannel",
             dependencies: ["SmallChatCore", "SmallChatMCP"]
         ),
+        // ---- Dream ----
+        .target(
+            name: "SmallChatDream",
+            dependencies: ["SmallChatCore", "SmallChatCompiler", "SmallChatEmbedding"]
+        ),
         // ---- Umbrella ----
         .target(
             name: "SmallChat",
@@ -81,6 +87,7 @@ let package = Package(
                 "SmallChatTransport",
                 "SmallChatMCP",
                 "SmallChatChannel",
+                "SmallChatDream",
             ]
         ),
         // ---- CLI ----
@@ -99,5 +106,6 @@ let package = Package(
         .testTarget(name: "SmallChatTransportTests", dependencies: ["SmallChatTransport"]),
         .testTarget(name: "SmallChatMCPTests", dependencies: ["SmallChatMCP", "SmallChatEmbedding"]),
         .testTarget(name: "SmallChatChannelTests", dependencies: ["SmallChatChannel"]),
+        .testTarget(name: "SmallChatDreamTests", dependencies: ["SmallChatDream"]),
     ]
 )
