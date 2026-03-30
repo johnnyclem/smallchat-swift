@@ -163,7 +163,7 @@ The compiled artifact is a JSON file containing:
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "0.3.0",
   "compiled_at": "2025-01-15T10:30:00Z",
   "providers": [...],
   "selectors": {

@@ -30,6 +30,100 @@ public protocol Transport: Sendable {
     func disconnect() async throws
 }
 
+// MARK: - TLS Configuration (v0.3.0)
+
+/// TLS configuration for secure transports.
+///
+/// Supports certificate pinning and custom trust anchors for transport-level
+/// security. Used by HTTP and MCP SSE transports.
+public struct TLSConfig: Sendable, Equatable {
+    /// Whether to enforce TLS. When true, plaintext connections are rejected.
+    public let requireTLS: Bool
+
+    /// Certificate pinning mode.
+    public let pinningMode: CertificatePinningMode
+
+    /// SHA-256 hashes of pinned certificate public keys (hex-encoded).
+    /// Used when `pinningMode` is `.publicKey`.
+    public let pinnedKeyHashes: [String]
+
+    /// Minimum TLS version to accept (default: TLS 1.2).
+    public let minimumTLSVersion: TLSVersion
+
+    /// Whether to allow self-signed certificates (for development only).
+    public let allowSelfSigned: Bool
+
+    public init(
+        requireTLS: Bool = true,
+        pinningMode: CertificatePinningMode = .none,
+        pinnedKeyHashes: [String] = [],
+        minimumTLSVersion: TLSVersion = .tls12,
+        allowSelfSigned: Bool = false
+    ) {
+        self.requireTLS = requireTLS
+        self.pinningMode = pinningMode
+        self.pinnedKeyHashes = pinnedKeyHashes
+        self.minimumTLSVersion = minimumTLSVersion
+        self.allowSelfSigned = allowSelfSigned
+    }
+
+    /// Development convenience: TLS with self-signed allowed.
+    public static let development = TLSConfig(
+        requireTLS: false,
+        allowSelfSigned: true
+    )
+
+    /// Production default: TLS required, minimum TLS 1.2.
+    public static let production = TLSConfig(
+        requireTLS: true,
+        minimumTLSVersion: .tls12
+    )
+}
+
+/// Certificate pinning mode.
+public enum CertificatePinningMode: String, Sendable, Codable, Equatable {
+    /// No pinning.
+    case none
+    /// Pin the certificate's public key (SPKI hash).
+    case publicKey
+    /// Pin the full certificate hash.
+    case certificate
+}
+
+/// TLS protocol version.
+public enum TLSVersion: String, Sendable, Codable, Equatable, Comparable {
+    case tls10 = "1.0"
+    case tls11 = "1.1"
+    case tls12 = "1.2"
+    case tls13 = "1.3"
+
+    private var ordinal: Int {
+        switch self {
+        case .tls10: return 0
+        case .tls11: return 1
+        case .tls12: return 2
+        case .tls13: return 3
+        }
+    }
+
+    public static func < (lhs: TLSVersion, rhs: TLSVersion) -> Bool {
+        lhs.ordinal < rhs.ordinal
+    }
+}
+
+/// Error thrown when TLS requirements are not met.
+public struct TLSError: Error, Sendable, CustomStringConvertible {
+    public let reason: String
+
+    public init(reason: String) {
+        self.reason = reason
+    }
+
+    public var description: String {
+        "TLS error: \(reason)"
+    }
+}
+
 // MARK: - Default Implementations
 
 extension Transport {

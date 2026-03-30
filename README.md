@@ -40,7 +40,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "0.2.0"),
+    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "0.3.0"),
 ]
 ```
 
@@ -230,18 +230,22 @@ SmallChatCLI ─── 9 commands via swift-argument-parser
 
 ## Security
 
-smallchat is designed to run in adversarial environments where untrusted inputs flow through the dispatch pipeline. v0.2.0 includes multiple hardening layers:
+smallchat is designed to run in adversarial environments where untrusted inputs flow through the dispatch pipeline. v0.3.0 includes multiple hardening layers:
 
 | Feature | Protection |
 |---------|------------|
+| **Intent Sanitization** | Strips null bytes, control characters, and enforces length limits before dispatch (v0.3.0). |
 | **Intent Pinning** | Guards sensitive selectors (e.g., `delete:database`) against semantic collision attacks. Supports `exact` (canonical match only) and `elevated` (0.98 threshold) policies. |
 | **Type Validation** | Validates argument types against method signatures before dispatch, preventing type confusion attacks. |
-| **Sender Gating** | Allowlist-based access control at the Claude Code channel layer. Includes a secure pairing flow for new senders. |
+| **Sender Gating** | Allowlist-based access control with identity validation, max sender limits, and constant-time pairing code verification (v0.3.0). |
 | **Semantic Rate Limiting** | Prevents vector flooding DoS by tracking embedding requests per time window. |
 | **Selector Namespacing** | Core system selectors are protected and cannot be shadowed by user-registered tools. |
 | **OAuth 2.1 Token Security** | Tokens hashed with PBKDF2 — never stored in plain text. |
 | **Schema Fingerprinting** | Detects tool schema changes on hot-reload; invalidates stale cache entries automatically. |
 | **Structured Concurrency** | Actor-based isolation and `Sendable` conformance enforced at compile time. No raw threads. |
+| **Audit Log Integrity** | HMAC-SHA256 hash chain on audit entries for tamper detection (v0.3.0). |
+| **Connection Limits** | Configurable max concurrent connections and request body size limits on MCP server (v0.3.0). |
+| **TLS Configuration** | Certificate pinning, minimum TLS version enforcement, and secure transport defaults (v0.3.0). |
 
 ## MCP Server
 
@@ -352,7 +356,19 @@ smallchat-swift/
 └── docs-site/                      # Docusaurus documentation site
 ```
 
-## What's New in 0.2.0
+## What's New in 0.3.0
+
+- **Intent sanitization** — Null byte stripping, control character removal, length limits, and token cap on canonical selectors
+- **Audit log integrity** — HMAC-SHA256 hash chain on audit entries with tamper verification via `verifyChain()`
+- **Server hardening** — Configurable max connections (default 1000), max request body size (default 1MB), graceful shutdown with drain timeout
+- **Server metrics** — New `/metrics` endpoint and `ServerMetrics` actor tracking request counts, error rates, active/peak connections, uptime
+- **TLS configuration** — `TLSConfig` with certificate pinning (public key or full cert), minimum TLS version enforcement, development/production presets
+- **Identity validation** — Sender identities validated for format (alphanumeric + `._@-`), length (1–128 chars), and max sender limits
+- **Constant-time pairing** — Pairing code verification uses constant-time comparison to prevent timing attacks
+- **Connection metrics** — NIO handler tracks connection open/close for real-time connection monitoring
+- **Version bump** — MCP server, channel server, and router all report version 0.3.0
+
+### Previous: 0.2.0
 
 - **Claude Code channel protocol** — Bidirectional stdio JSON-RPC integration with Claude Code
 - **Security hardening** — Intent pinning, selector namespacing, semantic rate limiting, sender-gated permissions

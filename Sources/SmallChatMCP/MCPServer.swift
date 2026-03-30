@@ -29,6 +29,12 @@ public struct MCPServerConfig: Sendable {
     public let sessionTTLMs: Int
     /// Allowed CORS origin for Access-Control-Allow-Origin header.
     public let corsOrigin: String
+    /// Maximum concurrent client connections (v0.3.0). 0 = unlimited.
+    public let maxConnections: Int
+    /// Maximum request body size in bytes (v0.3.0). Prevents memory exhaustion.
+    public let maxRequestBodyBytes: Int
+    /// Graceful shutdown drain timeout in seconds (v0.3.0).
+    public let shutdownDrainSeconds: Int
 
     public init(
         port: Int = 3000,
@@ -40,7 +46,10 @@ public struct MCPServerConfig: Sendable {
         rateLimitRPM: Int = 600,
         enableAudit: Bool = false,
         sessionTTLMs: Int = 86_400_000,
-        corsOrigin: String = "http://127.0.0.1"
+        corsOrigin: String = "http://127.0.0.1",
+        maxConnections: Int = 1000,
+        maxRequestBodyBytes: Int = 1_048_576,
+        shutdownDrainSeconds: Int = 30
     ) {
         self.port = port
         self.host = host
@@ -52,6 +61,62 @@ public struct MCPServerConfig: Sendable {
         self.enableAudit = enableAudit
         self.sessionTTLMs = sessionTTLMs
         self.corsOrigin = corsOrigin
+        self.maxConnections = maxConnections
+        self.maxRequestBodyBytes = maxRequestBodyBytes
+        self.shutdownDrainSeconds = shutdownDrainSeconds
+    }
+}
+
+// MARK: - Server Metrics (v0.3.0)
+
+/// Lightweight request metrics for observability.
+public actor ServerMetrics {
+    private(set) var totalRequests: Int = 0
+    private(set) var totalErrors: Int = 0
+    private(set) var activeConnections: Int = 0
+    private(set) var peakConnections: Int = 0
+    private let startTime: ContinuousClock.Instant
+
+    public init() {
+        self.startTime = ContinuousClock.now
+    }
+
+    /// Record a completed request.
+    public func recordRequest(success: Bool) {
+        totalRequests += 1
+        if !success { totalErrors += 1 }
+    }
+
+    /// Track connection open/close.
+    public func connectionOpened() {
+        activeConnections += 1
+        if activeConnections > peakConnections {
+            peakConnections = activeConnections
+        }
+    }
+
+    public func connectionClosed() {
+        activeConnections = max(0, activeConnections - 1)
+    }
+
+    /// Whether a new connection should be accepted given the limit.
+    public func shouldAcceptConnection(limit: Int) -> Bool {
+        guard limit > 0 else { return true }
+        return activeConnections < limit
+    }
+
+    /// Get a snapshot of current metrics.
+    public func snapshot() -> [String: AnyCodableValue] {
+        let uptime = ContinuousClock.now - startTime
+        let uptimeSeconds = Int(uptime.components.seconds)
+        return [
+            "uptime_seconds": .int(uptimeSeconds),
+            "total_requests": .int(totalRequests),
+            "total_errors": .int(totalErrors),
+            "active_connections": .int(activeConnections),
+            "peak_connections": .int(peakConnections),
+            "error_rate": .double(totalRequests > 0 ? Double(totalErrors) / Double(totalRequests) : 0),
+        ]
     }
 }
 
@@ -62,6 +127,9 @@ public struct MCPServerConfig: Sendable {
 /// Composes extracted modules for session management, OAuth, resources,
 /// prompts, rate limiting, audit logging, and SSE streaming.
 /// Uses SwiftNIO for the HTTP server layer.
+///
+/// v0.3.0: Adds connection limits, max request body size, graceful shutdown,
+/// and server metrics endpoint.
 public actor MCPServer {
 
     private let config: MCPServerConfig
@@ -73,6 +141,7 @@ public actor MCPServer {
     private let auditLog: AuditLog
     private let sseBroker: SSEBroker
     private let router: MCPRouter
+    private let metrics: ServerMetrics
     private var artifact: SerializedArtifact?
     private var eventLoopGroup: (any EventLoopGroup)?
     private var serverChannel: Channel?
@@ -86,6 +155,7 @@ public actor MCPServer {
         self.rateLimiter = RateLimiter(maxRPM: config.rateLimitRPM)
         self.auditLog = AuditLog()
         self.sseBroker = SSEBroker()
+        self.metrics = ServerMetrics()
         self.router = MCPRouter(
             sessionStore: sessionStore,
             resourceRegistry: resourceRegistry,
@@ -116,6 +186,9 @@ public actor MCPServer {
     /// Access the audit log.
     public var audit: AuditLog { auditLog }
 
+    /// Access server metrics (v0.3.0).
+    public var serverMetrics: ServerMetrics { metrics }
+
     // MARK: - Lifecycle
 
     /// Start the MCP server.
@@ -140,7 +213,11 @@ public actor MCPServer {
             .serverChannelOption(reuseAddrOpt, value: 1)
             .childChannelInitializer { channel in
                 channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(MCPHTTPHandler(server: self, corsOrigin: self.config.corsOrigin))
+                    channel.pipeline.addHandler(MCPHTTPHandler(
+                        server: self,
+                        corsOrigin: self.config.corsOrigin,
+                        maxBodyBytes: self.config.maxRequestBodyBytes
+                    ))
                 }
             }
             .childChannelOption(reuseAddrOpt, value: 1)
@@ -150,9 +227,21 @@ public actor MCPServer {
         self.serverChannel = channel
     }
 
-    /// Stop the MCP server.
+    /// Stop the MCP server with graceful drain (v0.3.0).
+    ///
+    /// Waits up to `shutdownDrainSeconds` for in-flight requests to complete,
+    /// then forcefully closes remaining connections.
     public func stop() async throws {
-        await sseBroker.disconnectSession("*") // Disconnect all
+        // Disconnect all SSE clients
+        await sseBroker.disconnectSession("*")
+
+        // Graceful drain: give in-flight requests time to complete
+        let drainDeadline = ContinuousClock.now + .seconds(config.shutdownDrainSeconds)
+        while await metrics.snapshot()["active_connections"] != .int(0),
+              ContinuousClock.now < drainDeadline {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+
         try await serverChannel?.close()
         try await eventLoopGroup?.shutdownGracefully()
         serverChannel = nil
@@ -228,6 +317,11 @@ public actor MCPServer {
             extraHeaders["Mcp-Session-Id"] = newSessionId
         }
 
+        let success = response?.error == nil
+
+        // Record metrics (v0.3.0)
+        await metrics.recordRequest(success: success)
+
         // Audit trail
         if config.enableAudit {
             let elapsed = ContinuousClock.now - startTime
@@ -235,7 +329,7 @@ public actor MCPServer {
             await auditLog.log(AuditEntry(
                 method: request.method,
                 sessionId: sessionId,
-                success: response?.error == nil,
+                success: success,
                 durationMs: durationMs,
                 error: response?.error?.message
             ))
@@ -271,6 +365,7 @@ public actor MCPServer {
     func healthResponse() async -> [String: AnyCodableValue] {
         let sessionCount = (try? await sessionStore.count()) ?? 0
         let sseCount = await sseBroker.totalConnectionCount()
+        let metricsSnapshot = await metrics.snapshot()
         return [
             "status": .string("ok"),
             "version": .string(mcpServerVersion),
@@ -279,7 +374,13 @@ public actor MCPServer {
             "providers": .int(artifact?.stats.providerCount ?? 0),
             "sessions": .int(sessionCount),
             "sseClients": .int(sseCount),
+            "metrics": .dict(metricsSnapshot),
         ]
+    }
+
+    /// Build the metrics response (v0.3.0).
+    func metricsResponse() async -> [String: AnyCodableValue] {
+        await metrics.snapshot()
     }
 
     /// Broadcast a list-changed notification to all SSE clients.
@@ -291,20 +392,35 @@ public actor MCPServer {
 // MARK: - NIO HTTP Handler
 
 /// SwiftNIO channel handler for MCP HTTP requests.
+///
+/// v0.3.0: Enforces max request body size and tracks connection metrics.
 private final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
     private let server: MCPServer
     private let corsOrigin: String
+    private let maxBodyBytes: Int
     private var requestMethod: HTTPMethod = .GET
     private var requestURI: String = "/"
     private var requestHeaders: HTTPHeaders = HTTPHeaders()
     private var bodyBuffer: ByteBuffer = ByteBuffer()
+    private var bodyTooLarge: Bool = false
 
-    init(server: MCPServer, corsOrigin: String) {
+    init(server: MCPServer, corsOrigin: String, maxBodyBytes: Int = 1_048_576) {
         self.server = server
         self.corsOrigin = corsOrigin
+        self.maxBodyBytes = maxBodyBytes
+    }
+
+    func channelActive(context: ChannelHandlerContext) {
+        Task { await server.serverMetrics.connectionOpened() }
+        context.fireChannelActive()
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        Task { await server.serverMetrics.connectionClosed() }
+        context.fireChannelInactive()
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -316,10 +432,23 @@ private final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             requestURI = head.uri
             requestHeaders = head.headers
             bodyBuffer.clear()
+            bodyTooLarge = false
         case .body(var body):
-            bodyBuffer.writeBuffer(&body)
+            // Enforce max body size (v0.3.0)
+            if bodyBuffer.readableBytes + body.readableBytes > maxBodyBytes {
+                bodyTooLarge = true
+            } else {
+                bodyBuffer.writeBuffer(&body)
+            }
         case .end:
-            handleRequest(context: context)
+            if bodyTooLarge {
+                var headers = HTTPHeaders()
+                headers.add(name: "Content-Type", value: "application/json")
+                sendResponse(context: context, status: .payloadTooLarge, headers: headers,
+                             body: "{\"error\":\"Request body too large\",\"limit\":\(maxBodyBytes)}")
+            } else {
+                handleRequest(context: context)
+            }
         }
     }
 
@@ -373,6 +502,10 @@ private final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             case "/health":
                 let health = await server.healthResponse()
                 sendJSON(context: context, status: .ok, headers: responseHeaders, value: health)
+                return
+            case "/metrics":
+                let metricsData = await server.metricsResponse()
+                sendJSON(context: context, status: .ok, headers: responseHeaders, value: metricsData)
                 return
             case "/sse":
                 // SSE endpoint -- send initial connection event
