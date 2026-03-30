@@ -141,7 +141,7 @@ Displays:
 swift run smallchat inspect tools.toolkit.json
 # Output:
 #   Artifact: tools.toolkit.json
-#   Version: 0.2.0
+#   Version: 0.3.0
 #   Compiled: 2025-01-15T10:30:00Z
 #   Providers: 3
 #   Selectors: 47

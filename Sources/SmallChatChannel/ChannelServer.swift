@@ -303,7 +303,7 @@ public actor ChannelServer {
             ]),
             "serverInfo": .dict([
                 "name": .string("smallchat-channel-\(config.channelName)"),
-                "version": .string("0.1.0"),
+                "version": .string("0.3.0"),
             ]),
         ]
 

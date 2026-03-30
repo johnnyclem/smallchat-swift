@@ -57,15 +57,15 @@ swift run smallchat resolve tools.toolkit.json "search for code"
 swift run smallchat serve --source ./manifests --port 3001
 ```
 
-## What's New in 0.2.0
+## What's New in 0.3.0
 
-- **Claude Code channel protocol** — Bidirectional stdio JSON-RPC integration
-- **Security hardening** — Intent pinning, selector namespacing, semantic rate limiting
-- **Actor-based concurrency** — Thread-safe dispatch, caching, and session management
-- **SQLite session persistence** — Durable session storage for MCP server connections
-- **Fluent dispatch API** — Chainable `.dispatch().intent().withArgs().exec()`
-- **NIO-based transport** — High-performance HTTP, SSE, and stdio transports
-- **New CLI commands** — `init`, `docs`, `repl` for scaffolding, documentation, and exploration
+- **Intent sanitization** — Null byte stripping, control character removal, length limits on dispatch pipeline inputs
+- **Audit log integrity** — HMAC-SHA256 hash chain on audit entries with `verifyChain()` tamper detection
+- **Server hardening** — Max connections, max request body size, graceful shutdown with drain timeout
+- **Server metrics** — `/metrics` endpoint tracking request counts, error rates, connections, uptime
+- **TLS configuration** — Certificate pinning, minimum TLS version, development/production presets
+- **Identity validation** — Sender format validation, max sender limits, constant-time pairing code verification
+- **Connection tracking** — Real-time active/peak connection monitoring in NIO handler
 
 ## Next Steps
 

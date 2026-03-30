@@ -173,12 +173,14 @@ func resolveToolIMP(
 /// toolkit_dispatch -- the hot path. Equivalent to objc_msgSend.
 ///
 /// Uses resolveToolIMP for resolution, then executes synchronously.
+/// v0.3.0: validates and sanitizes the intent string before dispatch.
 public func toolkitDispatch(
     context: DispatchContext,
     intent: String,
     args: [String: any Sendable]? = nil
 ) async throws -> ToolResult {
-    let outcome = try await resolveToolIMP(context: context, intent: intent, args: args)
+    let sanitized = try validateIntent(intent)
+    let outcome = try await resolveToolIMP(context: context, intent: sanitized, args: args)
 
     switch outcome {
     case .forwarded(let result):
@@ -216,6 +218,8 @@ public func toolkitDispatch(
 ///   3. "chunk" / "inference-delta" -- incremental content from the tool
 ///   4. "done" -- final result with the complete ToolResult
 ///   5. "error" -- if anything goes wrong at any stage
+///
+/// v0.3.0: validates and sanitizes the intent string before dispatch.
 public func smallchatDispatchStream(
     context: DispatchContext,
     intent: String,
@@ -223,11 +227,27 @@ public func smallchatDispatchStream(
 ) -> AsyncThrowingStream<DispatchEvent, Error> {
     AsyncThrowingStream { continuation in
         let task = Task {
-            continuation.yield(.resolving(intent: intent))
+            // Validate and sanitize intent
+            let sanitized: String
+            do {
+                sanitized = try validateIntent(intent)
+            } catch {
+                continuation.yield(.error(
+                    message: String(describing: error),
+                    metadata: [
+                        "validationError": .bool(true),
+                        "reason": .string("invalid-intent"),
+                    ]
+                ))
+                continuation.finish()
+                return
+            }
+
+            continuation.yield(.resolving(intent: sanitized))
 
             let outcome: ResolutionOutcome
             do {
-                outcome = try await resolveToolIMP(context: context, intent: intent, args: args)
+                outcome = try await resolveToolIMP(context: context, intent: sanitized, args: args)
             } catch {
                 var metadata: [String: AnyCodableValue]? = nil
 
