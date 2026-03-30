@@ -15,6 +15,7 @@ let package = Package(
         .library(name: "SmallChatDream", targets: ["SmallChatDream"]),
         .library(name: "SmallChat", targets: ["SmallChat"]),
         .executable(name: "smallchat", targets: ["SmallChatCLI"]),
+        .executable(name: "SmallChatApp", targets: ["SmallChatApp"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
@@ -97,6 +98,11 @@ let package = Package(
                 "SmallChat",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
+        ),
+        // ---- macOS GUI App ----
+        .executableTarget(
+            name: "SmallChatApp",
+            dependencies: ["SmallChat"]
         ),
         // ---- Tests ----
         .testTarget(name: "SmallChatCoreTests", dependencies: ["SmallChatCore"]),
