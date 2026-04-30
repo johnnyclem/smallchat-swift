@@ -32,8 +32,7 @@ public struct ToolCompiler: Sendable {
         var mergedCount = 0
 
         for (i, tool) in allTools.enumerated() {
-            let text = "\(tool.name): \(tool.description)"
-            let embedding = try await embedder.embed(text)
+            let embedding = try await embedder.embed(tool.embeddingText)
             let canonical = "\(tool.providerId).\(tool.name)"
 
             toolEmbeddings[i] = embedding
