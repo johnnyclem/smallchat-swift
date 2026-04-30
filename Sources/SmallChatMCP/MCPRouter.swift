@@ -37,6 +37,7 @@ public actor MCPRouter {
     private let sseBroker: SSEBroker
     private let opts: RouterOptions
     private var artifact: SerializedArtifact?
+    private var refinementHandler: (@Sendable (_ intent: String, _ args: [String: AnyCodableValue]) async -> ToolRefinement?)?
 
     public init(
         sessionStore: SessionStore,
@@ -55,6 +56,14 @@ public actor MCPRouter {
     /// Set the artifact for tools/list.
     public func setArtifact(_ artifact: SerializedArtifact) {
         self.artifact = artifact
+    }
+
+    /// Set the runtime hook used by `tools/call` to surface
+    /// `tool_refinement_needed` results when no tool dispatches confidently.
+    public func setRefinementHandler(
+        _ handler: @escaping @Sendable (_ intent: String, _ args: [String: AnyCodableValue]) async -> ToolRefinement?
+    ) {
+        self.refinementHandler = handler
     }
 
     // MARK: - Main Dispatch
@@ -84,7 +93,7 @@ public actor MCPRouter {
             case MCPMethod.toolsList.rawValue:
                 return handleToolsList(id: id, params: params)
             case MCPMethod.toolsCall.rawValue:
-                return handleToolsCall(id: id, params: params)
+                return await handleToolsCall(id: id, params: params)
             case MCPMethod.resourcesList.rawValue:
                 return await handleResourcesList(id: id, params: params, sessionId: sessionId)
             case MCPMethod.resourcesRead.rawValue:
@@ -211,20 +220,68 @@ public actor MCPRouter {
         return .ok(id, .dict(resultDict))
     }
 
-    private func handleToolsCall(id: JSONRPCId, params: [String: AnyCodableValue]) -> JSONRPCResponse {
+    private func handleToolsCall(id: JSONRPCId, params: [String: AnyCodableValue]) async -> JSONRPCResponse {
         guard case .string(let toolName) = params["name"] else {
             return .error(id, code: MCPErrorCode.invalidParams.rawValue, message: "Missing tool name")
         }
 
-        // In the full implementation, this would dispatch to the runtime.
-        // For now, return a placeholder indicating the tool was found.
         let invocationId = UUID().uuidString.lowercased()
+        let arguments: [String: AnyCodableValue]
+        if case .dict(let argsDict) = params["arguments"] {
+            arguments = argsDict
+        } else {
+            arguments = [:]
+        }
 
+        // Hand off to the runtime when a refinement handler is wired.
+        // A non-nil return means dispatch ended in a NONE-tier decision and
+        // we should surface a `tool_refinement_needed` MCP result.
+        if let handler = refinementHandler,
+           let refinement = await handler(toolName, arguments) {
+            return .ok(id, .dict([
+                "invocationId": .string(invocationId),
+                "status": .string(ToolRefinement.mcpResultType),
+                "result": encodeRefinement(refinement),
+            ]))
+        }
+
+        // Placeholder until the full runtime is wired through (Phase 5).
         return .ok(id, .dict([
             "invocationId": .string(invocationId),
             "status": .string("ok"),
             "result": .dict(["note": .string("Tool execution for '\(toolName)' -- runtime dispatch pending")]),
         ]))
+    }
+
+    private func encodeRefinement(_ refinement: ToolRefinement) -> AnyCodableValue {
+        var dict: [String: AnyCodableValue] = [
+            "type": .string(ToolRefinement.mcpResultType),
+            "originalIntent": .string(refinement.originalIntent),
+            "reason": .string(refinement.reason),
+            "clarifyingQuestions": .array(refinement.clarifyingQuestions.map { .string($0) }),
+            "nearMatches": .array(refinement.nearMatches.map { match in
+                .dict([
+                    "toolName": .string(match.toolName),
+                    "providerId": .string(match.providerId),
+                    "canonicalSelector": .string(match.canonicalSelector),
+                    "confidence": .double(match.confidence),
+                ])
+            }),
+        ]
+        let proofSteps: [AnyCodableValue] = refinement.proof.steps.map { step in
+            .dict([
+                "stage": .string(step.stage),
+                "detail": .string(step.detail),
+                "outcome": .string(step.outcome.rawValue),
+                "elapsedMicroseconds": .int(step.elapsedMicroseconds),
+            ])
+        }
+        dict["proof"] = .dict([
+            "finalTier": .string(refinement.proof.finalTier.rawValue),
+            "totalElapsedMicroseconds": .int(refinement.proof.totalElapsedMicroseconds),
+            "steps": .array(proofSteps),
+        ])
+        return .dict(dict)
     }
 
     // MARK: - Resources

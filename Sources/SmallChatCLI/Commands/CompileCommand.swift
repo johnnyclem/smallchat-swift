@@ -23,6 +23,9 @@ struct CompileCommand: AsyncParsableCommand {
     @Option(help: "Deduplication threshold (0.0–1.0)")
     var deduplicationThreshold: Double = 0.95
 
+    @Flag(help: "Treat selector collisions as compile errors and raise dedup/collision thresholds")
+    var strict: Bool = false
+
     func run() async throws {
         let sourcePath = source ?? FileManager.default.currentDirectoryPath
         print("Compiling from \(sourcePath)...")
@@ -40,9 +43,14 @@ struct CompileCommand: AsyncParsableCommand {
         let embedder = LocalEmbedder()
         let vectorIndex = MemoryVectorIndex()
 
+        // Under --strict, tighten the firewall: collisions become errors
+        // and the dedup threshold rises so near-duplicates fail compile.
+        let effectiveCollisionThreshold = strict ? max(collisionThreshold, 0.75) : collisionThreshold
+        let effectiveDedupThreshold = strict ? max(deduplicationThreshold, 0.97) : deduplicationThreshold
+
         let options = CompilerOptions(
-            collisionThreshold: collisionThreshold,
-            deduplicationThreshold: deduplicationThreshold,
+            collisionThreshold: effectiveCollisionThreshold,
+            deduplicationThreshold: effectiveDedupThreshold,
             generateSemanticOverloads: semanticOverloads
         )
 
@@ -64,10 +72,14 @@ struct CompileCommand: AsyncParsableCommand {
         print("  Dispatch tables: \(result.dispatchTables.count)")
 
         if !result.collisions.isEmpty {
+            let label = strict ? "ERROR" : "WARNING"
             print("  Selector collisions: \(result.collisions.count)")
             for collision in result.collisions {
-                print("    WARNING: \(collision.selectorA) and \(collision.selectorB) (cosine: \(String(format: "%.2f", collision.similarity)))")
+                print("    \(label): \(collision.selectorA) and \(collision.selectorB) (cosine: \(String(format: "%.2f", collision.similarity)))")
                 print("      \(collision.hint)")
+            }
+            if strict {
+                throw ExitCode(2)
             }
         }
 

@@ -71,7 +71,10 @@ func resolveToolIMP(
     }
 
     // 3. SEARCH DISPATCH TABLE (vector similarity)
-    let matches = try await context.vectorIndex.search(query: selector.vector, topK: 5, threshold: 0.75)
+    // Threshold drops to 0.60 by default in 0.5.0 -- tier classification
+    // filters the now-noisier matches downstream.
+    let searchThreshold = Float(context.dispatchConfig.vectorSearchThreshold)
+    let matches = try await context.vectorIndex.search(query: selector.vector, topK: 5, threshold: searchThreshold)
     var candidates: [ToolCandidate] = []
 
     for match in matches {
