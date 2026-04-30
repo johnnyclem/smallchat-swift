@@ -6,6 +6,8 @@ public struct ProviderManifest: Sendable, Codable {
     public let endpoint: String?
     public let version: String?
     public let channel: ChannelInfo?
+    public let description: String?
+    public let compilerHints: ProviderCompilerHints?
 
     public init(
         id: String,
@@ -14,7 +16,9 @@ public struct ProviderManifest: Sendable, Codable {
         transportType: TransportType,
         endpoint: String? = nil,
         version: String? = nil,
-        channel: ChannelInfo? = nil
+        channel: ChannelInfo? = nil,
+        description: String? = nil,
+        compilerHints: ProviderCompilerHints? = nil
     ) {
         self.id = id
         self.name = name
@@ -23,6 +27,8 @@ public struct ProviderManifest: Sendable, Codable {
         self.endpoint = endpoint
         self.version = version
         self.channel = channel
+        self.description = description
+        self.compilerHints = compilerHints
     }
 
     public struct ChannelInfo: Sendable, Codable {

@@ -107,7 +107,7 @@ let package = Package(
         // ---- Tests ----
         .testTarget(name: "SmallChatCoreTests", dependencies: ["SmallChatCore"]),
         .testTarget(name: "SmallChatRuntimeTests", dependencies: ["SmallChatRuntime", "SmallChatEmbedding"]),
-        .testTarget(name: "SmallChatCompilerTests", dependencies: ["SmallChatCompiler", "SmallChatEmbedding"]),
+        .testTarget(name: "SmallChatCompilerTests", dependencies: ["SmallChatCompiler", "SmallChatCore", "SmallChatEmbedding"]),
         .testTarget(name: "SmallChatEmbeddingTests", dependencies: ["SmallChatEmbedding"]),
         .testTarget(name: "SmallChatTransportTests", dependencies: ["SmallChatTransport"]),
         .testTarget(name: "SmallChatMCPTests", dependencies: ["SmallChatMCP", "SmallChatEmbedding"]),
