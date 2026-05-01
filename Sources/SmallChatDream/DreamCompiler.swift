@@ -142,7 +142,7 @@ private func serializeResult(
         "generatedAt": ISO8601DateFormatter().string(from: Date()),
     ]
 
-    output["version"] = "0.2.0"
+    output["version"] = "0.5.0"
     output["timestamp"] = ISO8601DateFormatter().string(from: Date())
     output["embedding"] = [
         "model": embedderType == "onnx" ? "all-MiniLM-L6-v2" : "hash-based",

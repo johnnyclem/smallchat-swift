@@ -14,6 +14,8 @@ struct DiscoveryView: View {
                 Text("Auto-detect MCP server configurations from standard locations on your machine.")
                     .foregroundStyle(.secondary)
 
+                LoomStatus()
+
                 Divider()
 
                 // Scan Button
@@ -316,7 +318,7 @@ struct DiscoveryView: View {
         }
 
         return [
-            "version": "0.2.0",
+            "version": "0.5.0",
             "timestamp": ISO8601DateFormatter().string(from: Date()),
             "embedding": [
                 "model": "hash-based",

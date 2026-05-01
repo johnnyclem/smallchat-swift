@@ -10,6 +10,7 @@ public struct RuntimeOptions: Sendable {
     public var modelVersion: String?
     public var selectorNamespace: SelectorNamespace?
     public var rateLimiter: SemanticRateLimiterOptions?
+    public var dispatchConfig: DispatchConfig
 
     public init(
         selectorThreshold: Float = 0.95,
@@ -17,7 +18,8 @@ public struct RuntimeOptions: Sendable {
         minConfidence: Double = 0.85,
         modelVersion: String? = nil,
         selectorNamespace: SelectorNamespace? = nil,
-        rateLimiter: SemanticRateLimiterOptions? = nil
+        rateLimiter: SemanticRateLimiterOptions? = nil,
+        dispatchConfig: DispatchConfig = DispatchConfig()
     ) {
         self.selectorThreshold = selectorThreshold
         self.cacheSize = cacheSize
@@ -25,6 +27,7 @@ public struct RuntimeOptions: Sendable {
         self.modelVersion = modelVersion
         self.selectorNamespace = selectorNamespace
         self.rateLimiter = rateLimiter
+        self.dispatchConfig = dispatchConfig
     }
 }
 
@@ -82,7 +85,8 @@ public actor ToolRuntime {
             cache: cache,
             vectorIndex: vectorIndex,
             embedder: embedder,
-            selectorNamespace: selectorNamespace
+            selectorNamespace: selectorNamespace,
+            dispatchConfig: options.dispatchConfig
         )
     }
 

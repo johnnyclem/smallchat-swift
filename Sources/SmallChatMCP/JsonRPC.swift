@@ -10,7 +10,7 @@ public let mcpProtocolVersion: String = "2024-11-05"
 
 /// Server identification constants.
 public let mcpServerName: String = "smallchat"
-public let mcpServerVersion: String = "0.3.0"
+public let mcpServerVersion: String = "0.5.0"
 
 // MARK: - JSON-RPC Request ID
 

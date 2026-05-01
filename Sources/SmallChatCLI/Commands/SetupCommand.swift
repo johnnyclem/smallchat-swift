@@ -21,6 +21,21 @@ struct SetupCommand: AsyncParsableCommand {
 
         let prompt = InteractivePrompt(interactive: !noInteractive)
 
+        // Probe for loom-mcp -- the headlining 0.5.0 integration. We only
+        // surface its presence; the user wires it via their MCP client
+        // config (the example bundle has a snippet) or `smallchat install`.
+        switch LoomDetection.probe() {
+        case .present:
+            print("loom-mcp launcher (npx) detected on PATH.")
+            print("  bundled manifest: examples/loom-mcp-manifest.json (\(LoomMCPClient.knownToolNames.count) tools)")
+        case .missing:
+            print("loom-mcp launcher (npx) not found on PATH.")
+            print("  install with: npm i -g @loom-mcp/server")
+        case .unknown:
+            print("loom-mcp: PATH not inspectable in this environment; skipping probe.")
+        }
+        print("")
+
         // Step 1: Discovery
         let discoveredConfigs = try await discoverConfigs(prompt: prompt)
 
@@ -403,7 +418,7 @@ struct SetupCommand: AsyncParsableCommand {
         }
 
         return [
-            "version": "0.2.0",
+            "version": "0.5.0",
             "timestamp": ISO8601DateFormatter().string(from: Date()),
             "embedding": [
                 "model": "hash-based",

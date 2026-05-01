@@ -1,0 +1,90 @@
+{
+  "name": "code-review-bundle",
+  "version": "0.1.0",
+  "description": "Curated bundle for code-review workflows: loom for code context, GitHub for PR data, Slack for notifications.",
+  "entries": [
+    {
+      "id": "loom",
+      "name": "Loom MCP",
+      "description": "AST-aware code-context compiler.",
+      "version": "2.0.0",
+      "license": "MIT",
+      "categories": ["code"],
+      "badges": ["read-only", "code-context", "offline"],
+      "installMethods": [
+        {
+          "kind": "npm",
+          "packageName": "@loom-mcp/server",
+          "command": "npx -y @loom-mcp/server"
+        }
+      ],
+      "envVars": [],
+      "args": []
+    },
+    {
+      "id": "github",
+      "name": "GitHub MCP",
+      "description": "Read GitHub issues, pull requests, and repositories.",
+      "version": "1.0.0",
+      "license": "MIT",
+      "categories": ["code", "collaboration"],
+      "badges": ["read-only-by-default", "auth-required"],
+      "installMethods": [
+        {
+          "kind": "npm",
+          "packageName": "@github/github-mcp-server",
+          "command": "npx -y @github/github-mcp-server"
+        }
+      ],
+      "envVars": [
+        {
+          "name": "GITHUB_TOKEN",
+          "description": "Personal access token.",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "id": "slack",
+      "name": "Slack MCP",
+      "description": "Post and read Slack messages.",
+      "version": "0.4.1",
+      "license": "MIT",
+      "categories": ["communication"],
+      "badges": ["auth-required", "rate-limited"],
+      "installMethods": [
+        {
+          "kind": "npm",
+          "packageName": "@slack/mcp-server",
+          "command": "npx -y @slack/mcp-server"
+        }
+      ],
+      "envVars": [
+        {
+          "name": "SLACK_BOT_TOKEN",
+          "description": "Bot user token.",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "args": []
+    }
+  ],
+  "compiledArtifactPath": "bundles/code-review.toolkit.json",
+  "targetClients": [
+    {
+      "id": "claude-code",
+      "displayName": "Claude Code",
+      "configPath": "~/.claude/mcp.json",
+      "snippet": "{\n  \"mcpServers\": {\n    \"loom\": {\"command\": \"npx\", \"args\": [\"-y\", \"@loom-mcp/server\"]},\n    \"github\": {\"command\": \"npx\", \"args\": [\"-y\", \"@github/github-mcp-server\"], \"env\": {\"GITHUB_TOKEN\": \"$GITHUB_TOKEN\"}},\n    \"slack\": {\"command\": \"npx\", \"args\": [\"-y\", \"@slack/mcp-server\"], \"env\": {\"SLACK_BOT_TOKEN\": \"$SLACK_BOT_TOKEN\"}}\n  }\n}\n"
+    },
+    {
+      "id": "cursor",
+      "displayName": "Cursor",
+      "configPath": "~/.cursor/mcp.json",
+      "snippet": "{\n  \"mcpServers\": {\n    \"loom\": {\"command\": \"npx\", \"args\": [\"-y\", \"@loom-mcp/server\"]}\n  }\n}\n"
+    }
+  ]
+}

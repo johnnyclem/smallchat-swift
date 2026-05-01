@@ -63,6 +63,7 @@ public actor DispatchContext {
     public let embedder: any Embedder
     public let selectorNamespace: SelectorNamespace
     public let intentPins: IntentPinRegistry
+    public let dispatchConfig: DispatchConfig
 
     private var toolClasses: [String: ToolClass] = [:]
     private var protocols: [String: ToolProtocolDef] = [:]
@@ -75,7 +76,8 @@ public actor DispatchContext {
         vectorIndex: any VectorIndex,
         embedder: any Embedder,
         selectorNamespace: SelectorNamespace? = nil,
-        intentPins: IntentPinRegistry? = nil
+        intentPins: IntentPinRegistry? = nil,
+        dispatchConfig: DispatchConfig = DispatchConfig()
     ) {
         self.selectorTable = selectorTable
         self.cache = cache
@@ -83,6 +85,7 @@ public actor DispatchContext {
         self.embedder = embedder
         self.selectorNamespace = selectorNamespace ?? SelectorNamespace()
         self.intentPins = intentPins ?? IntentPinRegistry()
+        self.dispatchConfig = dispatchConfig
     }
 
     /// Register a provider (ToolClass).
