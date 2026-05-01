@@ -40,6 +40,7 @@ struct SmallChatCLI: AsyncParsableCommand {
             SetupCommand.self,
             DreamCommand.self,
             InstallCommand.self,
+            MemexCommand.self,
         ]
     )
 }

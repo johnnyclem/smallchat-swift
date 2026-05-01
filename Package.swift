@@ -13,6 +13,11 @@ let package = Package(
         .library(name: "SmallChatMCP", targets: ["SmallChatMCP"]),
         .library(name: "SmallChatChannel", targets: ["SmallChatChannel"]),
         .library(name: "SmallChatDream", targets: ["SmallChatDream"]),
+        .library(name: "SmallChatShorthand", targets: ["SmallChatShorthand"]),
+        .library(name: "SmallChatImportance", targets: ["SmallChatImportance"]),
+        .library(name: "SmallChatCRDT", targets: ["SmallChatCRDT"]),
+        .library(name: "SmallChatCompaction", targets: ["SmallChatCompaction"]),
+        .library(name: "SmallChatMemex", targets: ["SmallChatMemex"]),
         .library(name: "SmallChat", targets: ["SmallChat"]),
         .executable(name: "smallchat", targets: ["SmallChatCLI"]),
         .executable(name: "SmallChatApp", targets: ["SmallChatApp"]),
@@ -77,6 +82,36 @@ let package = Package(
             name: "SmallChatDream",
             dependencies: ["SmallChatCore", "SmallChatCompiler", "SmallChatEmbedding"]
         ),
+        // ---- Shorthand (TS PR #58: extracted from compaction/CRDT/importance) ----
+        .target(
+            name: "SmallChatShorthand",
+            dependencies: ["SmallChatCore"]
+        ),
+        // ---- Importance (TS PR #55: three-signal importance detection) ----
+        .target(
+            name: "SmallChatImportance",
+            dependencies: ["SmallChatCore", "SmallChatShorthand"]
+        ),
+        // ---- CRDT (TS PR #56: multi-agent shared memory) ----
+        .target(
+            name: "SmallChatCRDT",
+            dependencies: ["SmallChatCore", "SmallChatShorthand"]
+        ),
+        // ---- Compaction (TS PR #57: three-strategy verification) ----
+        .target(
+            name: "SmallChatCompaction",
+            dependencies: ["SmallChatCore", "SmallChatShorthand"]
+        ),
+        // ---- Memex (TS PR #60: knowledge-base compiler) ----
+        .target(
+            name: "SmallChatMemex",
+            dependencies: [
+                "SmallChatCore",
+                "SmallChatShorthand",
+                "SmallChatEmbedding",
+                "SmallChatImportance",
+            ]
+        ),
         // ---- Umbrella ----
         .target(
             name: "SmallChat",
@@ -89,6 +124,11 @@ let package = Package(
                 "SmallChatMCP",
                 "SmallChatChannel",
                 "SmallChatDream",
+                "SmallChatShorthand",
+                "SmallChatImportance",
+                "SmallChatCRDT",
+                "SmallChatCompaction",
+                "SmallChatMemex",
             ]
         ),
         // ---- CLI ----
@@ -113,5 +153,10 @@ let package = Package(
         .testTarget(name: "SmallChatMCPTests", dependencies: ["SmallChatMCP", "SmallChatEmbedding"]),
         .testTarget(name: "SmallChatChannelTests", dependencies: ["SmallChatChannel"]),
         .testTarget(name: "SmallChatDreamTests", dependencies: ["SmallChatDream"]),
+        .testTarget(name: "SmallChatShorthandTests", dependencies: ["SmallChatShorthand"]),
+        .testTarget(name: "SmallChatImportanceTests", dependencies: ["SmallChatImportance"]),
+        .testTarget(name: "SmallChatCRDTTests", dependencies: ["SmallChatCRDT"]),
+        .testTarget(name: "SmallChatCompactionTests", dependencies: ["SmallChatCompaction"]),
+        .testTarget(name: "SmallChatMemexTests", dependencies: ["SmallChatMemex", "SmallChatCore"]),
     ]
 )
