@@ -1,0 +1,42 @@
+{
+  "version": "1",
+  "updatedAt": "2026-04-30T00:00:00Z",
+  "entries": [
+    {
+      "id": "loom",
+      "name": "Loom MCP",
+      "description": "AST-aware code-context compiler.",
+      "version": "2.0.0",
+      "categories": ["code"],
+      "badges": ["read-only", "code-context", "offline"],
+      "toolCount": 28
+    },
+    {
+      "id": "github",
+      "name": "GitHub MCP",
+      "description": "Read GitHub issues, pull requests, and repositories.",
+      "version": "1.0.0",
+      "categories": ["code", "collaboration"],
+      "badges": ["read-only-by-default", "auth-required"],
+      "toolCount": 36
+    },
+    {
+      "id": "slack",
+      "name": "Slack MCP",
+      "description": "Post and read Slack messages.",
+      "version": "0.4.1",
+      "categories": ["communication"],
+      "badges": ["auth-required", "rate-limited"],
+      "toolCount": 14
+    },
+    {
+      "id": "postgresql",
+      "name": "PostgreSQL MCP",
+      "description": "Read-only SQL queries against PostgreSQL.",
+      "version": "0.3.2",
+      "categories": ["database"],
+      "badges": ["read-only", "schema-aware"],
+      "toolCount": 8
+    }
+  ]
+}

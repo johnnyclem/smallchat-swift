@@ -1,0 +1,45 @@
+{
+  "id": "postgresql",
+  "name": "PostgreSQL MCP",
+  "description": "Run read-only SQL queries against a PostgreSQL database, with schema inspection and query plans.",
+  "version": "0.3.2",
+  "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/postgres",
+  "license": "MIT",
+  "categories": ["database"],
+  "badges": ["read-only", "schema-aware"],
+  "installMethods": [
+    {
+      "kind": "npm",
+      "packageName": "@modelcontextprotocol/server-postgres",
+      "command": "npx -y @modelcontextprotocol/server-postgres"
+    },
+    {
+      "kind": "pip",
+      "packageName": "mcp-server-postgres"
+    }
+  ],
+  "envVars": [
+    {
+      "name": "DATABASE_URL",
+      "description": "PostgreSQL connection string, e.g. postgres://user:pass@host:5432/db.",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "args": [
+    {
+      "name": "max-rows",
+      "description": "Cap on rows returned per query.",
+      "type": "number",
+      "required": false,
+      "default": 1000
+    },
+    {
+      "name": "read-only",
+      "description": "Refuse non-SELECT statements.",
+      "type": "bool",
+      "required": false,
+      "default": true
+    }
+  ]
+}

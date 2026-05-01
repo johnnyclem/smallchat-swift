@@ -1,0 +1,42 @@
+{
+  "id": "github",
+  "name": "GitHub MCP",
+  "description": "Read GitHub issues, pull requests, and repositories. Search code, post comments, and manage releases.",
+  "version": "1.0.0",
+  "homepage": "https://github.com/github/github-mcp-server",
+  "license": "MIT",
+  "categories": ["code", "collaboration"],
+  "badges": ["read-only-by-default", "auth-required"],
+  "installMethods": [
+    {
+      "kind": "npm",
+      "packageName": "@github/github-mcp-server",
+      "command": "npx -y @github/github-mcp-server"
+    },
+    {
+      "kind": "docker",
+      "image": "ghcr.io/github/github-mcp-server:latest"
+    }
+  ],
+  "envVars": [
+    {
+      "name": "GITHUB_TOKEN",
+      "description": "Personal access token. classic or fine-grained; minimum scopes: repo, read:org.",
+      "required": true,
+      "secret": true
+    },
+    {
+      "name": "GITHUB_HOST",
+      "description": "Override for GitHub Enterprise (default: https://api.github.com).",
+      "required": false
+    }
+  ],
+  "args": [
+    {
+      "name": "repo-allowlist",
+      "description": "Comma-separated org/repo allowlist; restricts the server to these repositories.",
+      "type": "string",
+      "required": false
+    }
+  ]
+}

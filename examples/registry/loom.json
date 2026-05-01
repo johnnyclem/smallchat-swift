@@ -1,0 +1,40 @@
+{
+  "id": "loom",
+  "name": "Loom MCP",
+  "description": "AST-aware code-context compiler. Symbol-level retrieval, semantic search, and impact analysis over a local code index.",
+  "version": "2.0.0",
+  "homepage": "https://muhnehh.github.io/loom-mcp/",
+  "license": "MIT",
+  "categories": ["code"],
+  "badges": ["read-only", "code-context", "offline"],
+  "installMethods": [
+    {
+      "kind": "npm",
+      "packageName": "@loom-mcp/server",
+      "command": "npx -y @loom-mcp/server"
+    }
+  ],
+  "envVars": [
+    {
+      "name": "LOOM_WORKSPACE",
+      "description": "Workspace root directory to index. Defaults to the current working directory.",
+      "required": false
+    }
+  ],
+  "args": [
+    {
+      "name": "max-topology-depth",
+      "description": "Cap traversal depth when computing topology.",
+      "type": "number",
+      "required": false,
+      "default": 6
+    },
+    {
+      "name": "focus-budget",
+      "description": "Maximum number of files held in the active focus buffer.",
+      "type": "number",
+      "required": false,
+      "default": 20
+    }
+  ]
+}

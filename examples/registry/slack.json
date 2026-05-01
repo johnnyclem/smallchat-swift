@@ -1,0 +1,39 @@
+{
+  "id": "slack",
+  "name": "Slack MCP",
+  "description": "Post and read Slack messages, search channels, and manage threads via the Slack Web API.",
+  "version": "0.4.1",
+  "homepage": "https://github.com/slack/slack-mcp-server",
+  "license": "MIT",
+  "categories": ["communication"],
+  "badges": ["auth-required", "rate-limited"],
+  "installMethods": [
+    {
+      "kind": "npm",
+      "packageName": "@slack/mcp-server",
+      "command": "npx -y @slack/mcp-server"
+    }
+  ],
+  "envVars": [
+    {
+      "name": "SLACK_BOT_TOKEN",
+      "description": "xoxb-... bot user token. Required scopes depend on the tools used.",
+      "required": true,
+      "secret": true
+    },
+    {
+      "name": "SLACK_APP_TOKEN",
+      "description": "xapp-... app-level token. Required for Socket Mode.",
+      "required": false,
+      "secret": true
+    }
+  ],
+  "args": [
+    {
+      "name": "default-channel",
+      "description": "Channel id used when a tool call omits an explicit channel.",
+      "type": "string",
+      "required": false
+    }
+  ]
+}
