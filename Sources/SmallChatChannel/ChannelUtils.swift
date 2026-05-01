@@ -102,6 +102,39 @@ public func validatePayloadSize(
     return PayloadSizeCheck(valid: size <= maxBytes, size: size, limit: maxBytes)
 }
 
+// MARK: - Prompt-Injection Sanitization
+
+/// XML tag names that must never appear unescaped in untrusted content embedded
+/// into LLM prompts — they impersonate system context frames.
+///
+/// Ordered longest-first so the alternation matches the most specific name at
+/// each position (e.g. "system-reminder" before "system").
+private let blockedTagPattern: NSRegularExpression = {
+    let names = [
+        "system-reminder",
+        "claude_thinking_protocol",
+        "instructions",
+        "assistant",
+        "system",
+        "human",
+    ].joined(separator: "|")
+    // Matches opening tags (with optional attrs) and closing tags for blocked names.
+    // Capture group 1: the tag innards (slash + name + optional attrs), without < >.
+    let pattern = "<(/?(?:\(names))(?:\\s[^>]*)?)>"
+    return try! NSRegularExpression(pattern: pattern, options: .caseInsensitive)
+}()
+
+/// Strip prompt-injection tags from untrusted content before embedding in LLM context.
+///
+/// Escapes the angle brackets of any tag whose name matches a known system-frame
+/// pattern. The escaped text remains visible for auditing but is inert as markup.
+public func sanitizeUntrustedContent(_ content: String) -> String {
+    let mutable = NSMutableString(string: content)
+    let range = NSRange(content.startIndex..., in: content)
+    blockedTagPattern.replaceMatches(in: mutable, range: range, withTemplate: "&lt;$1&gt;")
+    return mutable as String
+}
+
 // MARK: - Channel Tag Serialization
 
 /// Serialize a channel event into a `<channel>` XML tag for LLM prompt injection.
@@ -122,7 +155,7 @@ public func serializeChannelTag(
         }
     }
 
-    return "<channel \(attrs.joined(separator: " "))>\n\(content)\n</channel>"
+    return "<channel \(attrs.joined(separator: " "))>\n\(sanitizeUntrustedContent(content))\n</channel>"
 }
 
 /// Escape a string for use in an XML attribute value.
