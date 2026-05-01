@@ -418,7 +418,7 @@ struct SetupCommand: AsyncParsableCommand {
         }
 
         return [
-            "version": "0.2.0",
+            "version": "0.5.0",
             "timestamp": ISO8601DateFormatter().string(from: Date()),
             "embedding": [
                 "model": "hash-based",

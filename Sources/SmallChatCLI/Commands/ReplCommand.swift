@@ -43,7 +43,7 @@ struct ReplCommand: AsyncParsableCommand {
         let selectorCount = selectorsDict.count
         let providerCount = dispatchTablesDict.count
 
-        print("smallchat repl v0.2.0")
+        print("smallchat repl v0.5.0")
         print("Loaded \(selectorCount) selectors from \(providerCount) providers")
         print("Type an intent to resolve, or :help for commands.\n")
 

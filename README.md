@@ -26,11 +26,53 @@ This is the **native Swift implementation** of [smallchat](https://github.com/jo
                          ┌─────────────────────┐
   "find recent docs"  →  │  Canonicalize        │  → "find:recent:docs"
                          │  Embed (384-dim)     │  → [0.23, 0.15, ..., 0.89]
-                         │  Vector Search       │  → cosine similarity > 0.75
+                         │  Vector Search       │  → cosine similarity > 0.60
+                         │  Tier classification │  → EXACT / HIGH / MEDIUM / LOW / NONE
                          │  Overload Resolution │  → type-validated dispatch
-                         │  Cache & Execute     │  → result
+                         │  Cache & Execute     │  → result (or tool_refinement_needed)
                          └─────────────────────┘
 ```
+
+## What's New in 0.5.0
+
+This release closes the gap to the TypeScript main branch and adds the
+loom-mcp integration as a first-class compile target.
+
+- **Confidence-tiered dispatch** (TS PR #54). Every dispatch now returns
+  one of `EXACT / HIGH / MEDIUM / LOW / NONE`. MEDIUM triggers pre-flight
+  verification, LOW decomposes into sub-intents, and NONE returns a
+  structured `tool_refinement_needed` payload with a replayable proof
+  trace. The default vector-search threshold drops from 0.75 to 0.60;
+  tier classification handles the additional noise.
+- **loom-mcp as a compile target** (TS PR #61). The bundled
+  `examples/loom-mcp-manifest.json` advertises 28 loom tools with
+  `selectorHint`s and aliases; the compiler folds them into the embedder
+  input so phrases like "find callers of foo" route to
+  `loom_find_importers`. A typed `LoomMCPClient` wraps the existing
+  stdio transport for runtime use.
+- **Registry / Bundle / Install schemas** (TS PR #52). New types in
+  `SmallChatCore` describe the distribution layer: `RegistryEntry`,
+  `RegistryIndex`, `SmallChatBundle`, `InstallPlan`.
+  `smallchat install <path>` renders an `InstallPlan` (dry-run only).
+  Examples for GitHub, Slack, PostgreSQL, and loom under
+  `examples/registry/`.
+- **Five new modules** ported from TS PRs #55–#58, #60:
+  `SmallChatShorthand` (text primitives), `SmallChatImportance`
+  (three-signal detector), `SmallChatCRDT` (LWWMap, ORSet, GCounter,
+  VectorClock), `SmallChatCompaction` (three-strategy verification),
+  `SmallChatMemex` (knowledge-base compiler with the same
+  Read → Extract → Embed → Link → Emit pipeline as `ToolCompiler`).
+- **`smallchat memex`** — a new CLI suite (`compile`, `query`, `lint`,
+  `inspect`, `export`) that mirrors the TS Memex surface.
+- **`--strict`** on `smallchat compile` raises dedup / collision
+  thresholds and treats collisions as compile errors (exit code 2).
+- **GUI surfaces**: tier badges, refinement panel, loom-mcp status in
+  Discovery, on top of the macOS SwiftUI app added in 0.3.0.
+- Version reporting bumped to 0.5.0 across CLI commands, the MCP server,
+  and the compiled artifact format.
+
+See `docs/0.5.0-roadmap.md` for the per-phase breakdown and
+`CHANGELOG.md` for the cumulative diff against 0.3.0.
 
 ## Quick Start
 
@@ -40,7 +82,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "0.3.0"),
+    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "0.5.0"),
 ]
 ```
 

@@ -76,7 +76,7 @@ struct InitCommand: AsyncParsableCommand {
 
         // Write config
         let config: [String: Any] = [
-            "version": "0.2.0",
+            "version": "0.5.0",
             "embedder": "local",
             "manifests": ["./manifests"],
             "output": "tools.toolkit.json",

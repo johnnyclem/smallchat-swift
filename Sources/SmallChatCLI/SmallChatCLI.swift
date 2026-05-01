@@ -26,7 +26,7 @@ struct SmallChatCLI: AsyncParsableCommand {
           Run "smallchat <command> --help" for detailed usage of any command.
           Run "smallchat doctor" to check your system health.
         """,
-        version: "0.2.0",
+        version: "0.5.0",
         subcommands: [
             CompileCommand.self,
             ServeCommand.self,

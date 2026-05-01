@@ -13,7 +13,7 @@ public struct RouterOptions: Sendable {
 
     public init(
         serverName: String = "smallchat",
-        serverVersion: String = "0.3.0",
+        serverVersion: String = "0.5.0",
         sessionTTLMs: Int = 86_400_000 // 24 hours
     ) {
         self.serverName = serverName
