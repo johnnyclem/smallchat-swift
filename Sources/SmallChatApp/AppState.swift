@@ -10,6 +10,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     case inspector = "Inspector"
     case resolver = "Resolver"
     case discovery = "Discovery"
+    case refinement = "Refinement"
     case doctor = "Doctor"
 
     var id: String { rawValue }
@@ -22,6 +23,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .inspector: return "magnifyingglass"
         case .resolver: return "arrow.triangle.branch"
         case .discovery: return "antenna.radiowaves.left.and.right"
+        case .refinement: return "questionmark.circle"
         case .doctor: return "stethoscope"
         }
     }
@@ -137,4 +139,24 @@ final class AppState {
     // MARK: - Doctor State
     var diagnosticResults: [DiagnosticCheck] = []
     var isRunningDiagnostics: Bool = false
+
+    // MARK: - 0.5.0: confidence tiers + refinement + loom
+
+    /// Tier of the last resolution (drives the tier badge in the resolver
+    /// panel). Nil when no resolution has been run.
+    var lastResolverTier: DispatchTier?
+
+    /// Confidence score of the last resolution (0...1).
+    var lastResolverConfidence: Double = 0
+
+    /// Last `tool_refinement_needed` payload returned by the runtime, if
+    /// any. Surfaced in the new Refinement panel.
+    var lastRefinement: ToolRefinement?
+
+    /// Cached loom-mcp detection probe. Refreshed by Discovery.
+    var loomDetection: LoomDetection.Result = .unknown
+
+    /// Number of loom tools the live server advertises (zero when not
+    /// connected / not detected).
+    var loomLiveToolCount: Int = 0
 }

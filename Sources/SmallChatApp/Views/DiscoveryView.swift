@@ -14,6 +14,8 @@ struct DiscoveryView: View {
                 Text("Auto-detect MCP server configurations from standard locations on your machine.")
                     .foregroundStyle(.secondary)
 
+                LoomStatus()
+
                 Divider()
 
                 // Scan Button
