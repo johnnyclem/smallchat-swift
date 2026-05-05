@@ -81,6 +81,27 @@ SmallChat (umbrella)
     ├── DocsCommand
     ├── ReplCommand
     └── DoctorCommand
+
+// Phase 4 modules (0.5.0)
+├── SmallChatShorthand         Zero external dependencies
+│   └── Shorthand              Token/sentence primitives, Jaccard, FNV-1a hash
+│
+├── SmallChatImportance        → Shorthand
+│   └── ImportanceDetector     Three-signal scorer (recency, centrality, novelty)
+│
+├── SmallChatCRDT              Zero external dependencies
+│   ├── VectorClock            Logical timestamps
+│   ├── LWWMap                 Last-write-wins map
+│   ├── ORSet                  Observed-remove set
+│   └── GCounter               Grow-only counter
+│
+├── SmallChatCompaction        → Shorthand
+│   └── CompactionVerifier     Three-strategy verifier (resampling, contradiction, invariants)
+│
+└── SmallChatMemex             → Core, Shorthand
+    ├── MemexCompiler          READ → EXTRACT → LINK → EMIT pipeline
+    ├── MemexResolver          Entity-name lookup over KnowledgeBase
+    └── MemexTypes             KnowledgeSource, ExtractedClaim, WikiPage, KnowledgeBase
 ```
 
 ## Dependency Graph
@@ -104,6 +125,8 @@ SmallChat (umbrella)
                   (+ ArgumentParser)
 ```
 
+SmallChatShorthand, SmallChatImportance, SmallChatCRDT, SmallChatCompaction, and SmallChatMemex are standalone Phase 4 modules. SmallChatMemex also imports SmallChatCore. None depend on SmallChatRuntime or SmallChatMCP.
+
 ## External Dependencies
 
 | Package | Used By | Purpose |
@@ -123,6 +146,11 @@ SmallChat (umbrella)
 | Run an MCP server | Add `SmallChatMCP` |
 | Integrate with Claude Code | Add `SmallChatChannel` |
 | Everything | `SmallChat` (umbrella) |
+| Score items by recency, centrality, novelty | `SmallChatImportance` (+ `SmallChatShorthand`) |
+| Multi-agent shared memory with conflict resolution | `SmallChatCRDT` |
+| Verify a compaction pass preserved semantics | `SmallChatCompaction` (+ `SmallChatShorthand`) |
+| Build a knowledge base from text sources | `SmallChatMemex` (+ `SmallChatShorthand`, optionally `SmallChatEmbedding`) |
+| Low-level text primitives only | `SmallChatShorthand` |
 
 ## Platform Support
 
@@ -136,3 +164,14 @@ SmallChat (umbrella)
 | SmallChatMCP | Yes | Limited | Server typically macOS only |
 | SmallChatChannel | Yes | No | Claude Code is desktop only |
 | SmallChatCLI | Yes | No | CLI tool |
+| SmallChatShorthand | Yes | Yes | Pure Swift, no dependencies |
+| SmallChatImportance | Yes | Yes | |
+| SmallChatCRDT | Yes | Yes | Pure Swift, no dependencies |
+| SmallChatCompaction | Yes | Yes | |
+| SmallChatMemex | Yes | Yes | Stage 3 (EMBED) requires caller to wire `SmallChatEmbedding` |
+
+## Phase 4 Heuristic Algorithms
+
+SmallChatCompaction and SmallChatMemex use deliberately conservative heuristics in place of semantic understanding. The algorithms are deterministic and dependency-free; the public API surface is shaped so richer LLM-backed implementations can land iteratively without breaking callers.
+
+See the [Phase 4 Algorithm Limitations guide](../guides/phase4-algorithms) for a breakdown of each heuristic, what it catches and misses, and the upgrade path to semantic implementations.
