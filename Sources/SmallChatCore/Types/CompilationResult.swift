@@ -8,6 +8,8 @@ public struct CompilationResult: Sendable {
     public var collisions: [SelectorCollision]
     public var overloadTables: [String: OverloadTableData]
     public var semanticOverloads: [SemanticOverloadGroup]
+    /// Populated by `AppCompiler.compile(_:)` when app manifests are compiled alongside tools.
+    public var appArtifact: AppArtifact?
 
     public init(
         selectors: [String: ToolSelector] = [:],
@@ -18,7 +20,8 @@ public struct CompilationResult: Sendable {
         mergedCount: Int = 0,
         collisions: [SelectorCollision] = [],
         overloadTables: [String: OverloadTableData] = [:],
-        semanticOverloads: [SemanticOverloadGroup] = []
+        semanticOverloads: [SemanticOverloadGroup] = [],
+        appArtifact: AppArtifact? = nil
     ) {
         self.selectors = selectors
         self.dispatchTables = dispatchTables
@@ -29,6 +32,7 @@ public struct CompilationResult: Sendable {
         self.collisions = collisions
         self.overloadTables = overloadTables
         self.semanticOverloads = semanticOverloads
+        self.appArtifact = appArtifact
     }
 }
 

@@ -44,6 +44,8 @@ struct ContentView: View {
                 DiscoveryView()
             case .refinement:
                 RefinementView()
+            case .apps:
+                AppsView()
             case .doctor:
                 DoctorView()
             }

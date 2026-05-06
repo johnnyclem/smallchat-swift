@@ -5,6 +5,69 @@ All notable changes to the Swift port of smallchat are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-06
+
+This release adds the App/UI layer, matching the TypeScript 0.6.0 feature set.
+Apps are first-class dispatch targets that expose HTML UI content via `ui://`
+URIs through the MCP `resources/read` endpoint. A new `SmallChatUI` library
+wraps `WKWebView` with sandboxed navigation for macOS/iOS app surfaces.
+
+### Added
+
+#### App/UI layer (`SmallChatCore`)
+
+- `ComponentSelector` — selector for UI components; parallel to `ToolSelector` with equality/hashing on `canonical`.
+- `AppManifest` + `ComponentDefinition` — manifest type carrying `uiResourceUri` (inline HTML or `file://` path).
+- `AppArtifact` + `AppClassData` — serialized compilation output for the App layer (embedded HTML, URI map, per-app dispatch table data).
+- `UIDispatchResult` — `resolved(appId:uri:content:)` / `notFound` enum; never thrown, enabling graceful-null dispatch.
+- `AppClass` — `@unchecked Sendable` class mirroring `ToolClass` with `OSAllocatedUnfairLock`-protected dispatch table, ISA chain traversal, and `loadExtension(_:)` support.
+- `ComponentSelectorTable` actor — interning table for component selectors with deduplication (cosine similarity ≥ threshold) and `resolve(intent:)`.
+- `ViewCache` actor — LRU cache for resolved views using `OrderedDictionary`; version-tagged entries auto-expire on `appVersion` or `contentFingerprint` mismatch.
+- `CompilationResult.appArtifact: AppArtifact?` — new field with `nil` default; zero impact on existing call sites.
+
+#### App compiler (`SmallChatCompiler`)
+
+- `AppCompiler` struct — 4-phase pipeline (PARSE → EMBED → LINK → EMIT) mirroring `ToolCompiler`; resolves inline HTML from `uiResourceUri`, deduplicates components via `ComponentSelectorTable`, emits `AppArtifact`.
+
+#### App runtime (`SmallChatRuntime`)
+
+- `AppRuntime` actor — parallel to `ToolRuntime`; `uiDispatch(intent:args:) async -> UIDispatchResult` (never throws), `uiDispatchStream` emitting `.resolving → .toolStart → .chunk → .done` `DispatchEvent` sequence.
+
+#### MCP App registration (`SmallChatMCP`)
+
+- `AppResourceHandler` — implements `ResourceHandler`; serves embedded HTML under `ui://` URIs with MIME type `text/html;profile=mcp-app`.
+- `MCPServer.registerApp(tool:uiUri:uiContent:)` extension — wires `AppResourceHandler` into the existing `ResourceRegistry` so `resources/read` on a `ui://` URI returns the HTML blob.
+
+#### SmallChatUI library (new SPM target)
+
+- `AppWebView` — SwiftUI view wrapping `WKWebView`; loads HTML content via `loadHTMLString(_:baseURL:)`.
+- `AppWebViewConfiguration` — factory producing a sandboxed `WKWebViewConfiguration` + `AppWebViewSandbox`; injects CSP `<meta>` via `WKUserScript`; one `WKProcessPool` per view (process isolation).
+- `AppWebViewSandbox` — `WKNavigationDelegate` enforcing same-origin navigation; exposes `static func shouldAllow(url:allowedURI:) -> Bool` for unit testing without `WKWebView`.
+- `AppViewState` — `@MainActor @ObservableObject` carrying `isLoading`, `loadError`, `currentURI`.
+
+#### GUI (SmallChatApp)
+
+- `AppsView` — new sidebar panel listing registered apps and previewing their `AppWebView` inline.
+- Added `.apps` case to `AppSection`; routed in `ContentView`.
+- `AppState.appRuntime`, `.registeredApps`, `.previewedAppURI`, `.previewedAppContent` state properties.
+
+#### Tests
+
+- `SmallChatCoreTests/ComponentSelectorTests.swift` — intern deduplication, resolve by intent.
+- `SmallChatCoreTests/AppClassTests.swift` — dispatch table, ISA chain traversal, extension loading.
+- `SmallChatCoreTests/ViewCacheTests.swift` — LRU eviction, version tagging, `flushApp`.
+- `SmallChatCompilerTests/AppCompilerTests.swift` — parse `uiResourceUri`, embed, link, emit artifact, integration smoke test.
+- `SmallChatRuntimeTests/AppRuntimeTests.swift` — `uiDispatch` graceful-null contract, stream event sequence.
+- `SmallChatMCPTests/AppResourceHandlerTests.swift` — `registerApp` → `resources/read` round-trip returns `text/html;profile=mcp-app`.
+- `SmallChatUITests/AppWebViewTests.swift` — `AppWebViewConfiguration`, `AppWebViewSandbox.shouldAllow`, `AppViewState` initial values.
+
+### Changed
+
+- Version bumped to `0.6.0` across CLI, MCP server, Compiler artifact, Memex, Dream, and GUI emit paths.
+- `Package.swift` — added `SmallChatUI` library product + target, `SmallChatUITests` test target; `SmallChatApp` and `SmallChat` umbrella now depend on `SmallChatUI`.
+
+---
+
 ## [0.5.0] - 2026-05-01
 
 This release closes the parity gap to the TypeScript main branch

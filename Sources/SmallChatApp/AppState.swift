@@ -1,5 +1,6 @@
 import Foundation
 import SmallChat
+import SmallChatUI
 
 // MARK: - Navigation
 
@@ -11,6 +12,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     case resolver = "Resolver"
     case discovery = "Discovery"
     case refinement = "Refinement"
+    case apps = "Apps"
     case doctor = "Doctor"
 
     var id: String { rawValue }
@@ -24,6 +26,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .resolver: return "arrow.triangle.branch"
         case .discovery: return "antenna.radiowaves.left.and.right"
         case .refinement: return "questionmark.circle"
+        case .apps: return "square.grid.2x2"
         case .doctor: return "stethoscope"
         }
     }
@@ -139,6 +142,20 @@ final class AppState {
     // MARK: - Doctor State
     var diagnosticResults: [DiagnosticCheck] = []
     var isRunningDiagnostics: Bool = false
+
+    // MARK: - 0.6.0: App/UI layer
+
+    /// Runtime for App/UI dispatch. Loaded when the user compiles an AppManifest.
+    var appRuntime: AppRuntime?
+
+    /// Registered app manifests (loaded from compiled artifact).
+    var registeredApps: [AppManifest] = []
+
+    /// Currently previewed app URI in the Apps panel.
+    var previewedAppURI: String = ""
+
+    /// HTML content for the currently previewed app (loaded from artifact).
+    var previewedAppContent: String = ""
 
     // MARK: - 0.5.0: confidence tiers + refinement + loom
 

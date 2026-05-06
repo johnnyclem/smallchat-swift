@@ -180,7 +180,7 @@ public struct MemexCompiler: Sendable {
         let contradictions = detectContradictions(claims: claims)
 
         return KnowledgeBase(
-            version: "0.5.0",
+            version: "0.6.0",
             compiledAt: now,
             sources: sources,
             pages: pages,
