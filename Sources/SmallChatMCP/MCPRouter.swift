@@ -2,6 +2,7 @@
 
 import Foundation
 import SmallChatCore
+import SmallChatRuntime
 
 // MARK: - Router Options
 
@@ -37,7 +38,7 @@ public actor MCPRouter {
     private let sseBroker: SSEBroker
     private let opts: RouterOptions
     private var artifact: SerializedArtifact?
-    private var refinementHandler: (@Sendable (_ intent: String, _ args: [String: AnyCodableValue]) async -> ToolRefinement?)?
+    private var refinementHandler: (@Sendable (_ intent: String, _ args: [String: AnyCodableValue]) async throws -> TieredDispatchResult)?
 
     public init(
         sessionStore: SessionStore,
@@ -58,10 +59,14 @@ public actor MCPRouter {
         self.artifact = artifact
     }
 
-    /// Set the runtime hook used by `tools/call` to surface
-    /// `tool_refinement_needed` results when no tool dispatches confidently.
+    /// Wire the ToolRuntime dispatch bridge used by `tools/call`.
+    ///
+    /// The handler is called for every tool invocation and must return a
+    /// `TieredDispatchResult`. All four outcome cases are mapped to MCP
+    /// responses: `.dispatched` → ok with content, `.decomposed` → decomposed,
+    /// `.refinement` → tool_refinement_needed, `.strictAmbiguityError` → error.
     public func setRefinementHandler(
-        _ handler: @escaping @Sendable (_ intent: String, _ args: [String: AnyCodableValue]) async -> ToolRefinement?
+        _ handler: @escaping @Sendable (_ intent: String, _ args: [String: AnyCodableValue]) async throws -> TieredDispatchResult
     ) {
         self.refinementHandler = handler
     }
@@ -233,28 +238,75 @@ public actor MCPRouter {
             arguments = [:]
         }
 
-        // Hand off to the runtime when a refinement handler is wired.
-        // A non-nil return means dispatch ended in a NONE-tier decision and
-        // we should surface a `tool_refinement_needed` MCP result.
-        if let handler = refinementHandler,
-           let refinement = await handler(toolName, arguments) {
+        guard let bridge = refinementHandler else {
+            return .ok(id, .dict([
+                "invocationId": .string(invocationId),
+                "status": .string("ok"),
+                "result": .dict(["note": .string("Tool execution for '\(toolName)' -- runtime dispatch pending")]),
+            ]))
+        }
+
+        let outcome: TieredDispatchResult
+        do {
+            outcome = try await bridge(toolName, arguments)
+        } catch {
+            return .error(id, code: MCPErrorCode.internalError.rawValue, message: error.localizedDescription)
+        }
+
+        switch outcome {
+        case .dispatched(let result, let tier, let proof):
+            let content = formatContent(result)
+            return .ok(id, .dict([
+                "invocationId": .string(invocationId),
+                "status": .string("ok"),
+                "isError": .bool(result.isError),
+                "content": .array(content.map { .dict($0) }),
+                "meta": .dict(["tier": .string(tier.rawValue), "proof": encodeProof(proof)]),
+            ]))
+
+        case .decomposed(let subIntents, let proof):
+            return .ok(id, .dict([
+                "invocationId": .string(invocationId),
+                "status": .string("decomposed"),
+                "subIntents": .array(subIntents.map { .string($0) }),
+                "meta": .dict(["proof": encodeProof(proof)]),
+            ]))
+
+        case .refinement(let refinement):
             return .ok(id, .dict([
                 "invocationId": .string(invocationId),
                 "status": .string(ToolRefinement.mcpResultType),
                 "result": encodeRefinement(refinement),
             ]))
-        }
 
-        // Placeholder until the full runtime is wired through (Phase 5).
-        return .ok(id, .dict([
-            "invocationId": .string(invocationId),
-            "status": .string("ok"),
-            "result": .dict(["note": .string("Tool execution for '\(toolName)' -- runtime dispatch pending")]),
-        ]))
+        case .strictAmbiguityError(let reason, _):
+            return .ok(id, .dict([
+                "invocationId": .string(invocationId),
+                "status": .string("error"),
+                "isError": .bool(true),
+                "content": .array([.dict(["type": .string("text"), "text": .string(reason)])]),
+            ]))
+        }
+    }
+
+    private func encodeProof(_ proof: ResolutionProof) -> AnyCodableValue {
+        let steps: [AnyCodableValue] = proof.steps.map { step in
+            .dict([
+                "stage": .string(step.stage),
+                "detail": .string(step.detail),
+                "outcome": .string(step.outcome.rawValue),
+                "elapsedMicroseconds": .int(step.elapsedMicroseconds),
+            ])
+        }
+        return .dict([
+            "finalTier": .string(proof.finalTier.rawValue),
+            "totalElapsedMicroseconds": .int(proof.totalElapsedMicroseconds),
+            "steps": .array(steps),
+        ])
     }
 
     private func encodeRefinement(_ refinement: ToolRefinement) -> AnyCodableValue {
-        var dict: [String: AnyCodableValue] = [
+        return .dict([
             "type": .string(ToolRefinement.mcpResultType),
             "originalIntent": .string(refinement.originalIntent),
             "reason": .string(refinement.reason),
@@ -267,21 +319,8 @@ public actor MCPRouter {
                     "confidence": .double(match.confidence),
                 ])
             }),
-        ]
-        let proofSteps: [AnyCodableValue] = refinement.proof.steps.map { step in
-            .dict([
-                "stage": .string(step.stage),
-                "detail": .string(step.detail),
-                "outcome": .string(step.outcome.rawValue),
-                "elapsedMicroseconds": .int(step.elapsedMicroseconds),
-            ])
-        }
-        dict["proof"] = .dict([
-            "finalTier": .string(refinement.proof.finalTier.rawValue),
-            "totalElapsedMicroseconds": .int(refinement.proof.totalElapsedMicroseconds),
-            "steps": .array(proofSteps),
+            "proof": encodeProof(refinement.proof),
         ])
-        return .dict(dict)
     }
 
     // MARK: - Resources

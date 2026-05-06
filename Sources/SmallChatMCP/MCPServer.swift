@@ -4,6 +4,7 @@ import Foundation
 import NIOCore
 import NIOHTTP1
 import SmallChatCore
+import SmallChatRuntime
 
 // MARK: - Server Configuration
 
@@ -179,6 +180,21 @@ public actor MCPServer {
 
     /// Access the OAuth manager.
     public var oauth: OAuthManager { oauthManager }
+
+    /// Wire a ToolRuntime so that tools/call requests dispatch through tieredDispatch.
+    ///
+    /// Call this after init and before start(). The runtime's DispatchContext is
+    /// captured by the closure; the runtime itself is held weakly inside the Task
+    /// isolation boundary via Swift actor semantics.
+    public func setRuntime(_ runtime: ToolRuntime) async {
+        await router.setRefinementHandler { [runtime] intent, args in
+            try await tieredDispatch(
+                context: runtime.context,
+                intent: intent,
+                args: args.mapValues { $0 as any Sendable }
+            )
+        }
+    }
 
     /// Access the SSE broker.
     public var sse: SSEBroker { sseBroker }
