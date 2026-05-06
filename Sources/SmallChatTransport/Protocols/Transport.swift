@@ -1,4 +1,5 @@
 import Foundation
+import SmallChatCore
 
 /// The universal transport protocol.
 ///
@@ -11,6 +12,12 @@ public protocol Transport: Sendable {
 
     /// Unique identifier for this transport instance.
     var id: String { get }
+
+    /// Categorical type of this transport (e.g. `.local`, `.mcp`).
+    ///
+    /// Default implementation returns `nil`. Override in concrete types to
+    /// expose type information that wrappers (e.g. `RtkTransport`) can forward.
+    var transportType: TransportType? { get }
 
     /// Execute a request and return a single response.
     func execute(input: TransportInput) async throws -> TransportOutput
@@ -127,6 +134,9 @@ public struct TLSError: Error, Sendable, CustomStringConvertible {
 // MARK: - Default Implementations
 
 extension Transport {
+
+    /// Default: transport type is unknown.
+    public var transportType: TransportType? { nil }
 
     /// Default streaming implementation: execute once and yield the result.
     public func executeStream(input: TransportInput) -> AsyncThrowingStream<TransportOutput, Error> {

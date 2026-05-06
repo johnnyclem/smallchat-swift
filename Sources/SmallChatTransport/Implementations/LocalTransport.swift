@@ -1,4 +1,5 @@
 import Foundation
+import SmallChatCore
 
 /// Handler type alias for local transport tool execution.
 public typealias LocalHandler = @Sendable (TransportInput) async throws -> TransportOutput
@@ -12,6 +13,7 @@ public typealias LocalHandler = @Sendable (TransportInput) async throws -> Trans
 public actor LocalTransport: Transport {
 
     public nonisolated let id: String
+    public nonisolated var transportType: TransportType? { .local }
 
     private var handlers: [String: LocalHandler] = [:]
     private var fallbackHandler: LocalHandler?
