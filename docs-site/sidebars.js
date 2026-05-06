@@ -33,6 +33,7 @@ const sidebars = {
         "guides/claude-code-integration",
         "guides/transport",
         "guides/security",
+        "guides/phase4-algorithms",
       ],
     },
     {
