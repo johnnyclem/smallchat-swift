@@ -7,3 +7,4 @@
 @_exported import SmallChatMCP
 @_exported import SmallChatChannel
 @_exported import SmallChatDream
+@_exported import SmallChatUI

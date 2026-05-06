@@ -19,6 +19,7 @@ let package = Package(
         .library(name: "SmallChatCompaction", targets: ["SmallChatCompaction"]),
         .library(name: "SmallChatMemex", targets: ["SmallChatMemex"]),
         .library(name: "SmallChat", targets: ["SmallChat"]),
+        .library(name: "SmallChatUI", targets: ["SmallChatUI"]),
         .executable(name: "smallchat", targets: ["SmallChatCLI"]),
         .executable(name: "SmallChatApp", targets: ["SmallChatApp"]),
     ],
@@ -112,6 +113,11 @@ let package = Package(
                 "SmallChatImportance",
             ]
         ),
+        // ---- UI (App/UI layer — SwiftUI + WKWebView wrapper) ----
+        .target(
+            name: "SmallChatUI",
+            dependencies: []
+        ),
         // ---- Umbrella ----
         .target(
             name: "SmallChat",
@@ -129,6 +135,7 @@ let package = Package(
                 "SmallChatCRDT",
                 "SmallChatCompaction",
                 "SmallChatMemex",
+                "SmallChatUI",
             ]
         ),
         // ---- CLI ----
@@ -142,10 +149,10 @@ let package = Package(
         // ---- macOS GUI App ----
         .executableTarget(
             name: "SmallChatApp",
-            dependencies: ["SmallChat"]
+            dependencies: ["SmallChat", "SmallChatUI"]
         ),
         // ---- Tests ----
-        .testTarget(name: "SmallChatCoreTests", dependencies: ["SmallChatCore"]),
+        .testTarget(name: "SmallChatCoreTests", dependencies: ["SmallChatCore", "SmallChatEmbedding"]),
         .testTarget(name: "SmallChatRuntimeTests", dependencies: ["SmallChatRuntime", "SmallChatCore", "SmallChatEmbedding"]),
         .testTarget(name: "SmallChatCompilerTests", dependencies: ["SmallChatCompiler", "SmallChatCore", "SmallChatEmbedding"]),
         .testTarget(name: "SmallChatEmbeddingTests", dependencies: ["SmallChatEmbedding"]),
@@ -158,5 +165,6 @@ let package = Package(
         .testTarget(name: "SmallChatCRDTTests", dependencies: ["SmallChatCRDT"]),
         .testTarget(name: "SmallChatCompactionTests", dependencies: ["SmallChatCompaction"]),
         .testTarget(name: "SmallChatMemexTests", dependencies: ["SmallChatMemex", "SmallChatCore"]),
+        .testTarget(name: "SmallChatUITests", dependencies: ["SmallChatUI"]),
     ]
 )

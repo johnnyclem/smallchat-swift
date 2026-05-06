@@ -318,7 +318,7 @@ struct DiscoveryView: View {
         }
 
         return [
-            "version": "0.5.0",
+            "version": "0.6.0",
             "timestamp": ISO8601DateFormatter().string(from: Date()),
             "embedding": [
                 "model": "hash-based",
