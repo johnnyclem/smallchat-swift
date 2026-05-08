@@ -21,6 +21,7 @@ const sidebars = {
         "concepts/tool-classes",
         "concepts/selectors",
         "concepts/resolution-pipeline",
+        "concepts/nexus-vs-smallchat",
       ],
     },
     {
