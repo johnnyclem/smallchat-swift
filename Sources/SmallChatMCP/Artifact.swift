@@ -3,6 +3,12 @@
 import Foundation
 import SmallChatCore
 
+/// The compiled-artifact format version emitted by this implementation. Matches
+/// the TypeScript reference (`src/mcp/artifact.ts`) so that artifacts compiled by
+/// either runtime are interchangeable. Loading is version-agnostic (older 0.1.0 /
+/// 0.3.0 artifacts still decode).
+public let ARTIFACT_FORMAT_VERSION = "0.5.0"
+
 // MARK: - Serialized Artifact
 
 /// A compiled tool artifact that can be saved to and loaded from disk.
@@ -11,13 +17,17 @@ import SmallChatCore
 /// selectors with their embedding vectors and dispatch tables
 /// mapping providers to tool implementations.
 public struct SerializedArtifact: Sendable, Codable {
+    /// Artifact format version. We *write* `ARTIFACT_FORMAT_VERSION` ("0.5.0") to
+    /// match the TypeScript `@smallchat/core` artifact ABI, and *read* any version
+    /// (Codable does not constrain this field), preserving backward compatibility
+    /// with older 0.1.0/0.3.0 artifacts.
     public let version: String
     public let stats: ArtifactStats
     public let selectors: [String: SelectorData]
     public let dispatchTables: [String: [String: DispatchEntry]]
 
     public init(
-        version: String = "0.1.0",
+        version: String = ARTIFACT_FORMAT_VERSION,
         stats: ArtifactStats,
         selectors: [String: SelectorData],
         dispatchTables: [String: [String: DispatchEntry]]
@@ -195,7 +205,7 @@ public func buildArtifact(
     }
 
     return SerializedArtifact(
-        version: "0.1.0",
+        version: ARTIFACT_FORMAT_VERSION,
         stats: ArtifactStats(
             toolCount: result.toolCount,
             uniqueSelectorCount: result.uniqueSelectorCount,

@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(os)
 import os
+#endif
 
 /// ToolClass -- a group of related tools from one provider.
 /// Equivalent to an Objective-C class with dispatch table, protocols, superclass chain, and overload tables.

@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(os)
 import os
+#endif
 
 /// An entry in the overload table
 public struct OverloadEntry: @unchecked Sendable {
