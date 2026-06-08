@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public final class SCDictionary: SCObject, @unchecked Sendable {
     private static let registered: Bool = {

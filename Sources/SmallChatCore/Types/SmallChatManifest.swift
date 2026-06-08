@@ -103,7 +103,7 @@ public struct ManifestOutputConfig: Sendable, Codable {
 }
 
 /// Compiler hints for a specific tool.
-public struct CompilerHint: Sendable, Codable {
+public struct CompilerHint: Sendable, Codable, Equatable {
     /// Selector hint override.
     public let selectorHint: String?
     /// Pinned canonical selector (bypasses embedding).
@@ -139,7 +139,7 @@ public struct CompilerHint: Sendable, Codable {
 }
 
 /// Provider-level compiler hints.
-public struct ProviderCompilerHints: Sendable, Codable {
+public struct ProviderCompilerHints: Sendable, Codable, Equatable {
     /// Default priority for all tools from this provider.
     public let defaultPriority: Double?
     /// Namespace prefix for selectors.

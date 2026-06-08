@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public enum IntentPinPolicy: String, Sendable {
     case exact

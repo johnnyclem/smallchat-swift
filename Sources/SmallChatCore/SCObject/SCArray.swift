@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public final class SCArray: SCObject, @unchecked Sendable {
     private static let registered: Bool = {

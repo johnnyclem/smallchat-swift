@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public final class SCObjectRegistry: Sendable {
     public static let shared = SCObjectRegistry()

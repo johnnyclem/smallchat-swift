@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 private let idGenerator = OSAllocatedUnfairLock(initialState: 0)
 private func nextId() -> Int {
