@@ -1,4 +1,4 @@
-public final class SCToolReference: SCObject {
+public final class SCToolReference: SCObject, @unchecked Sendable {
     private static let registered: Bool = {
         SCObjectRegistry.shared.register("SCToolReference", superclass: "SCObject")
         return true

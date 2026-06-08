@@ -1,4 +1,4 @@
-public final class SCData: SCObject {
+public final class SCData: SCObject, @unchecked Sendable {
     private static let registered: Bool = {
         SCObjectRegistry.shared.register("SCData", superclass: "SCObject")
         return true

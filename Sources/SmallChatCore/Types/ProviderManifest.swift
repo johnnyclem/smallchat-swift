@@ -1,4 +1,4 @@
-public struct ProviderManifest: Sendable, Codable {
+public struct ProviderManifest: Sendable, Codable, Equatable {
     public let id: String
     public let name: String
     public let tools: [ToolDefinition]
@@ -31,7 +31,7 @@ public struct ProviderManifest: Sendable, Codable {
         self.compilerHints = compilerHints
     }
 
-    public struct ChannelInfo: Sendable, Codable {
+    public struct ChannelInfo: Sendable, Codable, Equatable {
         public let isChannel: Bool
         public let twoWay: Bool
         public let permissionRelay: Bool

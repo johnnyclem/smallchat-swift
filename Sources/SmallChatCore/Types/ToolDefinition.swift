@@ -1,4 +1,4 @@
-public struct ToolDefinition: Sendable, Codable {
+public struct ToolDefinition: Sendable, Codable, Equatable {
     public let name: String
     public let description: String
     public let inputSchema: JSONSchemaType

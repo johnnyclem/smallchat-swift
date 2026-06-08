@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Entry for a protected core selector
 public struct CoreSelectorEntry: Sendable {
