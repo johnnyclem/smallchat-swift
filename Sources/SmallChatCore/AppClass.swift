@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(os)
 import os
+#endif
 
 /// AppExtension -- new components bolted onto an AppClass (like an Obj-C category).
 public struct AppExtension: Sendable {

@@ -5,6 +5,38 @@ All notable changes to the Swift port of smallchat are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Work toward a 1:1 ABI with the TypeScript `@smallchat/core` reference. ABI is
+defined as **semantic interchange**: identical selectors, dispatch tables, and
+resolution results, with embedding-vector components equal within Float32 epsilon
+(the Swift pipeline is Float32; the TS pipeline is Float64, so low-order JSON
+digits of stored vectors may differ — the one documented exception).
+
+### Changed
+
+- **`LocalEmbedder` is now byte/Float32-compatible with the TS reference**
+  (`src/embedding/local-embedder.ts`). The previous implementation hashed UTF-8
+  bytes with Unicode-aware tokenization and could trap on an `Int32.min` hash;
+  it now hashes **UTF-16 code units** (`charCodeAt`), tokenizes with the TS ASCII
+  rule `toLowerCase().replace(/[^a-z0-9\s]/g,'')`, and reproduces the reference's
+  lossy `(hash * 0x01000193) | 0` fold via an exact double-multiply + ECMAScript
+  `ToInt32`. Verified against the verbatim JS algorithm across ASCII, non-ASCII,
+  trigram, overflow, and empty inputs (max component diff ~6e-08). Added
+  `LocalEmbedderParityTests` with golden vectors.
+- **Compiled artifact now emits format version `0.5.0`** (`ARTIFACT_FORMAT_VERSION`)
+  to match the TS artifact ABI, replacing the previous hardcoded `0.1.0`. Loading
+  remains version-agnostic, so older 0.1.0/0.3.0 artifacts still decode.
+
+### Added (cross-platform build)
+
+- Conditional `#if canImport(os)` / `#if canImport(Accelerate)` guards and a
+  portable `OSAllocatedUnfairLock` shim (`Compat/PlatformLock.swift`) plus scalar
+  `cosineSimilarity` / `l2Normalize` fallbacks, so the ABI-critical core and
+  embedding modules can compile and unit-test off-Apple platforms. macOS/iOS
+  behavior is unchanged (the platform `os`/`Accelerate` paths are restored when
+  available).
+
 ## [0.6.0] - 2026-05-06
 
 This release adds the App/UI layer, matching the TypeScript 0.6.0 feature set.
