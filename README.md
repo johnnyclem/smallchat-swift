@@ -342,6 +342,15 @@ The channel uses **JSON-RPC 2.0 over stdio** and supports:
 
 No external embedding models are required. The built-in `LocalEmbedder` uses FNV-1a hash-based embeddings (384 dimensions) for development and testing. For production, provide a custom `Embedder` conformance backed by your embedding model of choice.
 
+## Ecosystem
+
+smallchat-swift is one of four sibling projects (AgentVault, SmallChat, Stenographer, Short-Hand)
+sharing a design philosophy for autonomous agent infrastructure. See
+[`docs/ecosystem/executive-summary.md`](docs/ecosystem/executive-summary.md) and
+[`docs/ecosystem/engineering-guide.md`](docs/ecosystem/engineering-guide.md) for a source-verified
+evaluation of how this repo fits into that stack, including a naming-collision gap between this
+repo's `SmallChatShorthand` module and the unrelated sibling "Short-Hand" project.
+
 ## Development
 
 ```bash
