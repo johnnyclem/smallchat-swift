@@ -34,6 +34,27 @@ struct DispatchTierTests {
         #expect(DispatchConfig(strict: true).strict == true)
     }
 
+    @Test("miniLM preset classifies MiniLM-typical paraphrase scores as HIGH, not LOW")
+    func miniLMPresetClassifiesTypicalScoresHigher() {
+        let config = DispatchConfig.miniLM
+        // Observed MiniLM cosine scores for a *correct* paraphrase match
+        // (see smallchat-swift#36): the plain default lands these at .low,
+        // the miniLM preset should recognize them as confident matches.
+        #expect(config.tier(for: 0.74) == .high)
+        #expect(config.tier(for: 0.61) == .medium)
+    }
+
+    @Test("miniLM preset thresholds are strictly looser than the plain default")
+    func miniLMPresetIsLooserThanDefault() {
+        let plain = DispatchConfig()
+        let miniLM = DispatchConfig.miniLM
+        #expect(miniLM.exactThreshold < plain.exactThreshold)
+        #expect(miniLM.highThreshold < plain.highThreshold)
+        #expect(miniLM.mediumThreshold < plain.mediumThreshold)
+        #expect(miniLM.lowThreshold < plain.lowThreshold)
+        #expect(miniLM.vectorSearchThreshold < plain.vectorSearchThreshold)
+    }
+
     @Test("ResolutionProof records steps and totals microseconds")
     func proofRecording() {
         var proof = ResolutionProof()
