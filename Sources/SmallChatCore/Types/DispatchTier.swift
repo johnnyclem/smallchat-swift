@@ -73,6 +73,26 @@ public struct DispatchConfig: Sendable, Codable, Equatable {
         self.strict = strict
     }
 
+    /// Thresholds recalibrated for `all-MiniLM-L6-v2` (and similarly
+    /// "low-contrast") sentence embedders.
+    ///
+    /// The library defaults were tuned against a higher-contrast embedding
+    /// space; against MiniLM cosine similarities, clear correct-tool
+    /// paraphrases commonly score 0.60-0.74, which the default thresholds
+    /// classify as `.low` -- triggering decomposition/refinement for matches
+    /// that are, in fact, unambiguous. This preset shifts the tier bands
+    /// down to match MiniLM's observed score distribution. Validate against
+    /// your own toolkit before relying on it in production; embedding-space
+    /// contrast varies with corpus size and tool-description style. See
+    /// johnnyclem/smallchat-swift#36.
+    public static let miniLM = DispatchConfig(
+        vectorSearchThreshold: 0.45,
+        exactThreshold: 0.92,
+        highThreshold: 0.75,
+        mediumThreshold: 0.60,
+        lowThreshold: 0.40
+    )
+
     /// Classify a confidence value into a tier, considering the gap to the
     /// runner-up candidate (if any). When `runnerUp` is closer than
     /// `ambiguityGap`, downgrade by one tier.

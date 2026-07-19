@@ -27,7 +27,7 @@ The canonical form is embedded into a 384-dimensional vector:
 
 ### 3. Selector Interning
 
-The vector is checked against the `SelectorTable`. If a sufficiently similar selector already exists (cosine similarity > 0.95), it's reused. Otherwise, a new selector is created and interned.
+The vector is checked against the `SelectorTable`'s compiled tool selectors. If it's sufficiently similar to an existing tool selector (cosine similarity > 0.95), that tool selector is reused. Otherwise the intent gets its own `ToolSelector` value, cached in a bounded, LRU-evicted intent cache that's kept separate from the tool selector table and vector index — intents never get inserted into either, so they can't accumulate unbounded state or crowd real tools out of the top-K window in step 6.
 
 ### 4. Intent Pin Check (Fast Path)
 
@@ -122,6 +122,35 @@ The execution phase selects the best streaming tier:
 1. **InferenceIMP** — Token-level deltas (`.inferenceDelta`)
 2. **StreamableIMP** — Chunk-level results (`.chunk`)
 3. **ToolIMP** — Single-shot, wrapped in `.done`
+
+## Tiered Dispatch (0.5.0+)
+
+`tieredDispatch` wraps the pipeline above with confidence-tier classification (`DispatchTier`: `.exact`, `.high`, `.medium`, `.low`, `.none`), each with distinct behavior:
+
+| Tier | Behavior |
+|------|----------|
+| `.exact` / `.high` | Execute immediately |
+| `.medium` | Run pre-flight `verifyCandidate`; on failure, downgrade to `.low` (or error, under `strict`) |
+| `.low` | Attempt rule-based `decomposeIntent`; on failure, fall through to refinement |
+| `.none` | Emit a `ToolRefinement` (`tool_refinement_needed`) |
+
+### Behavior without an `LLMClient`
+
+`tieredDispatch` takes an `LLMClient` (default `NoOpLLMClient`). Every stage degrades to a deterministic, non-LLM strategy rather than skipping its safety check:
+
+- **`.medium` verification** (`verifyCandidate`) still validates required arguments against the tool's schema and computes a keyword-overlap score between the intent and the tool's name/description. Only when *both* pass — and no `LLMClient` is available to weigh in further — is the dispatch allowed to proceed.
+- **`.low` decomposition** (`decomposeIntent`) only splits on explicit rule-based conjunctions ("then", "and then", "; ", etc.). If no conjunction is found and no `LLMClient` is configured, it does **not** fall through to executing the top match — it returns to `makeRefinement`, which asks the user to disambiguate.
+
+In short: running without an `LLMClient` makes tier classification coarser (verification and decomposition lose their LLM-assisted strategies), but it does not turn `.medium`/`.low` into silent auto-execute paths. If you *do* want an even stricter posture for destructive tools, set `DispatchConfig.strict = true` so any tier below `.high` returns a `StrictAmbiguityError` instead of dispatching.
+
+### Threshold calibration
+
+The default `DispatchConfig` thresholds (`exactThreshold: 0.98`, `highThreshold: 0.85`, `mediumThreshold: 0.70`, `lowThreshold: 0.55`, `vectorSearchThreshold: 0.60`) assume a relatively high-contrast embedding space. Lower-contrast sentence embedders — `all-MiniLM-L6-v2` in particular — commonly score clear, correct-tool paraphrases in the 0.60–0.74 range, which the defaults classify as `.low` even though the match is unambiguous. If you're embedding with MiniLM (or seeing most of your traffic land in `.low`/`.none` despite good matches), start from `DispatchConfig.miniLM` instead of the plain default and tune from there against your own toolkit:
+
+```swift
+let config = DispatchConfig.miniLM
+let context = DispatchContext(..., dispatchConfig: config)
+```
 
 ## Error Cases
 

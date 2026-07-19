@@ -64,15 +64,18 @@ This normalization ensures consistent matching regardless of phrasing variations
 
 ## Selector Interning
 
-The `SelectorTable` deduplicates selectors. If two intents embed to vectors with similarity above the interning threshold (default 0.95), they resolve to the **same** canonical selector:
+The `SelectorTable` deduplicates **compiled tool selectors**. If a tool's canonical name is registered and a later lookup (compile-time or an intent embedding at runtime) lands within the interning threshold (default 0.95) of it, that lookup resolves to the **same** tool selector rather than minting a new one:
 
 ```swift
-"search flights"    → selector_42
-"find flights"      → selector_42  // same! (similarity > 0.95)
-"book a hotel room" → selector_87  // different
+// "search_flights" is a registered tool selector
+"search flights"    → selector_42  // exact canonical match
+"find flights"      → selector_42  // same! (embeds within 0.95 of the tool's own selector)
+"book a hotel room" → selector_87  // a different registered tool
 ```
 
-This means natural paraphrases of the same intent share a single dispatch path and cache entry.
+This means natural paraphrases of a tool's own name resolve to the same dispatch path and cache entry.
+
+Only the compiled tool space is deduplicated this way. Runtime intents that *don't* land near an existing tool selector are cached in a separate, bounded, LRU-evicted intent cache — never inserted into the tool vector index itself. Earlier versions interned every resolved intent into the same table and index as compiled tools, which meant every distinct intent a long-running process ever saw was retained forever, diluting the fixed `topK` window that tool similarity search draws candidates from. Splitting the two spaces fixes both the unbounded growth and the crowding-out risk (see [smallchat-swift#36](https://github.com/johnnyclem/smallchat-swift/issues/36)).
 
 ## Resolution Cache
 
