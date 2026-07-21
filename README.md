@@ -33,46 +33,29 @@ This is the **native Swift implementation** of [smallchat](https://github.com/jo
                          └─────────────────────┘
 ```
 
-## What's New in 0.5.0
+**Table of contents:** [What's New](#whats-new-in-060) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Streaming](#streaming) · [CLI Reference](#cli-reference) · [Architecture](#architecture) · [Security](#security) · [MCP Server](#mcp-server) · [Claude Code Integration](#claude-code-integration) · [Dependencies](#dependencies) · [Ecosystem](#ecosystem) · [Development](#development)
 
-This release closes the gap to the TypeScript main branch and adds the
-loom-mcp integration as a first-class compile target.
+## What's New in 0.6.0
 
-- **Confidence-tiered dispatch** (TS PR #54). Every dispatch now returns
-  one of `EXACT / HIGH / MEDIUM / LOW / NONE`. MEDIUM triggers pre-flight
-  verification, LOW decomposes into sub-intents, and NONE returns a
-  structured `tool_refinement_needed` payload with a replayable proof
-  trace. The default vector-search threshold drops from 0.75 to 0.60;
-  tier classification handles the additional noise.
-- **loom-mcp as a compile target** (TS PR #61). The bundled
-  `examples/loom-mcp-manifest.json` advertises 28 loom tools with
-  `selectorHint`s and aliases; the compiler folds them into the embedder
-  input so phrases like "find callers of foo" route to
-  `loom_find_importers`. A typed `LoomMCPClient` wraps the existing
-  stdio transport for runtime use.
-- **Registry / Bundle / Install schemas** (TS PR #52). New types in
-  `SmallChatCore` describe the distribution layer: `RegistryEntry`,
-  `RegistryIndex`, `SmallChatBundle`, `InstallPlan`.
-  `smallchat install <path>` renders an `InstallPlan` (dry-run only).
-  Examples for GitHub, Slack, PostgreSQL, and loom under
-  `examples/registry/`.
-- **Five new modules** ported from TS PRs #55–#58, #60:
-  `SmallChatShorthand` (text primitives), `SmallChatImportance`
-  (three-signal detector), `SmallChatCRDT` (LWWMap, ORSet, GCounter,
-  VectorClock), `SmallChatCompaction` (three-strategy verification),
-  `SmallChatMemex` (knowledge-base compiler with the same
-  Read → Extract → Embed → Link → Emit pipeline as `ToolCompiler`).
-- **`smallchat memex`** — a new CLI suite (`compile`, `query`, `lint`,
-  `inspect`, `export`) that mirrors the TS Memex surface.
-- **`--strict`** on `smallchat compile` raises dedup / collision
-  thresholds and treats collisions as compile errors (exit code 2).
-- **GUI surfaces**: tier badges, refinement panel, loom-mcp status in
-  Discovery, on top of the macOS SwiftUI app added in 0.3.0.
-- Version reporting bumped to 0.5.0 across CLI commands, the MCP server,
-  and the compiled artifact format.
+This release adds the **App/UI layer**, matching the TypeScript 0.6.0 feature
+set: apps are now first-class dispatch targets that expose HTML UI content
+via `ui://` URIs through the MCP `resources/read` endpoint.
 
-See `docs/0.5.0-roadmap.md` for the per-phase breakdown and
-`CHANGELOG.md` for the cumulative diff against 0.3.0.
+- **App/UI layer** (`SmallChatCore`, `SmallChatCompiler`, `SmallChatRuntime`, `SmallChatMCP`). `ComponentSelector` and `AppManifest`/`ComponentDefinition` describe UI components alongside tools; `AppCompiler` runs the same 4-phase PARSE → EMBED → LINK → EMIT pipeline as `ToolCompiler` to produce an `AppArtifact`; `AppRuntime` mirrors `ToolRuntime` with a never-throwing `uiDispatch(intent:args:)`; `AppResourceHandler` serves the resolved HTML over MCP.
+- **`SmallChatUI`** — new SwiftUI library wrapping `WKWebView` (`AppWebView`) with a sandboxed configuration (`AppWebViewSandbox`) that enforces same-origin navigation and injects a CSP via `WKUserScript`, one `WKProcessPool` per view for process isolation.
+- **GUI**: the macOS app (`SmallChatApp`) gained an Apps sidebar section that lists registered apps and previews them inline via `AppWebView`.
+
+Since 0.6.0, `main` has also picked up:
+
+- **`RtkTransport`** (`SmallChatTransport`) — a transport-wrapping actor that ports the TS `rtk-which` / `rtk-transport` integration: prefixes eligible shell commands with `rtk` and pipes response bodies ≥ 512 B through `rtk filter`, with metadata attached to every response for observability. Pure pass-through when disabled.
+- **`DispatchConfig.miniLM`** — a threshold preset recalibrated for lower-contrast sentence embedders (e.g. `all-MiniLM-L6-v2`), where correct-tool paraphrases commonly score 0.60–0.74 and get misclassified as `.low` under the library defaults.
+- **Bounded selector cache** — `SelectorTable.resolve()` no longer inserts runtime intents into the shared tool-selector vector index; they're now cached in a bounded, LRU-evicted side table so long-running processes can't dilute real tool candidates or accumulate unbounded state.
+- **`LocalEmbedder`** is now byte/Float32-compatible with the TS reference implementation (UTF-16 hashing, ASCII tokenization rule, exact `ToInt32` fold), verified against golden vectors.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the full history, including the 0.5.0
+confidence-tiered dispatch, loom-mcp, and Registry/Install release
+(`docs/0.5.0-roadmap.md` has the per-phase breakdown) and the earlier 0.3.0
+security-hardening release.
 
 ## Quick Start
 
@@ -82,9 +65,11 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "0.5.0"),
+    .package(url: "https://github.com/johnnyclem/smallchat-swift", branch: "main"),
 ]
 ```
+
+> This repo doesn't cut version tags yet, so pin to `branch: "main"` (or a specific commit/revision) rather than `from:` — a version requirement will fail to resolve.
 
 Then add the module you need:
 
@@ -160,7 +145,8 @@ User Intent (natural language string)
 │    O(1) hit for previously resolved intents                  │
 ├──────────────────────────────────────────────────────────────┤
 │ 5. Vector Search                                             │
-│    Cosine similarity, top-5 candidates, threshold 0.75       │
+│    Cosine similarity, top-5 candidates, threshold 0.60       │
+│    (tune per embedder — see DispatchConfig.miniLM)           │
 ├──────────────────────────────────────────────────────────────┤
 │ 6. Overload Resolution                                       │
 │    Type-validated signature matching against arguments       │
@@ -226,14 +212,18 @@ swift run smallchat <command> [options]
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `compile` | Compile manifests into a dispatch artifact | `smallchat compile --source ~/.mcp.json` |
+| `setup` | Interactive wizard — auto-detect MCP servers and compile a toolkit | `smallchat setup` |
+| `compile` | Compile manifests into a dispatch artifact (`--strict` treats collisions as errors) | `smallchat compile --source ~/.mcp.json` |
 | `resolve` | Test intent-to-tool resolution | `smallchat resolve tools.toolkit.json "search for code"` |
 | `serve` | Start an MCP-compatible HTTP server | `smallchat serve --source ./manifests --port 3001` |
 | `channel` | Start a Claude Code channel server | `smallchat channel --port 3002` |
+| `install` | Render an install plan for a registry entry or bundle | `smallchat install examples/registry/github.json` |
 | `init` | Scaffold a new project from a template | `smallchat init my-app --template agent` |
 | `repl` | Interactive resolution shell | `smallchat repl tools.toolkit.json` |
 | `docs` | Generate Markdown documentation | `smallchat docs --artifact tools.toolkit.json -o docs.md` |
 | `inspect` | Examine a compiled artifact | `smallchat inspect tools.toolkit.json` |
+| `dream` | Re-compile tools from Claude session/memory insights | `smallchat dream --source ~/.claude` |
+| `memex` | Knowledge-base compiler (`compile`, `query`, `lint`, `inspect`, `export`) | `smallchat memex compile notes/*.md -o kb.json` |
 | `doctor` | Diagnose environment issues | `smallchat doctor` |
 
 ## Architecture
@@ -241,34 +231,49 @@ swift run smallchat <command> [options]
 ### Module Map
 
 ```
-SmallChatCore          Foundation: types, selectors, dispatch tables, cache
+SmallChatCore          Foundation: types, selectors, dispatch tables, cache, App/UI types
        │
-SmallChatRuntime       Dispatch engine, fluent API, streaming, swizzling
+SmallChatRuntime       Dispatch engine, fluent API, streaming, swizzling, AppRuntime
        │
-   ┌───┼───────────┬──────────────┬──────────────┐
-   │   │           │              │              │
-Compiler  Embedding  Transport      MCP         Channel
-   │       │         │              │              │
-   │   FNV-1a hash   HTTP/SSE/     MCP Server    Claude Code
-   │   vector index  stdio NIO     OAuth/SQLite   JSON-RPC
+   ┌───┼───────────┬──────────────┬──────────────┬───────────┐
+   │   │           │              │              │           │
+Compiler  Embedding  Transport      MCP         Channel      Dream
+   │       │         │              │              │           │
+   │   FNV-1a hash   HTTP/SSE/     MCP Server    Claude Code  Memory-driven
+   │   vector index  stdio NIO,    OAuth/SQLite   JSON-RPC     recompilation
+   │                 rtk filter,   App resources
+   │                 loom client
    │
-SmallChat ─── Umbrella module (re-exports everything)
+Shorthand ── Importance / CRDT / Compaction / Memex   (text + memory primitives)
    │
-SmallChatCLI ─── 9 commands via swift-argument-parser
+SmallChatUI ─── WKWebView wrapper for App/UI surfaces (sandboxed, CSP-injected)
+   │
+SmallChat ─── Umbrella module (re-exports everything above)
+   │
+   ├── SmallChatCLI ─── 13 commands via swift-argument-parser
+   └── SmallChatApp ─── macOS SwiftUI GUI (compiler, server, discovery, apps)
 ```
 
 ### Modules
 
 | Module | Description |
 |--------|-------------|
-| **SmallChatCore** | Type system, selectors, dispatch tables, resolution cache, overload tables, canonicalization, vector math, intent pinning, rate limiting |
-| **SmallChatRuntime** | `ToolRuntime` actor, dispatch pipeline, `DispatchBuilder` fluent API, streaming events, method swizzling |
-| **SmallChatCompiler** | 4-phase compilation pipeline: parse → embed → link → output |
-| **SmallChatEmbedding** | `LocalEmbedder` (FNV-1a hash, 384 dims), `MemoryVectorIndex` for dev/test |
-| **SmallChatTransport** | Protocol-agnostic transport layer — HTTP, MCP stdio, MCP SSE, local — with auth, retry, timeout, and circuit breaker middleware |
-| **SmallChatMCP** | Full MCP 2024-11-05 server: routing, sessions (SQLite), OAuth 2.1, rate limiting, audit logging, SSE broker |
+| **SmallChatCore** | Type system, selectors, dispatch tables, resolution cache, overload tables, canonicalization, vector math, intent pinning, rate limiting, confidence tiers (`DispatchConfig`, incl. the `miniLM` preset), App/UI types (`ComponentSelector`, `AppManifest`, `AppArtifact`) |
+| **SmallChatRuntime** | `ToolRuntime` actor, dispatch pipeline, `DispatchBuilder` fluent API, streaming events, method swizzling, tiered dispatch (verify/decompose/refine), `AppRuntime` for UI dispatch |
+| **SmallChatCompiler** | 4-phase compilation pipeline: parse → embed → link → output, plus `AppCompiler` for the App/UI layer |
+| **SmallChatEmbedding** | `LocalEmbedder` (FNV-1a hash, 384 dims, TS-parity), `MemoryVectorIndex` for dev/test |
+| **SmallChatTransport** | Protocol-agnostic transport layer — HTTP, MCP stdio, MCP SSE, local — with auth, retry, timeout, and circuit breaker middleware; `LoomMCPClient` for loom-mcp; `RtkTransport` for `rtk`-based prefixing/filtering |
+| **SmallChatMCP** | Full MCP 2024-11-05 server: routing, sessions (SQLite), OAuth 2.1, rate limiting, audit logging, SSE broker, `AppResourceHandler` for `ui://` resources |
 | **SmallChatChannel** | Claude Code integration: JSON-RPC 2.0 over stdio, sender gating, permission relay |
+| **SmallChatDream** | Memory-driven tool re-compilation: reads Claude session/memory logs to discover tool usage and recompile toolkits |
+| **SmallChatShorthand** | Text primitives shared by the modules below — tokenization, Jaccard/cosine similarity, FNV-1a content hashing |
+| **SmallChatImportance** | Three-signal importance detector (recency decay, co-mention centrality, novelty) with weighted ranking |
+| **SmallChatCRDT** | Conflict-free replicated types for multi-agent shared memory: `LWWMap`, `ORSet`, `GCounter`, `VectorClock` |
+| **SmallChatCompaction** | `CompactionVerifier` — three-strategy verification (resampling, contradiction detection, invariants) for safe history compaction |
+| **SmallChatMemex** | Knowledge-base compiler: the same Read → Extract → Embed → Link → Emit pipeline as `ToolCompiler`, driving `smallchat memex` |
+| **SmallChatUI** | SwiftUI `WKWebView` wrapper (`AppWebView`) for rendering App/UI content, with sandboxed navigation and CSP injection |
 | **SmallChat** | Umbrella module — imports and re-exports all of the above |
+| **SmallChatApp** | macOS SwiftUI GUI executable — Compiler, Server, Manifest editor, Inspector, Resolver, Discovery, Apps, and Doctor sections |
 
 ## Security
 
@@ -281,6 +286,7 @@ smallchat is designed to run in adversarial environments where untrusted inputs 
 | **Type Validation** | Validates argument types against method signatures before dispatch, preventing type confusion attacks. |
 | **Sender Gating** | Allowlist-based access control with identity validation, max sender limits, and constant-time pairing code verification (v0.3.0). |
 | **Semantic Rate Limiting** | Prevents vector flooding DoS by tracking embedding requests per time window. |
+| **Bounded Selector Cache** | Runtime intents resolved by `SelectorTable` are kept in an LRU-evicted side table, not the shared tool-selector index — long-running processes can't accumulate unbounded state or dilute real tool candidates. |
 | **Selector Namespacing** | Core system selectors are protected and cannot be shadowed by user-registered tools. |
 | **OAuth 2.1 Token Security** | Tokens hashed with PBKDF2 — never stored in plain text. |
 | **Schema Fingerprinting** | Detects tool schema changes on hot-reload; invalidates stale cache entries automatically. |
@@ -374,7 +380,7 @@ smallchat-swift/
 ├── Package.swift
 ├── Sources/
 │   ├── SmallChat/                  # Umbrella module
-│   ├── SmallChatCore/              # Foundation (~40 source files)
+│   ├── SmallChatCore/              # Foundation (types, selectors, dispatch tables, App/UI types)
 │   │   ├── Types/                  # Core data types
 │   │   ├── TypeSystem/             # Type matching & validation
 │   │   ├── SCObject/               # Object serialization
@@ -385,50 +391,26 @@ smallchat-swift/
 │   │   ├── IntentPinRegistry.swift # Collision attack guards
 │   │   ├── VectorMath.swift        # Cosine similarity (Accelerate)
 │   │   └── Canonicalize.swift      # Intent normalization
-│   ├── SmallChatRuntime/           # Dispatch engine
-│   │   ├── ToolRuntime.swift       # Main actor
-│   │   ├── Dispatch.swift          # Resolution + execution
-│   │   └── DispatchBuilder.swift   # Fluent API
-│   ├── SmallChatCompiler/          # 4-phase compiler
+│   ├── SmallChatRuntime/           # Dispatch engine (ToolRuntime, AppRuntime, DispatchBuilder)
+│   ├── SmallChatCompiler/          # 4-phase compiler (tools + apps)
 │   ├── SmallChatEmbedding/         # Hash-based embeddings
-│   ├── SmallChatTransport/         # Network transports + middleware
+│   ├── SmallChatTransport/         # Network transports + middleware (incl. RTK/, Loom/)
 │   ├── SmallChatMCP/               # MCP server implementation
 │   ├── SmallChatChannel/           # Claude Code channel
-│   └── SmallChatCLI/               # CLI entry point + commands
-├── Tests/
-│   ├── SmallChatCoreTests/         # Canonicalization, cache, namespacing,
-│   │                               # rate limiting, overloads, pinning, types
-│   ├── SmallChatChannelTests/      # Sender gate tests
-│   ├── SmallChatRuntimeTests/
-│   ├── SmallChatCompilerTests/
-│   ├── SmallChatTransportTests/
-│   ├── SmallChatMCPTests/
-│   └── SmallChatEmbeddingTests/
+│   ├── SmallChatDream/             # Memory-driven tool re-compilation
+│   ├── SmallChatShorthand/         # Text primitives
+│   ├── SmallChatImportance/        # Three-signal importance detection
+│   ├── SmallChatCRDT/              # Multi-agent shared memory (LWWMap, ORSet, GCounter)
+│   ├── SmallChatCompaction/        # History-compaction verification
+│   ├── SmallChatMemex/             # Knowledge-base compiler
+│   ├── SmallChatUI/                # WKWebView wrapper for App/UI surfaces
+│   ├── SmallChatCLI/               # CLI entry point + 13 commands (Commands/)
+│   └── SmallChatApp/               # macOS SwiftUI GUI (Views/, Sidebar, AppState)
+├── Tests/                          # One *Tests target per module above
+├── examples/                       # loom-mcp manifest, registry entries (GitHub, Slack, Postgres, loom)
+├── docs/                           # Ecosystem positioning + 0.5.0 roadmap
 └── docs-site/                      # Docusaurus documentation site
 ```
-
-## What's New in 0.3.0
-
-- **Intent sanitization** — Null byte stripping, control character removal, length limits, and token cap on canonical selectors
-- **Audit log integrity** — HMAC-SHA256 hash chain on audit entries with tamper verification via `verifyChain()`
-- **Server hardening** — Configurable max connections (default 1000), max request body size (default 1MB), graceful shutdown with drain timeout
-- **Server metrics** — New `/metrics` endpoint and `ServerMetrics` actor tracking request counts, error rates, active/peak connections, uptime
-- **TLS configuration** — `TLSConfig` with certificate pinning (public key or full cert), minimum TLS version enforcement, development/production presets
-- **Identity validation** — Sender identities validated for format (alphanumeric + `._@-`), length (1–128 chars), and max sender limits
-- **Constant-time pairing** — Pairing code verification uses constant-time comparison to prevent timing attacks
-- **Connection metrics** — NIO handler tracks connection open/close for real-time connection monitoring
-- **Version bump** — MCP server, channel server, and router all report version 0.3.0
-
-### Previous: 0.2.0
-
-- **Claude Code channel protocol** — Bidirectional stdio JSON-RPC integration with Claude Code
-- **Security hardening** — Intent pinning, selector namespacing, semantic rate limiting, sender-gated permissions
-- **Actor-based concurrency** — Thread-safe dispatch, caching, and session management via Swift actors
-- **SQLite session persistence** — Durable session storage for MCP server connections
-- **Fluent dispatch API** — Chainable `.dispatch().intent().withArgs().exec()` with Swift type inference
-- **NIO-based transport** — High-performance HTTP, SSE, and stdio transports built on SwiftNIO
-- **OAuth 2.1 security** — PBKDF2-hashed tokens, secure generation, proper verification
-- **New CLI commands** — `init`, `docs`, `repl`, `doctor` for scaffolding, documentation, and diagnostics
 
 ## License
 
