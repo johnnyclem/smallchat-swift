@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(os)
 import os
+#endif
 
 /// ToolProxy -- lazy-loaded tool that loads its full schema only on first dispatch.
 /// Equivalent to NSProxy: exists as lightweight stand-in until first message.

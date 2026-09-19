@@ -47,6 +47,7 @@ via `ui://` URIs through the MCP `resources/read` endpoint.
 
 Since 0.6.0, `main` has also picked up:
 
+- **`SmallChatTruth`** — truth-ledger interop with Stenographer's TB/UV v2 asserted-truth ledger at the JSONL seam: a lossless wiki JSONL codec (`TruthWiki`), the §7 consumption rules in code (active TB = ground truth, contested TB carries its disputing UVs, open UV is flagged `UNVERIFIED` and never reads as proven), corpus items + a stock `CompactionVerifier` invariant (`TruthInvariants.preserved`) that fails any compaction which drops a truth entry or strips the UNVERIFIED marker, and a proposal-only write path (`InvariantProposal`) that rejects anonymous identities.
 - **`RtkTransport`** (`SmallChatTransport`) — a transport-wrapping actor that ports the TS `rtk-which` / `rtk-transport` integration: prefixes eligible shell commands with `rtk` and pipes response bodies ≥ 512 B through `rtk filter`, with metadata attached to every response for observability. Pure pass-through when disabled.
 - **`DispatchConfig.miniLM`** — a threshold preset recalibrated for lower-contrast sentence embedders (e.g. `all-MiniLM-L6-v2`), where correct-tool paraphrases commonly score 0.60–0.74 and get misclassified as `.low` under the library defaults.
 - **Bounded selector cache** — `SelectorTable.resolve()` no longer inserts runtime intents into the shared tool-selector vector index; they're now cached in a bounded, LRU-evicted side table so long-running processes can't dilute real tool candidates or accumulate unbounded state.
@@ -245,6 +246,7 @@ Compiler  Embedding  Transport      MCP         Channel      Dream
    │                 loom client
    │
 Shorthand ── Importance / CRDT / Compaction / Memex   (text + memory primitives)
+   │              └── Truth (TB/UV ledger interop rides Compaction)
    │
 SmallChatUI ─── WKWebView wrapper for App/UI surfaces (sandboxed, CSP-injected)
    │
@@ -270,6 +272,7 @@ SmallChat ─── Umbrella module (re-exports everything above)
 | **SmallChatImportance** | Three-signal importance detector (recency decay, co-mention centrality, novelty) with weighted ranking |
 | **SmallChatCRDT** | Conflict-free replicated types for multi-agent shared memory: `LWWMap`, `ORSet`, `GCounter`, `VectorClock` |
 | **SmallChatCompaction** | `CompactionVerifier` — three-strategy verification (resampling, contradiction detection, invariants) for safe history compaction |
+| **SmallChatTruth** | Truth-ledger interop (Stenographer TB/UV v2): wiki JSONL codec, §7 consumption rules, truth-preserving compaction invariants, proposal-only write path |
 | **SmallChatMemex** | Knowledge-base compiler: the same Read → Extract → Embed → Link → Emit pipeline as `ToolCompiler`, driving `smallchat memex` |
 | **SmallChatUI** | SwiftUI `WKWebView` wrapper (`AppWebView`) for rendering App/UI content, with sandboxed navigation and CSP injection |
 | **SmallChat** | Umbrella module — imports and re-exports all of the above |

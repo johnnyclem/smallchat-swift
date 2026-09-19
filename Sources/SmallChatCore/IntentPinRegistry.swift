@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(os)
 import os
+#endif
 
 public enum IntentPinPolicy: String, Sendable {
     case exact
