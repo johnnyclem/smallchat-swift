@@ -7,6 +7,41 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- **`SmallChatTruth` — truth-ledger interop (Stenographer TB/UV v2, JSONL seam).**
+  Ports the TS `@shorthand/core/truth` module: `TruthWiki.parse`/`serialize`
+  read and write the ledger's append-only wiki JSONL losslessly (the
+  `x-steno` namespace is preserved opaquely via a `JSONValue` tree; explicit
+  `signedBy`/`contests` nulls match the wire format; the round-trip is
+  tested), later lines for an id supersede earlier ones, and per-line parse
+  errors never poison the rest of the file. `TruthWiki.classify`/
+  `selectCurrentTruth` enforce the §7 consumption rules: active TBs are
+  ground truth, contested TBs carry their live contesting UVs, open UVs are
+  flagged `[UV — UNVERIFIED]` and never render as proven, and
+  overridden/refuted history is excluded. `TruthCompaction` projects the
+  selection into compaction corpus items and L4-shaped invariant records
+  with the confidence type riding along in the value (two axes, not one),
+  and `TruthInvariants.preserved(_:)` is a stock `CompactionVerifier`
+  invariant that fails any compaction which drops a truth item or strips
+  the UNVERIFIED marker. `InvariantProposal`/`TruthProposals` implement the
+  proposal-only write path — `PROPOSAL(kind: "uv")` JSONL with
+  `targetRef`-based dedup — and reject anonymous/generic identities
+  (`system`, `assistant`, …) at init, mirroring stenographer's authorship
+  floor. 11 new tests.
+
+### Fixed
+
+- **Linux build: guarded the remaining bare `import os` statements.** Six
+  `SmallChatCore` files (`IntentPinRegistry`, `SelectorNamespace`,
+  `ToolProxy`, and the `SCObject` family) imported Apple's `os` module
+  unconditionally, breaking non-Apple builds even though the package
+  already ships a `PlatformLock` shim behind `#if !canImport(os)`. All
+  `import os` statements now carry the same `#if canImport(os)` guard the
+  rest of the package uses; `SmallChatTruth` and its dependency chain
+  (`Core → Shorthand → Compaction`) now build and pass tests on Linux
+  (Swift 6.1).
+
 Work toward a 1:1 ABI with the TypeScript `@smallchat/core` reference. ABI is
 defined as **semantic interchange**: identical selectors, dispatch tables, and
 resolution results, with embedding-vector components equal within Float32 epsilon

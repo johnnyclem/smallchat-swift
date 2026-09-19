@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(os)
 import os
+#endif
 
 /// Entry for a protected core selector
 public struct CoreSelectorEntry: Sendable {

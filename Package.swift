@@ -17,6 +17,7 @@ let package = Package(
         .library(name: "SmallChatImportance", targets: ["SmallChatImportance"]),
         .library(name: "SmallChatCRDT", targets: ["SmallChatCRDT"]),
         .library(name: "SmallChatCompaction", targets: ["SmallChatCompaction"]),
+        .library(name: "SmallChatTruth", targets: ["SmallChatTruth"]),
         .library(name: "SmallChatMemex", targets: ["SmallChatMemex"]),
         .library(name: "SmallChat", targets: ["SmallChat"]),
         .library(name: "SmallChatUI", targets: ["SmallChatUI"]),
@@ -103,6 +104,11 @@ let package = Package(
             name: "SmallChatCompaction",
             dependencies: ["SmallChatCore", "SmallChatShorthand"]
         ),
+        // ---- Truth (truth-ledger interop: stenographer TB/UV v2 JSONL seam) ----
+        .target(
+            name: "SmallChatTruth",
+            dependencies: ["SmallChatCore", "SmallChatCompaction"]
+        ),
         // ---- Memex (TS PR #60: knowledge-base compiler) ----
         .target(
             name: "SmallChatMemex",
@@ -134,6 +140,7 @@ let package = Package(
                 "SmallChatImportance",
                 "SmallChatCRDT",
                 "SmallChatCompaction",
+                "SmallChatTruth",
                 "SmallChatMemex",
                 "SmallChatUI",
             ]
@@ -164,6 +171,7 @@ let package = Package(
         .testTarget(name: "SmallChatImportanceTests", dependencies: ["SmallChatImportance"]),
         .testTarget(name: "SmallChatCRDTTests", dependencies: ["SmallChatCRDT"]),
         .testTarget(name: "SmallChatCompactionTests", dependencies: ["SmallChatCompaction"]),
+        .testTarget(name: "SmallChatTruthTests", dependencies: ["SmallChatTruth", "SmallChatCompaction"]),
         .testTarget(name: "SmallChatMemexTests", dependencies: ["SmallChatMemex", "SmallChatCore"]),
         .testTarget(name: "SmallChatUITests", dependencies: ["SmallChatUI"]),
     ]
