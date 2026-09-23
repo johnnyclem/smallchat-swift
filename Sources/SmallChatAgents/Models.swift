@@ -190,3 +190,45 @@ public struct ChatMessage: Sendable, Equatable, Identifiable, Codable {
         return false
     }
 }
+
+// MARK: - Objection channel
+
+public enum ObjectionChannelStatus: Sendable, Equatable {
+    case off
+    case listening(port: Int)
+    case failed(String)
+
+    public var port: Int? {
+        if case .listening(let port) = self { return port }
+        return nil
+    }
+}
+
+/// An objection stenographer pushed over the channel.
+public struct ReceivedObjection: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let objectionIds: [String]
+    public let tbIds: [String]
+    /// Claude Code session ids named by the objection.
+    public let sessionIds: [String]
+    public let content: String
+    public let receivedAt: Date
+    /// Agents whose chats it was posted to (empty: no known session matched).
+    public let routedTo: [String]
+    /// Agents it was relayed into as an interrupt.
+    public let relayedTo: [String]
+
+    public init(
+        objectionIds: [String], tbIds: [String], sessionIds: [String], content: String,
+        receivedAt: Date = Date(), routedTo: [String], relayedTo: [String]
+    ) {
+        self.id = objectionIds.isEmpty ? UUID().uuidString : objectionIds.joined(separator: ",")
+        self.objectionIds = objectionIds
+        self.tbIds = tbIds
+        self.sessionIds = sessionIds
+        self.content = content
+        self.receivedAt = receivedAt
+        self.routedTo = routedTo
+        self.relayedTo = relayedTo
+    }
+}

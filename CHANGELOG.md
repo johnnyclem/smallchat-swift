@@ -9,6 +9,33 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- **Live tool activity on agent cards.** `TranscriptActivity` reads the
+  tail of each live session's transcript. It pairs `tool_use` with
+  `tool_result` by id, skips sidechains, and keeps the in-flight tool, the
+  last 5 steps, and the latest prose. The card and the direct-chat header
+  stream it; a transcript is only re-read when its size changes.
+- **Objection channel.** `ChannelBridgeServer` is a loopback NIO HTTP
+  bridge that receives Stenographer's `--objection-channel` posts. It uses
+  the TS channel-bridge contract: `POST /event`, `X-Channel-Secret` or
+  Bearer auth, and 401/400/404/413 errors. Objections are routed by
+  `meta.session_ids` into each agent's direct and group chats, relayed as
+  an interrupt into live sessions (a toggle turns relaying off), and
+  deduplicated by objection id. The secret is generated on first launch.
+- **Authoring tombstones with literals.** `TombstoneDraft` covers claim,
+  evidence, literals, and an accountable signer. It signs into a TB that
+  `TruthWiki.append` writes to the wiki JSONL, and the app ledger reloads
+  so objections to the new literals start at once.
+- **Literal validation** in the Swift wiki codec now matches Stenographer's
+  write-time rule. A literal without a subject must be a distinctive
+  identifier (at least 4 characters, containing a letter); a TB line with
+  an invalid literal is rejected with a per-line error.
+
+### Fixed
+
+- Settings saved by an older build now load: `MessengerSettings` decodes
+  leniently. Before, adding a setting would have made the whole saved
+  store (conversations included) fail to decode.
+
 - **The macOS app is now a messenger for your Claude Code sessions**
   (`SmallChatApp` + new `SmallChatAgents` library). The sidebar lists live
   and recent non-archived sessions. Live status and kind come from Claude

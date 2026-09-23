@@ -87,6 +87,26 @@ public struct TruthTombstonedLiteral: Sendable, Codable, Equatable {
         self.subject = subject
         self.current = current
     }
+
+    /// Stenographer's write-time rule (`TombstonedLiteralSchema`): every
+    /// present field is non-blank, and a literal without a `subject` must
+    /// be a distinctive identifier (≥4 chars, contains a letter). A bare
+    /// value like "30" can't be matched safely without naming what it's the
+    /// value of. Returns nil when valid, else the reason.
+    public func validationError() -> String? {
+        let dead = self.dead.trimmingCharacters(in: .whitespacesAndNewlines)
+        if dead.isEmpty { return "a literal needs a dead value" }
+        if let subject, subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "a literal's subject can't be blank"
+        }
+        if let current, current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "a literal's current value can't be blank"
+        }
+        if subject == nil, !(dead.count >= 4 && dead.contains(where: \.isLetter)) {
+            return "a literal without a subject must be a distinctive identifier (≥4 chars, contains a letter) — name the subject of bare values"
+        }
+        return nil
+    }
 }
 
 // MARK: - Entries

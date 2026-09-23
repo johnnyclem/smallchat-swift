@@ -60,6 +60,7 @@ struct MessengerRootView: View {
             if selection != item { selection = item }
         }
         .task {
+            await model.startObjectionChannel()
             await model.refresh()
             await model.refreshLiveNames()
         }

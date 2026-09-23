@@ -53,20 +53,25 @@ struct SessionCard: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
+            if let snapshot = model.liveActivity[agent.id] {
+                ActivityFeed(snapshot: snapshot)
+            } else if let activity = model.agentActivity[agent.id] {
+                // A headless resume we started: its stream reports tools too.
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini)
+                    Text(activity).lineLimit(1)
+                }
+                .font(.caption2)
+                .foregroundStyle(Theme.accent)
+            }
             HStack {
                 Text(agent.project)
                 if let branch = agent.gitBranch {
                     Text("· \(branch)").lineLimit(1)
                 }
                 Spacer(minLength: 4)
-                if let activity = model.agentActivity[agent.id] {
-                    Label(activity, systemImage: "gearshape.2")
-                        .labelStyle(.titleAndIcon)
-                        .foregroundStyle(Theme.accent)
-                } else {
-                    Text(agent.lastActivity, style: .relative)
-                        .monospacedDigit()
-                }
+                Text(agent.lastActivity, style: .relative)
+                    .monospacedDigit()
             }
             .font(.caption2)
             .foregroundStyle(.tertiary)
@@ -74,6 +79,43 @@ struct SessionCard: View {
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(agent.handle), \(agent.activity.rawValue), \(agent.project)")
+    }
+}
+
+/// Live tool activity: the step in flight, then the last few finished ones.
+struct ActivityFeed: View {
+    let snapshot: ActivitySnapshot
+    /// Finished steps shown under the current one.
+    var history = 2
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let current = snapshot.current {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini)
+                    Text(current.label).lineLimit(1)
+                }
+                .foregroundStyle(Theme.accent)
+                .help(current.label)
+            } else if let said = snapshot.lastSaid {
+                Text("“\(said)”")
+                    .italic()
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
+                    .help(said)
+            }
+            ForEach(snapshot.recent.filter(\.finished).suffix(history).reversed()) { step in
+                HStack(spacing: 5) {
+                    Image(systemName: step.failed ? "xmark.circle" : "checkmark.circle")
+                        .foregroundStyle(step.failed ? Color.red : Color.secondary)
+                    Text(step.label).lineLimit(1)
+                }
+                .foregroundStyle(.tertiary)
+                .help(step.label)
+            }
+        }
+        .font(.caption2)
+        .animation(.easeOut(duration: 0.15), value: snapshot)
     }
 }
 

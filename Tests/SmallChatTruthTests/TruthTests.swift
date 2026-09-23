@@ -243,3 +243,27 @@ struct TruthTests {
         #expect(String(earlier.prefix(10)) < String(later.prefix(10)))
     }
 }
+
+@Suite("Tombstoned literal validation")
+struct LiteralValidationTests {
+    @Test("matches stenographer's write-time rule")
+    func rule() {
+        #expect(TruthTombstonedLiteral(dead: "30", subject: "LOG_BUDGET", current: "100").validationError() == nil)
+        #expect(TruthTombstonedLiteral(dead: "legacyRateLimiter").validationError() == nil)
+        #expect(TruthTombstonedLiteral(dead: "30").validationError() != nil, "bare value needs a subject")
+        #expect(TruthTombstonedLiteral(dead: "abc").validationError() != nil, "too short to be distinctive")
+        #expect(TruthTombstonedLiteral(dead: "1234").validationError() != nil, "no letter")
+        #expect(TruthTombstonedLiteral(dead: "  ").validationError() != nil)
+        #expect(TruthTombstonedLiteral(dead: "x", subject: " ").validationError() != nil)
+    }
+
+    @Test("a TB line with an invalid literal is rejected; the rest of the file still loads")
+    func rejectsLine() {
+        let bad = #"{"id":"TB1","type":"TB","ts":"t","author":"a","claim":"c","evidence":[],"signedBy":"a","status":"active","literals":[{"dead":"30"}]}"#
+        let good = #"{"id":"TB2","type":"TB","ts":"t","author":"a","claim":"c","evidence":[],"signedBy":"a","status":"active","literals":[{"dead":"30","subject":"LOG_BUDGET"}]}"#
+        let result = TruthWiki.parse(lines: [bad, good])
+        #expect(result.entries.map(\.id) == ["TB2"])
+        #expect(result.errors.count == 1)
+        #expect(result.errors.first?.description.contains("TB1") == true)
+    }
+}

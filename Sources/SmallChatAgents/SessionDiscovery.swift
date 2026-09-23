@@ -118,6 +118,19 @@ public struct ClaudeSessionScanner: Sendable {
         return kill(pid, 0) == 0 || errno == EPERM
     }
 
+    /// Where Claude Code keeps a session's transcript: the working directory
+    /// with every non-alphanumeric character replaced by `-`. Nil when the
+    /// file doesn't exist (e.g. long paths, which Claude Code truncates+hashes).
+    public func transcriptPath(sessionId: String, cwd: String) -> String? {
+        guard !cwd.isEmpty else { return nil }
+        let encoded = String(cwd.map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "-" })
+        let path = claudeHome
+            .appendingPathComponent("projects")
+            .appendingPathComponent(encoded)
+            .appendingPathComponent("\(sessionId).jsonl").path
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
     // MARK: Scan
 
     public func scan() -> [DiscoveredSession] {
