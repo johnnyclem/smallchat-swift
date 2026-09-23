@@ -15,7 +15,7 @@ import SmallChatShorthand
 // MARK: - Configuration
 
 public struct MemexConfig: Sendable {
-    public let now: () -> Date
+    public let now: @Sendable () -> Date
     public let minClaimLength: Int
 
     public init(

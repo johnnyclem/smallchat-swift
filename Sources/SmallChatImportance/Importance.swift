@@ -72,7 +72,7 @@ public struct ImportanceDetector: Sendable {
     public let recencyHalfLifeSeconds: Double
     /// Reference time used to compute recency. Pin to a known point for
     /// reproducible scoring; defaults to "now".
-    public let now: () -> TimeInterval
+    public let now: @Sendable () -> TimeInterval
 
     public init(
         weights: ImportanceWeights = .balanced,

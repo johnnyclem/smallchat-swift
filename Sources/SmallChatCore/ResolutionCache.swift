@@ -21,7 +21,7 @@ public actor ResolutionCache {
     private var hooks: [InvalidationHook] = []
 
     /// Semantic rate limiter -- prevents vector flooding DoS.
-    public let rateLimiter: SemanticRateLimiter
+    public nonisolated let rateLimiter: SemanticRateLimiter
 
     public init(
         maxSize: Int = 1024,

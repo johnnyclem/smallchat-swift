@@ -1,3 +1,4 @@
+import Foundation
 import SmallChatCore
 
 /// DispatchBuilder -- fluent interface for constructing and executing a dispatch.

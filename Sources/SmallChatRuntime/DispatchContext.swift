@@ -92,7 +92,7 @@ public actor DispatchContext {
     ///
     /// Throws SelectorShadowingError if the class contains selectors that
     /// would shadow protected core selectors.
-    public func registerClass(_ toolClass: ToolClass) throws {
+    public func registerClass(_ toolClass: ToolClass) async throws {
         // Guard: check all selectors in this class against the namespace
         let ownSelectors = Array(toolClass.dispatchTable.keys)
         try selectorNamespace.assertNoShadowing(toolClass.name, ownSelectors)
