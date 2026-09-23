@@ -1,5 +1,6 @@
 import SwiftUI
 import SmallChatAgents
+import SmallChatTruth
 
 struct ChatView: View {
     @Environment(MessengerModel.self) private var model
@@ -73,6 +74,10 @@ struct ChatHeader: View {
                     Text(deliveryExplanation(for: agent))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                    if let snapshot = model.liveActivity[agent.id] {
+                        ActivityFeed(snapshot: snapshot, history: 3)
+                            .padding(.top, 2)
+                    }
                 } else if conversation.kind == .group {
                     HStack(spacing: 6) {
                         ForEach(conversation.memberIds, id: \.self) { id in
@@ -149,8 +154,25 @@ struct MessageRow: View {
     @Environment(MessengerModel.self) private var model
     let message: ChatMessage
     let conversation: Conversation
+    @State private var tombstoning = false
 
     var body: some View {
+        content
+            .contextMenu {
+                Button("Copy Text") { copyToPasteboard(message.text) }
+                if message.author != .system {
+                    Button("Tombstone a Value…") { tombstoning = true }
+                }
+            }
+            .sheet(isPresented: $tombstoning) {
+                TombstoneSheet(prefill: TombstoneDraft(
+                    evidence: [TruthEvidence(kind: .message, ref: message.id, detail: String(message.text.prefix(200)))]
+                ))
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         switch message.author {
         case .system:
             Text(message.text)
@@ -341,7 +363,9 @@ struct WaitingIndicator: View {
     private func name(_ id: String) -> String {
         if id == Handles.stenographer { return "@stenographer" }
         guard let agent = model.agent(id) else { return "an agent" }
-        if let tool = model.agentActivity[id] { return "@\(agent.handle) (\(tool))" }
+        if let tool = model.agentActivity[id] ?? model.liveActivity[id]?.current?.label {
+            return "@\(agent.handle) (\(tool))"
+        }
         return "@\(agent.handle)"
     }
 }

@@ -134,8 +134,9 @@ public final class ClaudeCodeTransport: AgentTransport, @unchecked Sendable {
                         switch StreamJSON.parse(line: line) {
                         case .initialized(let id, _):
                             continuation.yield(.sessionStarted(id))
-                        case .toolUse(let name, _):
-                            continuation.yield(.activity(name))
+                        case .toolUse(let name, let input):
+                            let summary = TranscriptActivity.summarize(tool: name, input: input)
+                            continuation.yield(.activity(summary.isEmpty ? name : "\(name) · \(summary)"))
                         case .assistantText(let text):
                             lastText = text
                         case .result(let text, let isError, _, _):

@@ -124,7 +124,12 @@ let package = Package(
         // ---- Agents (messenger: Claude Code sessions, groups, switchboard, stenographer) ----
         .target(
             name: "SmallChatAgents",
-            dependencies: ["SmallChatTruth"]
+            dependencies: [
+                "SmallChatTruth",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ]
         ),
         // ---- UI (App/UI layer — SwiftUI + WKWebView wrapper) ----
         .target(

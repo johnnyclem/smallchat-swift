@@ -64,6 +64,13 @@ public enum TruthWiki {
     static func entry(from line: WikiEntryLine) throws -> TruthLedgerEntry {
         switch line.type {
         case "TB":
+            // Reject the whole line, as stenographer's import does: a TB
+            // whose literals can't be matched safely isn't partially usable.
+            for literal in line.literals ?? [] {
+                if let reason = literal.validationError() {
+                    throw TruthError.malformedLine(line: 0, reason: "entry \(line.id): invalid literals — \(reason)")
+                }
+            }
             return .tb(TruthTbEntry(
                 id: line.id,
                 ts: line.ts ?? "",

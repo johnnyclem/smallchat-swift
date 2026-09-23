@@ -35,6 +35,7 @@ struct MessengerSettingsView: View {
                     Text("All time").tag(Int?.none)
                 }
             }
+            ObjectionChannelSettings()
             Section("Stenographer") {
                 Toggle("Watch every chat", isOn: $bindable.settings.stenographerWatching)
                 ForEach(model.settings.wikiPaths, id: \.self) { Text($0).font(.caption.monospaced()) }
@@ -59,4 +60,76 @@ struct MessengerSettingsView: View {
         model.settings.claudePath = trimmed.isEmpty ? nil : trimmed
         model.setTransport(AgentTransports.make(settings: model.settings))
     }
+}
+
+/// Settings for the loopback bridge stenographer's `--objection-channel` posts to.
+struct ObjectionChannelSettings: View {
+    @Environment(MessengerModel.self) private var model
+    @State private var port = ""
+    @State private var revealSecret = false
+
+    var body: some View {
+        @Bindable var bindable = model
+        Section {
+            Toggle("Receive objections from stenographer", isOn: $bindable.settings.objectionChannelEnabled)
+                .onChange(of: model.settings.objectionChannelEnabled) { _, _ in restart() }
+            LabeledContent("Status") { ObjectionChannelStatusLabel() }
+            HStack {
+                TextField("Port", text: $port)
+                    .frame(width: 90)
+                    .onSubmit(applyPort)
+                Button("Apply", action: applyPort)
+            }
+            LabeledContent("Secret") {
+                HStack {
+                    Text(revealSecret ? model.settings.objectionChannelSecret : String(repeating: "•", count: 16))
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                    Button(revealSecret ? "Hide" : "Show") { revealSecret.toggle() }
+                    Button("Copy") { copyToPasteboard(model.settings.objectionChannelSecret) }
+                }
+            }
+            Toggle("Relay objections into the agent's live session", isOn: $bindable.settings.relayObjections)
+            Button("Copy stenographer command") { copyToPasteboard(stenographerCommand(model)) }
+        } header: {
+            Text("Objection channel")
+        } footer: {
+            Text("Stenographer pushes each real-time objection here as it's raised (`--objections deliver --objection-channel`). It lands in the offending agent's chats and, if relaying is on, interrupts that live session so it can correct course. Loopback only.")
+        }
+        .onAppear { port = String(model.settings.objectionChannelPort) }
+    }
+
+    private func applyPort() {
+        guard let value = Int(port), (1...65535).contains(value) else {
+            port = String(model.settings.objectionChannelPort)
+            return
+        }
+        model.settings.objectionChannelPort = value
+        restart()
+    }
+
+    private func restart() {
+        Task { await model.startObjectionChannel() }
+    }
+}
+
+struct ObjectionChannelStatusLabel: View {
+    @Environment(MessengerModel.self) private var model
+
+    var body: some View {
+        switch model.objectionChannelStatus {
+        case .off:
+            Label("Off", systemImage: "circle").foregroundStyle(.secondary)
+        case .listening(let port):
+            Label("Listening on 127.0.0.1:\(port)", systemImage: "dot.radiowaves.left.and.right").foregroundStyle(.green)
+        case .failed(let reason):
+            Label("Couldn't start: \(reason)", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+        }
+    }
+}
+
+/// Shell command that starts stenographer delivering objections to this app.
+@MainActor
+func stenographerCommand(_ model: MessengerModel) -> String {
+    "SMALLCHAT_CHANNEL_SECRET=\(model.settings.objectionChannelSecret) npx stenographer start <log-or-dir> --objections deliver --objection-channel \(model.objectionChannelURL)"
 }

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SmallChatTruth
 
 // MARK: - Messenger model
 //
@@ -26,7 +27,12 @@ public final class MessengerModel {
     public private(set) var awaiting: [String: Set<String>] = [:]
     /// Agent id → what it's doing right now (tool name), while awaited.
     public private(set) var agentActivity: [String: String] = [:]
+    /// Agent id → live tool activity read from its transcript (live sessions only).
+    public private(set) var liveActivity: [String: ActivitySnapshot] = [:]
     public private(set) var isRefreshing = false
+    /// Objections received on the channel, newest first.
+    public private(set) var objections: [ReceivedObjection] = []
+    public private(set) var objectionChannelStatus: ObjectionChannelStatus = .off
     /// Last problem worth telling the user about.
     public var lastError: String?
 
@@ -43,6 +49,10 @@ public final class MessengerModel {
     private var replyRoute: [String: String] = [:]
     /// Every agent including archived and filtered-out ones.
     private var allAgents: [AgentSession] = []
+    private var bridge: ChannelBridgeServer?
+    private var seenObjectionIds = Set<String>()
+    /// Transcript size per live agent when its activity was last read.
+    private var activitySizes: [String: UInt64] = [:]
     /// Result of the last disk scan, reused when rebuilding after local changes.
     private var lastDiscovered: [DiscoveredSession] = []
 
@@ -55,6 +65,10 @@ public final class MessengerModel {
         self.conversations = snapshot.conversations
         self.stenographerSessions = snapshot.stenographerSessions
         self.settings = snapshot.settings
+        if settings.objectionChannelSecret.isEmpty {
+            settings.objectionChannelSecret = ChannelBridgeProtocol.generateSecret()
+            persist()
+        }
         rebuildAgents()
         listenForInbound()
         reloadLedger()
@@ -123,6 +137,7 @@ public final class MessengerModel {
         defer { isRefreshing = false }
         let discovered = await Task.detached(priority: .userInitiated) { scanner.scan() }.value
         rebuildAgents(discovered: discovered)
+        await refreshActivity()
     }
 
     /// Cheap poll: re-read only the live-session registry and update
@@ -142,10 +157,37 @@ public final class MessengerModel {
             discovered.append(DiscoveredSession(
                 sessionId: id, cwd: record.cwd ?? "", gitBranch: nil, title: nil,
                 lastActivity: record.updatedAt.map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date(),
-                transcriptPath: nil, live: record
+                transcriptPath: scanner.transcriptPath(sessionId: id, cwd: record.cwd ?? ""), live: record
             ))
         }
         if discovered != lastDiscovered { rebuildAgents(discovered: discovered) }
+        await refreshActivity()
+    }
+
+    /// Re-read the transcript tail of every live session whose file changed.
+    func refreshActivity() async {
+        let targets = allAgents.compactMap { agent -> (String, String)? in
+            guard agent.isLive, let path = agent.transcriptPath else { return nil }
+            return (agent.id, path)
+        }
+        let previousSizes = activitySizes
+        let results = await Task.detached(priority: .utility) { () -> [(String, UInt64, ActivitySnapshot?)] in
+            targets.map { id, path in
+                let size = ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.uint64Value ?? 0
+                // Unchanged file → keep the snapshot we have.
+                if previousSizes[id] == size { return (id, size, nil) }
+                return (id, size, TranscriptActivity.read(transcriptAt: path))
+            }
+        }.value
+
+        var next: [String: ActivitySnapshot] = [:]
+        var sizes: [String: UInt64] = [:]
+        for (id, size, snapshot) in results {
+            sizes[id] = size
+            if let kept = snapshot ?? liveActivity[id], !kept.isEmpty { next[id] = kept }
+        }
+        activitySizes = sizes
+        if next != liveActivity { liveActivity = next }
     }
 
     func rebuildAgents(discovered: [DiscoveredSession]? = nil) {
@@ -540,6 +582,144 @@ public final class MessengerModel {
             }
         }
         persist()
+    }
+
+    // MARK: Objection channel
+
+    /// Start (or restart) the loopback bridge stenographer posts objections
+    /// to, per the current settings.
+    public func startObjectionChannel() async {
+        await stopObjectionChannel()
+        guard settings.objectionChannelEnabled else { return }
+        let server = ChannelBridgeServer(
+            port: settings.objectionChannelPort,
+            secret: settings.objectionChannelSecret
+        ) { [weak self] event in
+            Task { @MainActor in self?.handleChannelEvent(event) }
+        }
+        do {
+            let port = try await server.start()
+            bridge = server
+            objectionChannelStatus = .listening(port: port)
+        } catch {
+            await server.stop()
+            objectionChannelStatus = .failed(String(describing: error))
+        }
+    }
+
+    public func stopObjectionChannel() async {
+        if let bridge { await bridge.stop() }
+        bridge = nil
+        objectionChannelStatus = .off
+    }
+
+    /// The `--objection-channel` URL to give stenographer.
+    public var objectionChannelURL: String {
+        "http://127.0.0.1:\(objectionChannelStatus.port ?? settings.objectionChannelPort)"
+    }
+
+    /// Route a bridge event to the agents it names (`meta.session_ids`).
+    /// Objections land in each agent's chats (direct and group) and, when
+    /// enabled, are relayed into the live session as an interrupt.
+    func handleChannelEvent(_ event: ChannelInboundEvent) {
+        if event.isObjection, !event.objectionIds.isEmpty,
+           event.objectionIds.allSatisfy(seenObjectionIds.contains) {
+            return  // stenographer retried something we already have
+        }
+        seenObjectionIds.formUnion(event.objectionIds)
+
+        let targets = event.sessionIds.compactMap { agent($0) }
+        var relayed: [String] = []
+
+        for target in targets {
+            var conversationIds = [ensureDirectConversation(agentId: target.id)]
+            conversationIds += conversations
+                .filter { $0.kind == .group && $0.memberIds.contains(target.id) }
+                .map(\.id)
+
+            let message: ChatMessage
+            if event.isObjection {
+                message = ChatMessage(
+                    author: .stenographer,
+                    text: event.content,
+                    visibility: .privateToUser,
+                    shareDecided: true,
+                    citedEntryId: event.tbIds.isEmpty ? nil : event.tbIds.joined(separator: ", ")
+                )
+            } else {
+                let from = event.sender.map { "\($0) via \(event.channel)" } ?? event.channel
+                message = ChatMessage(author: .system, text: "[\(from)] \(event.content)")
+            }
+            for id in conversationIds { append(message, to: id, observe: false) }
+
+            guard event.isObjection, settings.relayObjections else { continue }
+            if target.isLive {
+                relay(event, to: target, noteIn: conversationIds[0])
+                relayed.append(target.id)
+            } else {
+                append(ChatMessage(author: .system, text: "Objection not relayed: @\(target.handle) isn't running."), to: conversationIds[0], observe: false)
+            }
+        }
+
+        if event.isObjection {
+            objections.insert(ReceivedObjection(
+                objectionIds: event.objectionIds,
+                tbIds: event.tbIds,
+                sessionIds: event.sessionIds,
+                content: event.content,
+                routedTo: targets.map(\.id),
+                relayedTo: relayed
+            ), at: 0)
+            if objections.count > 100 { objections.removeLast(objections.count - 100) }
+        }
+    }
+
+    private func relay(_ event: ChannelInboundEvent, to agent: AgentSession, noteIn conversationId: String) {
+        let body = "[smallchat · objection from the stenographer — relayed as it was raised]\n" + event.content
+        let stream = transport.send(body, to: agent, style: .interrupt)
+        Task { [weak self] in
+            do {
+                for try await _ in stream {}
+            } catch {
+                self?.append(ChatMessage(author: .system, text: "Couldn't relay the objection to @\(agent.handle): \(error)"), to: conversationId, observe: false)
+            }
+        }
+    }
+
+    // MARK: Authoring tombstones
+
+    /// The wiki file new tombstones go to: the configured one, else the first
+    /// wiki path (a directory gets `smallchat-tombstones.jsonl` inside it).
+    public var tombstoneTarget: String? {
+        let raw = settings.tombstoneFile ?? settings.wikiPaths.first
+        guard let raw, !raw.isEmpty else { return nil }
+        let path = (raw as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+            return (path as NSString).appendingPathComponent("smallchat-tombstones.jsonl")
+        }
+        return path
+    }
+
+    /// Sign a tombstone and append it to the wiki. The stenographer starts
+    /// objecting to its literals immediately; stenographer proper picks it
+    /// up on its next `import_wiki_entries`.
+    @discardableResult
+    public func assertTombstone(_ draft: TombstoneDraft) throws -> TruthTbEntry {
+        guard let target = tombstoneTarget else {
+            throw TruthError.malformedLine(line: 0, reason: "Add a wiki file on the Stenographer page first — tombstones are written there.")
+        }
+        let entry = try draft.sign()
+        try TruthWiki.append([.tb(entry)], toFileAt: target)
+        // Make sure the ledger reads the file it was just written to.
+        let covered = settings.wikiPaths.contains { path in
+            let expanded = (path as NSString).expandingTildeInPath
+            return expanded == target || target.hasPrefix(expanded.hasSuffix("/") ? expanded : expanded + "/")
+        }
+        if !covered { settings.wikiPaths.append(target) }
+        if settings.signerIdentity.isEmpty { settings.signerIdentity = draft.signer.trimmingCharacters(in: .whitespaces) }
+        reloadLedger()
+        return entry
     }
 
     // MARK: Stenographer

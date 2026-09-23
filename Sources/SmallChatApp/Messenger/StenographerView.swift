@@ -7,12 +7,18 @@ import SmallChatTruth
 /// tombstones (TB) and unverified claims (UV).
 struct StenographerView: View {
     @Environment(MessengerModel.self) private var model
+    @State private var authoring = false
 
     var body: some View {
         let selection = model.ledger.selection
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
+            if !model.objections.isEmpty {
+                ReceivedObjectionsList()
+                    .frame(maxHeight: 240)
+                Divider()
+            }
             if model.ledger.entries.isEmpty {
                 ContentUnavailableView {
                     Label("No ledger loaded", systemImage: "text.book.closed")
@@ -45,6 +51,7 @@ struct StenographerView: View {
             }
         }
         .navigationTitle("Stenographer")
+        .sheet(isPresented: $authoring) { TombstoneSheet() }
     }
 
     private var header: some View {
@@ -60,6 +67,13 @@ struct StenographerView: View {
             Text("Watches every conversation for tombstoned values and reliance on unverified claims. Notes are shown only to you. Ask it anything with @stenographer.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text("Objection channel:").font(.caption)
+                ObjectionChannelStatusLabel().font(.caption)
+                Spacer()
+                Button("Copy stenographer command") { copyToPasteboard(stenographerCommand(model)) }
+                    .controlSize(.small)
+            }
             HStack(spacing: 8) {
                 ForEach(model.settings.wikiPaths, id: \.self) { path in
                     HStack(spacing: 4) {
@@ -78,6 +92,7 @@ struct StenographerView: View {
                     .background(Capsule().fill(.quaternary))
                     .help(path)
                 }
+                Button("New Tombstone…") { authoring = true }.controlSize(.small)
                 Button("Add…", action: addSource).controlSize(.small)
                 Button("Reload") { model.reloadLedger() }.controlSize(.small)
                 Spacer()
@@ -160,5 +175,53 @@ struct UnverifiedRow: View {
         }
         .padding(.vertical, 4)
         .textSelection(.enabled)
+    }
+}
+
+/// Objections stenographer pushed over the channel, newest first.
+struct ReceivedObjectionsList: View {
+    @Environment(MessengerModel.self) private var model
+
+    var body: some View {
+        List {
+            Section("Received objections") {
+                ForEach(model.objections) { objection in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+                            Text(objection.objectionIds.joined(separator: ", "))
+                                .font(.caption2.monospaced())
+                            if !objection.tbIds.isEmpty {
+                                Text("↳ " + objection.tbIds.joined(separator: ", "))
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text(objection.receivedAt, style: .time)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Text(objection.content)
+                            .font(.callout)
+                            .lineLimit(4)
+                            .textSelection(.enabled)
+                        Text(routing(objection))
+                            .font(.caption2)
+                            .foregroundStyle(objection.routedTo.isEmpty ? Color.orange : Color.secondary)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+    }
+
+    private func routing(_ objection: ReceivedObjection) -> String {
+        guard !objection.routedTo.isEmpty else {
+            return "No known session matched " + objection.sessionIds.joined(separator: ", ")
+        }
+        let handles = objection.routedTo.compactMap { model.agent($0).map { "@\($0.handle)" } }
+        let relayed = objection.relayedTo.compactMap { model.agent($0).map { "@\($0.handle)" } }
+        return "Posted to " + handles.joined(separator: ", ")
+            + (relayed.isEmpty ? "" : " · relayed into " + relayed.joined(separator: ", "))
     }
 }
