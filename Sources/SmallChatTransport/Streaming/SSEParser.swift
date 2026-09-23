@@ -182,7 +182,9 @@ struct AsyncLineSequence<Source: AsyncSequence>: AsyncSequence where Source.Elem
 
 // MARK: - Convenience
 
-extension SSEParser {
+extension SSEParser: Sendable where Source: Sendable {}
+
+extension SSEParser where Source: Sendable {
     /// Parse SSE events and yield each event's data parsed as JSON `Data`.
     /// Non-JSON data is yielded as UTF-8 encoded bytes.
     public func asTransportOutputs() -> AsyncThrowingStream<TransportOutput, Error> {

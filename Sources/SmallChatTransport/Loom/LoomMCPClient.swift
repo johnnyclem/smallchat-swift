@@ -74,7 +74,7 @@ public actor LoomMCPClient {
     /// the raw MCP `tools/list` payloads -- callers typically only need
     /// the names, since the compiled manifest already carries the
     /// schemas.
-    public func listTools() async throws -> [[String: Any]] {
+    public func listTools() async throws -> sending [[String: Any]] {
         try await transport.listTools()
     }
 

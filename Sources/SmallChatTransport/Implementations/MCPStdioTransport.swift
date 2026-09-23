@@ -52,7 +52,7 @@ public actor MCPStdioTransport: Transport {
     // MARK: - Tool Listing
 
     /// List available tools from the MCP server.
-    public func listTools() async throws -> [[String: Any]] {
+    public func listTools() async throws -> sending [[String: Any]] {
         try await ensureInitialized()
         let request = buildRequest(method: "tools/list")
         let response = try await sendRequest(id: request.id, payload: request.encoded)

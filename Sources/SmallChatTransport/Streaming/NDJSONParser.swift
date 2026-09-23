@@ -43,7 +43,9 @@ public struct NDJSONParser<Source: AsyncSequence>: AsyncSequence
 
 // MARK: - Convenience
 
-extension NDJSONParser {
+extension NDJSONParser: Sendable where Source: Sendable {}
+
+extension NDJSONParser where Source: Sendable {
     /// Convert NDJSON lines into a stream of `TransportOutput`.
     public func asTransportOutputs() -> AsyncThrowingStream<TransportOutput, Error> {
         AsyncThrowingStream { continuation in
