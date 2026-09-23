@@ -55,6 +55,7 @@ struct AppWebViewTests {
     // MARK: - AppWebViewConfiguration
 
     @Test("AppWebViewConfiguration produces non-nil config and sandbox")
+    @MainActor
     func configurationProducedSuccessfully() {
         let (config, sandbox) = AppWebViewConfiguration.make(for: "ui://test/index.html")
         #expect(config != nil)
@@ -62,6 +63,7 @@ struct AppWebViewTests {
     }
 
     @Test("sandbox.allowedURI propagated from make(for:)")
+    @MainActor
     func sandboxAllowedURIPropagated() {
         let (_, sandbox) = AppWebViewConfiguration.make(for: "ui://my-app/index.html")
         #expect(sandbox.allowedURI == "ui://my-app/index.html")
