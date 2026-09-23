@@ -34,14 +34,17 @@ struct DispatchTierTests {
         #expect(DispatchConfig(strict: true).strict == true)
     }
 
-    @Test("miniLM preset classifies MiniLM-typical paraphrase scores as HIGH, not LOW")
+    @Test("miniLM preset lifts MiniLM-typical paraphrase scores out of LOW")
     func miniLMPresetClassifiesTypicalScoresHigher() {
         let config = DispatchConfig.miniLM
         // Observed MiniLM cosine scores for a *correct* paraphrase match
-        // (see smallchat-swift#36): the plain default lands these at .low,
-        // the miniLM preset should recognize them as confident matches.
-        #expect(config.tier(for: 0.74) == .high)
+        // run 0.60-0.74 (see smallchat-swift#36). The preset keeps that band
+        // out of .low; its top still gets pre-flight verification (.medium),
+        // and 0.75+ dispatches directly (.high).
+        #expect(config.tier(for: 0.75) == .high)
+        #expect(config.tier(for: 0.74) == .medium)
         #expect(config.tier(for: 0.61) == .medium)
+        #expect(DispatchConfig().tier(for: 0.61) == .low)
     }
 
     @Test("miniLM preset thresholds are strictly looser than the plain default")
