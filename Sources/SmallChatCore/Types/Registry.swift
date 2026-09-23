@@ -114,6 +114,21 @@ public struct RegistryEnvVar: Sendable, Codable, Equatable {
     }
 }
 
+extension RegistryEnvVar {
+    /// `secret` is optional on the wire and defaults to false, matching `init`
+    /// (e.g. `examples/registry/github.json` omits it on non-credential vars).
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            name: try container.decode(String.self, forKey: .name),
+            description: try container.decodeIfPresent(String.self, forKey: .description),
+            required: try container.decode(Bool.self, forKey: .required),
+            defaultValue: try container.decodeIfPresent(String.self, forKey: .defaultValue),
+            secret: try container.decodeIfPresent(Bool.self, forKey: .secret) ?? false
+        )
+    }
+}
+
 // MARK: - Configurable arg
 
 /// Specification of a CLI argument a registry entry accepts when launched.
