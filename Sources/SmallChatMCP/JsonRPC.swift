@@ -79,7 +79,7 @@ public struct JSONRPCRequest: Sendable, Codable {
 // MARK: - JSON-RPC Error
 
 /// A JSON-RPC 2.0 error object.
-public struct JSONRPCError: Sendable, Codable {
+public struct JSONRPCError: Error, Sendable, Codable {
     public let code: Int
     public let message: String
     public let data: AnyCodableValue?

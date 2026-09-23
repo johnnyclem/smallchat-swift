@@ -54,8 +54,10 @@ public actor SenderGate {
             }
         }
 
-        if allowlistFile != nil {
-            loadAllowlistFile()
+        // An actor's init can't call its isolated methods, so read the file
+        // through the static helper directly.
+        if let allowlistFile {
+            self.allowlist.formUnion(SenderGate.readAllowlistFile(at: allowlistFile))
         }
     }
 
@@ -186,23 +188,19 @@ public actor SenderGate {
 
     private func loadAllowlistFile() {
         guard let path = allowlistFilePath else { return }
-        guard FileManager.default.fileExists(atPath: path) else { return }
+        allowlist.formUnion(SenderGate.readAllowlistFile(at: path))
+    }
 
-        do {
-            let content = try String(contentsOfFile: path, encoding: .utf8)
-            let lines = content.components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty && !$0.hasPrefix("#") }
-
-            for line in lines {
-                let normalized = line.lowercased()
-                if SenderGate.isValidSenderIdentity(normalized) {
-                    allowlist.insert(normalized)
-                }
-            }
-        } catch {
-            // File read error -- non-critical, silently ignore
-        }
+    /// Valid, normalized identities from an allowlist file (one per line,
+    /// `#` comments). A missing or unreadable file yields none.
+    private static func readAllowlistFile(at path: String) -> [String] {
+        guard FileManager.default.fileExists(atPath: path),
+              let content = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        return content.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            .map { $0.lowercased() }
+            .filter(SenderGate.isValidSenderIdentity)
     }
 
     /// Generate a random hex string of the given length.

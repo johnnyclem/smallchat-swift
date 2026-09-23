@@ -83,7 +83,7 @@ struct AppRuntimeTests {
         let runtime = makeRuntime()
         var events: [DispatchEvent] = []
 
-        for try await event in runtime.uiDispatchStream(intent: "open the header") {
+        for try await event in await runtime.uiDispatchStream(intent: "open the header") {
             events.append(event)
         }
 
@@ -103,7 +103,7 @@ struct AppRuntimeTests {
         let runtime = makeRuntime()
         var lastEvent: DispatchEvent?
 
-        for try await event in runtime.uiDispatchStream(intent: "something unknown") {
+        for try await event in await runtime.uiDispatchStream(intent: "something unknown") {
             lastEvent = event
         }
 

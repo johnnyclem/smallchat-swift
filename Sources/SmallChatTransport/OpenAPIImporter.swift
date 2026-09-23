@@ -88,7 +88,9 @@ public enum OpenAPIImporter {
         }
     }
 
-    public struct SchemaObject: Codable, Sendable {
+    /// A class, not a struct: schemas nest (`items`, `properties`), and a
+    /// struct can't store an optional of its own type.
+    public final class SchemaObject: Codable, Sendable {
         public let type: String?
         public let description: String?
         public let properties: [String: SchemaObject]?

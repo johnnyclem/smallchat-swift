@@ -9,6 +9,30 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- **The macOS app is now a messenger for your Claude Code sessions**
+  (`SmallChatApp` + new `SmallChatAgents` library). The sidebar lists live
+  and recent non-archived sessions. Live status and kind come from Claude
+  Code's session registry; title, branch, and recency come from transcripts.
+  Each session gets a durable, renamable handle such as `@instrument-62`.
+  - **Direct chats.** A live session receives messages through Claude Code
+    inter-agent messaging, via a headless *switchboard* session limited to
+    `SendMessage`/`ListAgents`. A stopped session is resumed headlessly.
+  - **Group chats.** Messages fan out to every agent, or only to the agents
+    you `@mention`. Agent replies land private to you, with **Share with
+    group**, which delivers the reply to the other agents as an
+    inter-agent interrupt, and **Keep private**.
+  - **Stenographer.** Every chat has a stenographer preloaded from the
+    wiki's TB/UV ledger. It objects to tombstoned literals and flags
+    reliance on open UVs (notes visible only to you), and answers
+    `@stenographer` questions through a headless session briefed with the
+    ledger.
+  - The existing tool panels moved under **Toolkit**.
+- **`TruthObjections`** (`SmallChatTruth`): Swift port of Stenographer's
+  real-time objection detector (tombstoned-literal matching, §12).
+  `TruthTbEntry` now carries `literals`, and the wiki codec round-trips
+  them. Previously they were dropped on parse.
+- macOS CI workflow (`swift build` + `swift test`).
+
 - **`SmallChatTruth` — truth-ledger interop (Stenographer TB/UV v2, JSONL seam).**
   Ports the TS `@shorthand/core/truth` module: `TruthWiki.parse`/`serialize`
   read and write the ledger's append-only wiki JSONL losslessly (the

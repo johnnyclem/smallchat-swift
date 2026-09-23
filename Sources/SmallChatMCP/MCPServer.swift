@@ -3,6 +3,7 @@
 import Foundation
 import NIOCore
 import NIOHTTP1
+import NIOPosix
 import SmallChatCore
 import SmallChatRuntime
 
@@ -410,6 +411,10 @@ public actor MCPServer {
 /// SwiftNIO channel handler for MCP HTTP requests.
 ///
 /// v0.3.0: Enforces max request body size and tracks connection metrics.
+private struct UncheckedContext: @unchecked Sendable {
+    let context: ChannelHandlerContext
+}
+
 private final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -474,10 +479,12 @@ private final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let headers = requestHeaders
         let body = bodyBuffer.readString(length: bodyBuffer.readableBytes) ?? ""
 
-        let ctx = context
+        // ChannelHandlerContext isn't Sendable; the handler already opts out
+        // of checking (@unchecked Sendable), so carry the context the same way.
+        let ctx = UncheckedContext(context: context)
         Task { [server] in
             await self.processRequest(
-                context: ctx,
+                context: ctx.context,
                 method: method,
                 uri: uri,
                 headers: headers,

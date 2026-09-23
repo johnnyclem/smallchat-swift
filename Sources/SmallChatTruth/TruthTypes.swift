@@ -74,6 +74,21 @@ public struct TruthVerifyBy: Sendable, Codable, Equatable {
     }
 }
 
+/// A dead literal a tombstone declares (§12) — what a real-time objection
+/// can cite. `subject` names the identifier a bare value belongs to;
+/// `current` is the replacement, if any.
+public struct TruthTombstonedLiteral: Sendable, Codable, Equatable {
+    public let dead: String
+    public let subject: String?
+    public let current: String?
+
+    public init(dead: String, subject: String? = nil, current: String? = nil) {
+        self.dead = dead
+        self.subject = subject
+        self.current = current
+    }
+}
+
 // MARK: - Entries
 
 /// A signed, evidence-backed tombstone: ground truth once active.
@@ -88,6 +103,8 @@ public struct TruthTbEntry: Sendable, Equatable {
     /// The asserting author (distinct from `author` when an agent drafted and a human signed).
     public let signedBy: String?
     public var status: TbStatus
+    /// Matchable dead literals (§12). Empty when the TB declares none.
+    public let literals: [TruthTombstonedLiteral]
     /// Opaque stenographer namespace (`x-steno`), preserved for round-tripping.
     public let xSteno: JSONValue?
 
@@ -99,6 +116,7 @@ public struct TruthTbEntry: Sendable, Equatable {
         evidence: [TruthEvidence],
         signedBy: String?,
         status: TbStatus,
+        literals: [TruthTombstonedLiteral] = [],
         xSteno: JSONValue? = nil
     ) {
         self.id = id
@@ -108,6 +126,7 @@ public struct TruthTbEntry: Sendable, Equatable {
         self.evidence = evidence
         self.signedBy = signedBy
         self.status = status
+        self.literals = literals
         self.xSteno = xSteno
     }
 }

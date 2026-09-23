@@ -49,7 +49,8 @@ struct MemexTests {
 
     @Test("Inbound links are backfilled when an entity references another")
     func inboundLinksBackfilled() {
-        let body = "Alice met Bob. Bob met Carol."
+        // Claims need at least 4 words (TS parity), so use full sentences.
+        let body = "Alice met Bob at the market. Bob met Carol at the docks."
         let kb = MemexCompiler().compile([
             (source("s1", "t"), body),
         ])

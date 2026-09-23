@@ -22,7 +22,7 @@ public final class AppWebViewSandbox: NSObject, WKNavigationDelegate, @unchecked
     // MARK: - Pure helper (testable without WKWebView)
 
     /// Returns `true` when navigation to `url` should be allowed given `allowedURI`.
-    public static func shouldAllow(url: URL?, allowedURI: String) -> Bool {
+    nonisolated public static func shouldAllow(url: URL?, allowedURI: String) -> Bool {
         guard let url else { return false }
         guard let allowed = URL(string: allowedURI) else { return false }
         // Allow same scheme + host; nil host (e.g. about:blank) is denied
@@ -53,6 +53,9 @@ public enum AppWebViewConfiguration {
     ///
     /// Returns both the configuration and the `AppWebViewSandbox` so the caller
     /// can hold a strong reference to the delegate (WKWebView holds it weakly).
+    /// WebKit's configuration types are main-actor isolated, as are the
+    /// `make*View` callers.
+    @MainActor
     public static func make(for allowedURI: String) -> (WKWebViewConfiguration, AppWebViewSandbox) {
         let config = WKWebViewConfiguration()
 

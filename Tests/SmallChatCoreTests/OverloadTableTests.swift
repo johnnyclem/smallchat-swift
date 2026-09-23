@@ -70,14 +70,24 @@ struct OverloadTableTests {
     func ambiguityDetected() throws {
         let table = OverloadTable(selectorCanonical: "process")
 
-        let sig1 = createSignature([param("input", 0, SCType.any())])
+        // Signature keys are built from parameter types, not names, so two
+        // `(any)` overloads would collide at registration (as in the TS
+        // reference). A real tie needs distinct keys with equal scores:
+        // (any, string) and (string, any) both score any + exact for ("a", "b").
+        let sig1 = createSignature([
+            param("input", 0, SCType.any()),
+            param("mode", 1, SCType.string()),
+        ])
         try table.register(sig1, imp: MockIMP(toolName: "processA"))
 
-        let sig2 = createSignature([param("data", 0, SCType.any())])
+        let sig2 = createSignature([
+            param("data", 0, SCType.string()),
+            param("options", 1, SCType.any()),
+        ])
         try table.register(sig2, imp: MockIMP(toolName: "processB"))
 
         #expect(throws: OverloadAmbiguityError.self) {
-            _ = try table.resolve(["test" as any Sendable])
+            _ = try table.resolve(["a" as any Sendable, "b" as any Sendable])
         }
     }
 
@@ -118,9 +128,10 @@ struct OverloadTableTests {
         let sig = createSignature([param("message", 0, SCType.string())])
         try table.register(sig, imp: MockIMP(toolName: "send"))
 
-        #expect(throws: SignatureValidationError.self) {
-            _ = try table.validateAndResolve([42 as any Sendable])
-        }
+        // No overload accepts a number, so resolution finds nothing and the
+        // mismatched call is rejected with nil (matches the TS reference,
+        // `validateAndResolve([42])` → null).
+        #expect(try table.validateAndResolve([42 as any Sendable]) == nil)
     }
 
     @Test("validateAndResolve passes for correct types")

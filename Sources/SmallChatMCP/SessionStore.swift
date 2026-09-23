@@ -57,10 +57,8 @@ public actor SessionStore {
     public init(dbPath: String = "smallchat.db") throws {
         self.db = try Connection(dbPath)
         try db.execute("PRAGMA journal_mode = WAL")
-        try initSchema()
-    }
-
-    private func initSchema() throws {
+        // Inline rather than a helper: an actor's init can't call its
+        // isolated methods synchronously.
         try db.run(sessions.create(ifNotExists: true) { t in
             t.column(colId, primaryKey: true)
             t.column(colCreatedAt)

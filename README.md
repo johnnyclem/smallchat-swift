@@ -33,7 +33,7 @@ This is the **native Swift implementation** of [smallchat](https://github.com/jo
                          └─────────────────────┘
 ```
 
-**Table of contents:** [What's New](#whats-new-in-060) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Streaming](#streaming) · [CLI Reference](#cli-reference) · [Architecture](#architecture) · [Security](#security) · [MCP Server](#mcp-server) · [Claude Code Integration](#claude-code-integration) · [Dependencies](#dependencies) · [Ecosystem](#ecosystem) · [Development](#development)
+**Table of contents:** [What's New](#whats-new-in-060) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Streaming](#streaming) · [CLI Reference](#cli-reference) · [Architecture](#architecture) · [Security](#security) · [MCP Server](#mcp-server) · [Agent Messenger](#the-smallchat-app-agent-messenger) · [Claude Code Integration](#claude-code-integration) · [Dependencies](#dependencies) · [Ecosystem](#ecosystem) · [Development](#development)
 
 ## What's New in 0.6.0
 
@@ -252,8 +252,11 @@ SmallChatUI ─── WKWebView wrapper for App/UI surfaces (sandboxed, CSP-inje
    │
 SmallChat ─── Umbrella module (re-exports everything above)
    │
+SmallChatAgents ─── Agent messenger core: session discovery, handles, @mentions,
+   │                 group routing, switchboard relay, stenographer (rides Truth)
+   │
    ├── SmallChatCLI ─── 13 commands via swift-argument-parser
-   └── SmallChatApp ─── macOS SwiftUI GUI (compiler, server, discovery, apps)
+   └── SmallChatApp ─── macOS SwiftUI messenger for Claude Code sessions (+ Toolkit panels)
 ```
 
 ### Modules
@@ -273,10 +276,11 @@ SmallChat ─── Umbrella module (re-exports everything above)
 | **SmallChatCRDT** | Conflict-free replicated types for multi-agent shared memory: `LWWMap`, `ORSet`, `GCounter`, `VectorClock` |
 | **SmallChatCompaction** | `CompactionVerifier` — three-strategy verification (resampling, contradiction detection, invariants) for safe history compaction |
 | **SmallChatTruth** | Truth-ledger interop (Stenographer TB/UV v2): wiki JSONL codec, §7 consumption rules, truth-preserving compaction invariants, proposal-only write path |
+| **SmallChatAgents** | Agent messenger core: Claude Code session discovery (live registry + transcripts), durable renamable handles, `@mention` parsing, direct/group routing with private-until-shared replies, the switchboard relay over Claude Code inter-agent messaging, headless `claude -p --resume`, and the stenographer watcher |
 | **SmallChatMemex** | Knowledge-base compiler: the same Read → Extract → Embed → Link → Emit pipeline as `ToolCompiler`, driving `smallchat memex` |
 | **SmallChatUI** | SwiftUI `WKWebView` wrapper (`AppWebView`) for rendering App/UI content, with sandboxed navigation and CSP injection |
 | **SmallChat** | Umbrella module — imports and re-exports all of the above |
-| **SmallChatApp** | macOS SwiftUI GUI executable — Compiler, Server, Manifest editor, Inspector, Resolver, Discovery, Apps, and Doctor sections |
+| **SmallChatApp** | macOS SwiftUI messenger for Claude Code sessions (direct + group chats, `@mentions`, stenographer), with the Compiler, Server, Manifest editor, Inspector, Resolver, Discovery, Apps, and Doctor panels under Toolkit |
 
 ## Security
 
@@ -325,6 +329,19 @@ swift run smallchat serve --source ./manifests --port 3001
 | `GET` | `/mcp/prompts` | List available prompts |
 | `POST` | `/mcp/invoke` | Invoke a tool |
 | `GET` | `/mcp/events` | SSE event stream |
+
+## The smallchat App: Agent Messenger
+
+`swift run SmallChatApp` opens a macOS messenger for your Claude Code sessions.
+
+- **Every session, on the left.** Live sessions (with busy/idle status and interactive/background kind) are read from Claude Code's session registry, and recent stopped ones from their transcripts under `~/.claude/projects`. Archive a session to hide it.
+- **Durable names.** Each session gets a human-readable handle like `@instrument-62`. You can rename it; the name persists across launches and is what you `@mention`.
+- **Chat.** Click a session to open a direct chat. A live session receives the message through Claude Code's inter-agent messaging, arriving between tool calls or starting a new turn if it's idle. A stopped session is resumed headlessly for one turn (`claude -p --resume`).
+- **Group chats.** Put yourself and one or more agents in a group. Anything you send goes to every agent, unless you `@mention` specific ones (`@all` sends to everyone). Each agent's reply comes **only to you**. **Share with group** forwards it to the other agents as an interrupt; **Keep private** keeps it to yourself.
+- **@stenographer.** A stenographer watches every chat. It is preloaded with the tombstones (TB) and unverified claims (UV) from your project wiki's truth ledger, which is Stenographer's `export_wiki_entries` JSONL. It objects when a message asserts a tombstoned value, and flags when a message relies on an unverified claim. Its notes are visible only to you. Ask it questions directly with `@stenographer`.
+- The original compiler/server/inspector panels live under **Toolkit** in the sidebar.
+
+**How delivery to a live session works.** Claude Code delivers into a running session only through its own cross-session messaging (`SendMessage`), and the inbox socket's wire format isn't a public contract. So the app keeps one small headless session, the *switchboard* (named `smallchat`). Its only permitted tools are `SendMessage` and `ListAgents`. It relays your messages verbatim, agents reply to it by name, and it passes those replies back to the app. The receiving session's own inbound controls still apply: a session running with `bypassPermissions` holds messages for your approval (see Claude Code's `crossSessionInbound` setting). Everything except the SwiftUI views lives in the `SmallChatAgents` library and is unit-tested.
 
 ## Claude Code Integration
 
@@ -406,9 +423,10 @@ smallchat-swift/
 │   ├── SmallChatCRDT/              # Multi-agent shared memory (LWWMap, ORSet, GCounter)
 │   ├── SmallChatCompaction/        # History-compaction verification
 │   ├── SmallChatMemex/             # Knowledge-base compiler
+│   ├── SmallChatAgents/            # Agent messenger core (sessions, handles, routing, switchboard)
 │   ├── SmallChatUI/                # WKWebView wrapper for App/UI surfaces
 │   ├── SmallChatCLI/               # CLI entry point + 13 commands (Commands/)
-│   └── SmallChatApp/               # macOS SwiftUI GUI (Views/, Sidebar, AppState)
+│   └── SmallChatApp/               # macOS SwiftUI messenger (Messenger/) + Toolkit panels (Views/)
 ├── Tests/                          # One *Tests target per module above
 ├── examples/                       # loom-mcp manifest, registry entries (GitHub, Slack, Postgres, loom)
 ├── docs/                           # Ecosystem positioning + 0.5.0 roadmap

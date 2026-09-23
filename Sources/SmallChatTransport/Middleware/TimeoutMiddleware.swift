@@ -22,7 +22,7 @@ public struct TimeoutMiddleware: Sendable {
     /// - Throws: `TransportError.timeout` if the deadline is exceeded.
     public func execute<T: Sendable>(
         timeout duration: TimeInterval? = nil,
-        _ operation: @Sendable () async throws -> T
+        _ operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         let effectiveTimeout = duration ?? self.timeout
         let timeoutNanoseconds = UInt64(effectiveTimeout * 1_000_000_000)

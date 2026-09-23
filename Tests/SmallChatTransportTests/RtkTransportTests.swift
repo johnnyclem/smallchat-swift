@@ -62,7 +62,7 @@ struct RtkTransportTests {
         let output = try await transport.execute(input: TransportInput())
         #expect(output.rtkMetadata != nil)
         #expect(output.rtkMetadata?.enabled == false)
-        #expect(output.rtkMetadata?.mode == .none)
+        #expect(output.rtkMetadata?.mode == RtkMode.none)  // not Optional.none
         #expect(output.body == largeContent)
     }
 
@@ -162,7 +162,7 @@ struct RtkTransportTests {
         )
         let output = try await transport.execute(input: TransportInput())
         #expect(output.rtkMetadata?.enabled == false)
-        #expect(output.rtkMetadata?.mode == .none)
+        #expect(output.rtkMetadata?.mode == RtkMode.none)  // not Optional.none
     }
 
     @Test("withRtk factory — returns RtkTransport mirroring inner type")

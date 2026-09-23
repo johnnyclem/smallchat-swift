@@ -15,15 +15,22 @@ import SmallChatShorthand
 // MARK: - Configuration
 
 public struct MemexConfig: Sendable {
-    public let now: () -> Date
+    public let now: @Sendable () -> Date
+    /// Sentences shorter than this (in characters) are skipped as fragments.
     public let minClaimLength: Int
+    /// Sentences with fewer words than this don't become claims.
+    public let minClaimWords: Int
 
+    /// Defaults match the TS reference (`claim-extractor.ts`): fragments
+    /// under 10 characters are dropped and a claim needs at least 4 words.
     public init(
         now: @escaping @Sendable () -> Date = { Date() },
-        minClaimLength: Int = 20
+        minClaimLength: Int = 10,
+        minClaimWords: Int = 4
     ) {
         self.now = now
         self.minClaimLength = minClaimLength
+        self.minClaimWords = minClaimWords
     }
 }
 
@@ -69,6 +76,7 @@ public struct MemexCompiler: Sendable {
             for sentence in sentences {
                 let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.count < config.minClaimLength { continue }
+                if trimmed.split(whereSeparator: \.isWhitespace).count < config.minClaimWords { continue }
 
                 let entityNames = surfaceEntities(from: trimmed)
                 for name in entityNames {

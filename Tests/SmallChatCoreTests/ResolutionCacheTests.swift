@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import Foundation
 @testable import SmallChatCore
@@ -204,18 +205,25 @@ struct ResolutionCacheTests {
     func invalidationHookFires() async {
         let cache = ResolutionCache(maxSize: 100, minConfidence: 0.0)
 
-        var firedEvents: [String] = []
+        // Hooks are @Sendable, so collect through a lock-protected box.
+        final class Fired: @unchecked Sendable {
+            private let lock = NSLock()
+            private var events: [String] = []
+            func append(_ event: String) { lock.lock(); events.append(event); lock.unlock() }
+            var all: [String] { lock.lock(); defer { lock.unlock() }; return events }
+        }
+        let fired = Fired()
         await cache.invalidateOn { event in
             switch event {
-            case .flush: firedEvents.append("flush")
-            case .provider: firedEvents.append("provider")
-            case .selector: firedEvents.append("selector")
-            case .stale: firedEvents.append("stale")
+            case .flush: fired.append("flush")
+            case .provider: fired.append("provider")
+            case .selector: fired.append("selector")
+            case .stale: fired.append("stale")
             }
         }
 
         await cache.flush()
-        #expect(firedEvents.contains("flush"))
+        #expect(fired.all.contains("flush"))
     }
 
     // MARK: - Hit count

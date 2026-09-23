@@ -18,6 +18,7 @@ struct WikiEntryLine: Codable {
     var claim: String?
     var evidence: [TruthEvidence]?
     var signedBy: String?
+    var literals: [TruthTombstonedLiteral]?
     // UV fields
     var assertion: String?
     var basis: String?
@@ -27,7 +28,7 @@ struct WikiEntryLine: Codable {
     var xSteno: JSONValue?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, ts, author, claim, evidence, signedBy
+        case id, type, ts, author, claim, evidence, signedBy, literals
         case assertion, basis, verifyBy, contests, status
         case xSteno = "x-steno"
     }
@@ -44,6 +45,7 @@ struct WikiEntryLine: Codable {
             try container.encodeIfPresent(claim, forKey: .claim)
             try container.encodeIfPresent(evidence, forKey: .evidence)
             try container.encode(signedBy, forKey: .signedBy)
+            try container.encodeIfPresent(literals, forKey: .literals)
         } else {
             try container.encodeIfPresent(assertion, forKey: .assertion)
             try container.encodeIfPresent(basis, forKey: .basis)
@@ -70,6 +72,7 @@ public enum TruthWiki {
                 evidence: line.evidence ?? [],
                 signedBy: line.signedBy,
                 status: TbStatus(rawValue: line.status ?? "") ?? .active,
+                literals: line.literals ?? [],
                 xSteno: line.xSteno
             ))
         case "UV":
@@ -100,6 +103,7 @@ public enum TruthWiki {
                 claim: tb.claim,
                 evidence: tb.evidence,
                 signedBy: tb.signedBy,
+                literals: tb.literals.isEmpty ? nil : tb.literals,
                 assertion: nil,
                 basis: nil,
                 verifyBy: nil,
@@ -116,6 +120,7 @@ public enum TruthWiki {
                 claim: nil,
                 evidence: nil,
                 signedBy: nil,
+                literals: nil,
                 assertion: uv.assertion,
                 basis: uv.basis,
                 verifyBy: uv.verifyBy,

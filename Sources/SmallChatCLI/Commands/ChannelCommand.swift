@@ -75,7 +75,7 @@ struct ChannelCommand: AsyncParsableCommand {
         let outboundTask = Task {
             for await message in await server.outboundMessages {
                 print(message)
-                fflush(stdout)
+                fflush(nil)  // all streams; referencing the global `stdout` isn't concurrency-safe
             }
         }
 
