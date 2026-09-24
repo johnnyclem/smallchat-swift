@@ -66,6 +66,7 @@ struct MessengerSettingsView: View {
 struct ObjectionChannelSettings: View {
     @Environment(MessengerModel.self) private var model
     @State private var port = ""
+    @State private var restPort = ""
     @State private var revealSecret = false
 
     var body: some View {
@@ -90,13 +91,31 @@ struct ObjectionChannelSettings: View {
                 }
             }
             Toggle("Relay objections into the agent's live session", isOn: $bindable.settings.relayObjections)
+            HStack {
+                TextField("Stenographer REST port", text: $restPort)
+                    .frame(width: 90)
+                    .onSubmit(applyRestPort)
+                Button("Apply", action: applyRestPort)
+                Text("where you approve agent-drafted tombstones").font(.caption).foregroundStyle(.secondary)
+            }
             Button("Copy stenographer command") { copyToPasteboard(stenographerCommand(model)) }
         } header: {
             Text("Objection channel")
         } footer: {
-            Text("Stenographer pushes each real-time objection here as it's raised (`--objections deliver --objection-channel`). It lands in the offending agent's chats and, if relaying is on, interrupts that live session so it can correct course. Loopback only.")
+            Text("Stenographer pushes each real-time objection here as it's raised (`--objections deliver --objection-channel`). It lands in the offending agent's chats and, if relaying is on, interrupts that live session so it can correct course. Tombstones agents draft arrive here too and wait for you to notarize them; with `--require-notary`, agents can't assert tombstones any other way. Loopback only.")
         }
-        .onAppear { port = String(model.settings.objectionChannelPort) }
+        .onAppear {
+            port = String(model.settings.objectionChannelPort)
+            restPort = String(model.settings.stenographerRestPort)
+        }
+    }
+
+    private func applyRestPort() {
+        guard let value = Int(restPort), (1...65535).contains(value) else {
+            restPort = String(model.settings.stenographerRestPort)
+            return
+        }
+        model.settings.stenographerRestPort = value
     }
 
     private func applyPort() {
@@ -130,6 +149,11 @@ struct ObjectionChannelStatusLabel: View {
 
 /// Shell command that starts stenographer delivering objections to this app.
 @MainActor
+/// The same secret authenticates stenographer to the bridge and the messenger
+/// to stenographer's notary routes. Agents never get it.
 func stenographerCommand(_ model: MessengerModel) -> String {
-    "SMALLCHAT_CHANNEL_SECRET=\(model.settings.objectionChannelSecret) npx stenographer start <log-or-dir> --objections deliver --objection-channel \(model.objectionChannelURL)"
+    let secret = model.settings.objectionChannelSecret
+    return "SMALLCHAT_CHANNEL_SECRET=\(secret) STENOGRAPHER_NOTARY_SECRET=\(secret) stenographer start <log-or-dir>"
+        + " --objections deliver --objection-channel \(model.objectionChannelURL)"
+        + " --rest-port \(model.settings.stenographerRestPort) --require-notary"
 }

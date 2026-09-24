@@ -46,8 +46,11 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
     public var signerIdentity: String
     /// Wiki JSONL file new tombstones are appended to (nil: first configured file).
     public var tombstoneFile: String?
+    /// Stenographer's REST port (`--rest-port`), where agent drafts are notarized.
+    public var stenographerRestPort: Int
 
     public static let defaultObjectionChannelPort = 7337
+    public static let defaultStenographerRestPort = 8787
 
     public init(
         claudePath: String? = nil,
@@ -61,7 +64,8 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
         objectionChannelSecret: String = "",
         relayObjections: Bool = true,
         signerIdentity: String = "",
-        tombstoneFile: String? = nil
+        tombstoneFile: String? = nil,
+        stenographerRestPort: Int = MessengerSettings.defaultStenographerRestPort
     ) {
         self.claudePath = claudePath
         self.wikiPaths = wikiPaths
@@ -75,12 +79,13 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
         self.relayObjections = relayObjections
         self.signerIdentity = signerIdentity
         self.tombstoneFile = tombstoneFile
+        self.stenographerRestPort = stenographerRestPort
     }
 
     enum CodingKeys: String, CodingKey {
         case claudePath, wikiPaths, switchboardModel, stenographerModel, stenographerWatching, recentDays
         case objectionChannelEnabled, objectionChannelPort, objectionChannelSecret, relayObjections
-        case signerIdentity, tombstoneFile
+        case signerIdentity, tombstoneFile, stenographerRestPort
     }
 
     /// Lenient: settings saved by an older build (missing newer keys) still
@@ -102,6 +107,7 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
         relayObjections = try c.decodeIfPresent(Bool.self, forKey: .relayObjections) ?? defaults.relayObjections
         signerIdentity = try c.decodeIfPresent(String.self, forKey: .signerIdentity) ?? defaults.signerIdentity
         tombstoneFile = try c.decodeIfPresent(String.self, forKey: .tombstoneFile)
+        stenographerRestPort = try c.decodeIfPresent(Int.self, forKey: .stenographerRestPort) ?? defaults.stenographerRestPort
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -118,6 +124,7 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
         try c.encode(relayObjections, forKey: .relayObjections)
         try c.encode(signerIdentity, forKey: .signerIdentity)
         try c.encodeIfPresent(tombstoneFile, forKey: .tombstoneFile)
+        try c.encode(stenographerRestPort, forKey: .stenographerRestPort)
     }
 }
 

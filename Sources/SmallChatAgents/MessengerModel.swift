@@ -32,6 +32,8 @@ public final class MessengerModel {
     public private(set) var isRefreshing = false
     /// Objections received on the channel, newest first.
     public private(set) var objections: [ReceivedObjection] = []
+    /// Tombstones agents drafted for the user to notarize, newest first.
+    public private(set) var pendingProposals: [PendingProposal] = []
     public private(set) var objectionChannelStatus: ObjectionChannelStatus = .off
     /// Last problem worth telling the user about.
     public var lastError: String?
@@ -622,6 +624,10 @@ public final class MessengerModel {
     /// Objections land in each agent's chats (direct and group) and, when
     /// enabled, are relayed into the live session as an interrupt.
     func handleChannelEvent(_ event: ChannelInboundEvent) {
+        if event.isProposal {
+            receiveProposal(event)
+            return
+        }
         if event.isObjection, !event.objectionIds.isEmpty,
            event.objectionIds.allSatisfy(seenObjectionIds.contains) {
             return  // stenographer retried something we already have
@@ -672,6 +678,78 @@ public final class MessengerModel {
             ), at: 0)
             if objections.count > 100 { objections.removeLast(objections.count - 100) }
         }
+    }
+
+    // MARK: Notarization (agent-drafted tombstones)
+
+    /// Stenographer's REST base, where drafts are listed and notarized.
+    public var stenographerRestBase: URL {
+        URL(string: "http://127.0.0.1:\(settings.stenographerRestPort)")!
+    }
+
+    /// An agent drafted a tombstone: queue it for the user and say so in the
+    /// drafting agent's chat. The draft never reaches the agent as truth.
+    private func receiveProposal(_ event: ChannelInboundEvent) {
+        guard let id = event.proposalId, !pendingProposals.contains(where: { $0.id == id }) else { return }
+        pendingProposals.insert(PendingProposal(
+            id: id,
+            draftedBy: event.draftedBy ?? event.sender ?? "an agent",
+            sessionIds: event.sessionIds,
+            content: event.content,
+            notarizeURL: event.notarizeURL ?? NotaryClient.notarizeURL(restBase: stenographerRestBase, proposalId: id)
+        ), at: 0)
+        for target in event.sessionIds.compactMap({ agent($0) }) {
+            append(ChatMessage(
+                author: .stenographer,
+                text: event.content + "\nApprove or decline it in Stenographer.",
+                visibility: .privateToUser,
+                shareDecided: true
+            ), to: ensureDirectConversation(agentId: target.id), observe: false)
+        }
+    }
+
+    /// Picks up drafts raised while the messenger wasn't listening.
+    public func refreshProposals() async {
+        do {
+            let open = try await NotaryClient.openDrafts(restBase: stenographerRestBase)
+            let known = Set(pendingProposals.map(\.id))
+            pendingProposals.insert(contentsOf: open.filter { !known.contains($0.id) }, at: 0)
+        } catch {
+            // Stenographer's REST API isn't up (it's opt-in); pushes still arrive.
+        }
+    }
+
+    /// Notarize (sign as the user) or decline a draft.
+    public func decide(proposalId: String, _ decision: NotaryDecision) async {
+        guard let proposal = pendingProposals.first(where: { $0.id == proposalId }), proposal.state.isOpen else { return }
+        guard let url = proposal.notarizeURL else {
+            setProposalState(proposalId, .failed("Stenographer didn't say where to notarize this. Is its REST API on?"))
+            return
+        }
+        guard !settings.objectionChannelSecret.isEmpty else {
+            setProposalState(proposalId, .failed("No notary secret is set."))
+            return
+        }
+        if case .approve(let notary) = decision, notary.trimmingCharacters(in: .whitespaces).isEmpty {
+            setProposalState(proposalId, .failed("Set who you sign as in Settings first."))
+            return
+        }
+        setProposalState(proposalId, .working)
+        do {
+            let request = try NotaryClient.request(for: decision, notarizeURL: url, secret: settings.objectionChannelSecret)
+            let entryId = try await NotaryClient.send(request)
+            switch decision {
+            case .approve: setProposalState(proposalId, .notarized(entryId: entryId))
+            case .decline: setProposalState(proposalId, .declined)
+            }
+        } catch {
+            setProposalState(proposalId, .failed(String(describing: error)))
+        }
+    }
+
+    private func setProposalState(_ id: String, _ state: PendingProposal.State) {
+        guard let index = pendingProposals.firstIndex(where: { $0.id == id }) else { return }
+        pendingProposals[index].state = state
     }
 
     private func relay(_ event: ChannelInboundEvent, to agent: AgentSession, noteIn conversationId: String) {

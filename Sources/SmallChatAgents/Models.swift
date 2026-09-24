@@ -232,3 +232,46 @@ public struct ReceivedObjection: Sendable, Equatable, Identifiable {
         self.relayedTo = relayedTo
     }
 }
+
+/// A tombstone an agent drafted (stenographer `propose_tombstone`) that only
+/// the user can turn into truth.
+public struct PendingProposal: Sendable, Equatable, Identifiable {
+    public enum State: Sendable, Equatable {
+        case awaiting
+        case working
+        case notarized(entryId: String?)
+        case declined
+        case failed(String)
+
+        public var isOpen: Bool {
+            switch self {
+            case .awaiting, .failed: return true
+            case .working, .notarized, .declined: return false
+            }
+        }
+    }
+
+    /// Stenographer's proposal id.
+    public let id: String
+    public let draftedBy: String
+    /// Claude Code session ids of the drafting agent.
+    public let sessionIds: [String]
+    /// The notice as stenographer wrote it: claim, literals, rationale.
+    public let content: String
+    public let notarizeURL: URL?
+    public let receivedAt: Date
+    public var state: State
+
+    public init(
+        id: String, draftedBy: String, sessionIds: [String], content: String,
+        notarizeURL: URL?, receivedAt: Date = Date(), state: State = .awaiting
+    ) {
+        self.id = id
+        self.draftedBy = draftedBy
+        self.sessionIds = sessionIds
+        self.content = content
+        self.notarizeURL = notarizeURL
+        self.receivedAt = receivedAt
+        self.state = state
+    }
+}
