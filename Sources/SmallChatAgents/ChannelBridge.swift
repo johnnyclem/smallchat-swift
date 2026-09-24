@@ -16,7 +16,8 @@ import NIOPosix
 // Stenographer posts each objection as it's raised with
 // `meta.kind = "objection"` and the offending Claude Code session ids in
 // `meta.session_ids`; the messenger routes it to those agents' chats and
-// relays it into the live session.
+// relays it into the live session. Agent-drafted tombstones arrive as
+// `meta.kind = "proposal"` and wait for the user to notarize them.
 
 /// One event posted to the bridge.
 public struct ChannelInboundEvent: Sendable, Equatable {
@@ -35,6 +36,12 @@ public struct ChannelInboundEvent: Sendable, Equatable {
     }
 
     public var isObjection: Bool { meta["kind"] == "objection" }
+    /// An agent-drafted tombstone stenographer raised for the user to notarize.
+    public var isProposal: Bool { meta["kind"] == "proposal" }
+    public var proposalId: String? { meta["proposal_id"].flatMap { $0.isEmpty ? nil : $0 } }
+    public var draftedBy: String? { meta["drafted_by"] }
+    /// Where stenographer takes the approval (`POST …/proposals/:id/notarize`).
+    public var notarizeURL: URL? { meta["notarize_url"].flatMap(URL.init(string:)) }
 
     func list(_ key: String) -> [String] {
         (meta[key] ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }

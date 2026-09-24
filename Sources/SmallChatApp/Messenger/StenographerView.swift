@@ -14,6 +14,11 @@ struct StenographerView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
+            if model.pendingProposals.contains(where: { $0.state != .declined }) {
+                PendingProposalsList()
+                    .frame(maxHeight: 280)
+                Divider()
+            }
             if !model.objections.isEmpty {
                 ReceivedObjectionsList()
                     .frame(maxHeight: 240)
@@ -52,6 +57,7 @@ struct StenographerView: View {
         }
         .navigationTitle("Stenographer")
         .sheet(isPresented: $authoring) { TombstoneSheet() }
+        .task { await model.refreshProposals() }
     }
 
     private var header: some View {
@@ -223,5 +229,80 @@ struct ReceivedObjectionsList: View {
         let relayed = objection.relayedTo.compactMap { model.agent($0).map { "@\($0.handle)" } }
         return "Posted to " + handles.joined(separator: ", ")
             + (relayed.isEmpty ? "" : " · relayed into " + relayed.joined(separator: ", "))
+    }
+}
+
+/// Tombstones agents drafted, waiting for the user to notarize (sign) or decline.
+struct PendingProposalsList: View {
+    @Environment(MessengerModel.self) private var model
+    @State private var declining: PendingProposal?
+    @State private var reason = ""
+
+    var body: some View {
+        List {
+            Section("Awaiting your approval") {
+                ForEach(model.pendingProposals.filter { $0.state != .declined }) { proposal in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Image(systemName: "signature").foregroundStyle(Theme.stenographer)
+                            Text("Drafted by \(proposal.draftedBy)").font(.caption.weight(.semibold))
+                            Text(proposal.id).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                            Spacer()
+                            Text(proposal.receivedAt, style: .time).font(.caption2).foregroundStyle(.tertiary)
+                        }
+                        Text(proposal.content)
+                            .font(.callout)
+                            .textSelection(.enabled)
+                        controls(for: proposal)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .alert("Decline this draft?", isPresented: Binding(get: { declining != nil }, set: { if !$0 { declining = nil } })) {
+            TextField("Why (kept as feedback for the agent)", text: $reason)
+            Button("Decline", role: .destructive) {
+                guard let proposal = declining else { return }
+                let why = reason.trimmingCharacters(in: .whitespaces).isEmpty ? "declined by notary" : reason
+                let who = model.settings.signerIdentity
+                Task { await model.decide(proposalId: proposal.id, .decline(by: who.isEmpty ? "notary" : who, reason: why)) }
+                reason = ""
+            }
+            Button("Cancel", role: .cancel) { reason = "" }
+        }
+    }
+
+    @ViewBuilder
+    private func controls(for proposal: PendingProposal) -> some View {
+        switch proposal.state {
+        case .awaiting, .failed:
+            HStack(spacing: 8) {
+                Button("Approve as \(signer)") {
+                    Task { await model.decide(proposalId: proposal.id, .approve(notary: model.settings.signerIdentity)) }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(model.settings.signerIdentity.trimmingCharacters(in: .whitespaces).isEmpty)
+                .help("Signs the tombstone as you; stenographer mints it and starts objecting")
+                Button("Decline…") { declining = proposal }
+                    .controlSize(.small)
+                if case .failed(let message) = proposal.state {
+                    Text(message).font(.caption).foregroundStyle(.red).lineLimit(2)
+                }
+            }
+        case .working:
+            ProgressView().controlSize(.small)
+        case .notarized(let entryId):
+            Label("Notarized" + (entryId.map { " as \($0)" } ?? ""), systemImage: "checkmark.seal.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+        case .declined:
+            EmptyView()
+        }
+    }
+
+    private var signer: String {
+        let who = model.settings.signerIdentity.trimmingCharacters(in: .whitespaces)
+        return who.isEmpty ? "… (set in Settings)" : who
     }
 }
