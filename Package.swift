@@ -61,6 +61,7 @@ let package = Package(
             name: "SmallChatCore",
             dependencies: [
                 .product(name: "OrderedCollections", package: "swift-collections"),
+                crypto,
             ]
         ),
         // ---- Runtime ----
@@ -238,6 +239,12 @@ let package = Package(
         .testTarget(name: "SmallChatTruthTests", dependencies: ["SmallChatTruth", "SmallChatCompaction"]),
         .testTarget(name: "SmallChatMemexTests", dependencies: ["SmallChatMemex", "SmallChatCore"]),
         .testTarget(name: "SmallChatAgentsTests", dependencies: ["SmallChatAgents", "SmallChatTruth", "SmallChatChannel"]),
+        // Golden vectors and fixtures of @smallchat/core's spec/ (copied into
+        // Tests/Fixtures/spec by Scripts/sync-spec.sh).
+        .testTarget(
+            name: "SmallChatConformanceTests",
+            dependencies: ["SmallChatCore", "SmallChatRuntime", "SmallChatEmbedding", "SmallChatCompiler", "SmallChatMCP"]
+        ),
     ]
 )
 

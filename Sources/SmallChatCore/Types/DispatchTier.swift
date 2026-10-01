@@ -121,3 +121,55 @@ public struct DispatchConfig: Sendable, Codable, Equatable {
         }
     }
 }
+
+// MARK: - Thresholds, quantization, ranking (spec/ranking in @smallchat/core)
+
+/// Tier thresholds. The defaults are the suite's (spec/ranking):
+/// EXACT >= 0.95, HIGH >= 0.85, MEDIUM >= 0.75, LOW >= 0.60, else NONE.
+public struct TierThresholds: Sendable, Codable, Equatable {
+    public var exact: Double
+    public var high: Double
+    public var medium: Double
+    public var low: Double
+
+    public init(exact: Double = 0.95, high: Double = 0.85, medium: Double = 0.75, low: Double = 0.60) {
+        self.exact = exact
+        self.high = high
+        self.medium = medium
+        self.low = low
+    }
+
+    /// The suite defaults.
+    public static let `default` = TierThresholds()
+}
+
+/// Scores are compared at this resolution (4 decimal places).
+public let scoreQuantum = 1e-4
+
+/// A score rounded to 4 decimal places (half away from zero) and clamped
+/// to [0, 1]; a non-finite score is 0. Every score is quantized before it
+/// is ranked or compared with a threshold, so vector backends and
+/// platforms that differ in the last bits of a cosine similarity reach the
+/// same outcome.
+public func quantizeScore(_ score: Double) -> Double {
+    guard score.isFinite else { return 0 }
+    return min(1, max(0, (score * 1e4).rounded() / 1e4))
+}
+
+/// The deterministic candidate order: higher quantized score first, then
+/// canonical tool id by UTF-16 code units, ascending. True when `a` ranks
+/// before `b`.
+public func rankedBefore(score a: Double, toolId idA: String, score b: Double, toolId idB: String) -> Bool {
+    let qa = quantizeScore(a), qb = quantizeScore(b)
+    if qa != qb { return qa > qb }
+    return idA.utf16.lexicographicallyPrecedes(idB.utf16)
+}
+
+/// The tier of a (quantized) score.
+public func computeTier(_ confidence: Double, thresholds: TierThresholds = .default) -> DispatchTier {
+    if confidence >= thresholds.exact { return .exact }
+    if confidence >= thresholds.high { return .high }
+    if confidence >= thresholds.medium { return .medium }
+    if confidence >= thresholds.low { return .low }
+    return .none
+}
