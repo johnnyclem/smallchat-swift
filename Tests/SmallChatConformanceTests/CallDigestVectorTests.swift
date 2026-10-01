@@ -13,7 +13,7 @@ struct CallDigestVectorTests {
         #expect(Self.spec["domain"]?.stringValue == callDigestDomain)
     }
 
-    @Test("every vector reproduces its JCS form and digest", arguments: Self.spec["vectors"]!.arrayValue)
+    @Test("every vector reproduces its JCS form and digest", arguments: CallDigestVectorTests.spec["vectors"]!.arrayValue)
     func vector(_ v: AnyCodableValue) throws {
         let name = v["name"]?.stringValue ?? "?"
         let toolId = try #require(v["toolId"]?.stringValue)
@@ -22,7 +22,7 @@ struct CallDigestVectorTests {
         #expect(try callDigest(toolId: toolId, arguments: arguments) == v["digest"]?.stringValue, "\(name)")
     }
 
-    @Test("every invalid input is refused", arguments: Self.spec["invalid"]!.arrayValue)
+    @Test("every invalid input is refused", arguments: CallDigestVectorTests.spec["invalid"]!.arrayValue)
     func invalid(_ v: AnyCodableValue) throws {
         let name = v["name"]?.stringValue ?? "?"
         let toolId = try #require(v["toolId"]?.stringValue)

@@ -42,7 +42,7 @@ private func notesRuntime(runs: Runs, options: RuntimeOptions = RuntimeOptions()
         "create a note": [1, 0, 0, 0],
         "remove a note": [0, 1, 0, 0],
         // cos(tidy up, create_note) = 0.9 * 0.7222 = 0.65
-        "tidy up": [0.7222222, 0, (1 - 0.7222222 * 0.7222222).squareRoot(), 0],
+        "tidy up": [0.7222222, 0, (Float(1) - 0.7222222 * 0.7222222).squareRoot(), 0],
     ], dimensions: 4)
     let runtime = ToolRuntime(vectorIndex: MemoryVectorIndex(), embedder: embedder, options: options)
     let createSchema = JSONSchemaType(json: [
@@ -62,8 +62,8 @@ private func notesRuntime(runs: Runs, options: RuntimeOptions = RuntimeOptions()
         executor: { args in runs.add("notes/delete_note", args); return ToolResult(content: "deleted") },
         annotations: ToolAnnotations(destructiveHint: true)
     )
-    let createSelector = try await runtime.selectorTable.register(embedding: [0.9, 0, 0, (1 - 0.81).squareRoot()], canonical: "notes.create_note")
-    let deleteSelector = try await runtime.selectorTable.register(embedding: [0, 0.9, 0, (1 - 0.81).squareRoot()], canonical: "notes.delete_note")
+    let createSelector = try await runtime.selectorTable.register(embedding: [0.9, 0, 0, (Float(1) - 0.81).squareRoot()], canonical: "notes.create_note")
+    let deleteSelector = try await runtime.selectorTable.register(embedding: [0, 0.9, 0, (Float(1) - 0.81).squareRoot()], canonical: "notes.delete_note")
     let cls = ToolClass(name: "notes")
     cls.addMethod(createSelector, imp: create)
     cls.addMethod(deleteSelector, imp: delete)

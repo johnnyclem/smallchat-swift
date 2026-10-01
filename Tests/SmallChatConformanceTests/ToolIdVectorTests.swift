@@ -13,7 +13,7 @@ struct ToolIdVectorTests {
         #expect(Self.spec["version"]?.stringValue == "smallchat.tool-id.v1")
     }
 
-    @Test("every valid id splits, round-trips and maps to its aggregate name", arguments: Self.spec["valid"]!.arrayValue)
+    @Test("every valid id splits, round-trips and maps to its aggregate name", arguments: ToolIdVectorTests.spec["valid"]!.arrayValue)
     func valid(_ v: AnyCodableValue) throws {
         let id = try #require(v["id"]?.stringValue)
         let providerId = try #require(v["providerId"]?.stringValue)
@@ -25,7 +25,7 @@ struct ToolIdVectorTests {
         #expect(mcpAggregateName(providerId: providerId, toolName: toolName) == v["aggregateName"]?.stringValue)
     }
 
-    @Test("every invalid id is refused", arguments: Self.spec["invalid"]!.arrayValue)
+    @Test("every invalid id is refused", arguments: ToolIdVectorTests.spec["invalid"]!.arrayValue)
     func invalid(_ v: AnyCodableValue) throws {
         let id = try #require(v["id"]?.stringValue)
         #expect(throws: InvalidToolIdError.self, "\(v["reason"]?.stringValue ?? "")") {

@@ -13,14 +13,14 @@ struct RankingVectorTests {
         #expect(Self.spec["version"]?.stringValue == "smallchat.rank.v1")
     }
 
-    @Test("quantizeScore", arguments: Self.spec["quantize"]!.arrayValue)
+    @Test("quantizeScore", arguments: RankingVectorTests.spec["quantize"]!.arrayValue)
     func quantize(_ v: AnyCodableValue) throws {
         let input = try #require(v["input"]?.doubleValue)
         let expected = try #require(v["expected"]?.doubleValue)
         #expect(quantizeScore(input) == expected, "quantizeScore(\(input))")
     }
 
-    @Test("candidate order", arguments: Self.spec["rank"]!.arrayValue)
+    @Test("candidate order", arguments: RankingVectorTests.spec["rank"]!.arrayValue)
     func rank(_ v: AnyCodableValue) throws {
         let candidates = try v["candidates"]!.arrayValue.map { c in
             (toolId: try #require(c["toolId"]?.stringValue), score: try #require(c["score"]?.doubleValue))
@@ -33,7 +33,7 @@ struct RankingVectorTests {
         #expect(order(candidates.reversed()) == expected, "\(v["name"]?.stringValue ?? "") (reversed input)")
     }
 
-    @Test("tier of a quantized score, default thresholds", arguments: Self.spec["tier"]!.arrayValue)
+    @Test("tier of a quantized score, default thresholds", arguments: RankingVectorTests.spec["tier"]!.arrayValue)
     func tier(_ v: AnyCodableValue) throws {
         let score = try #require(v["score"]?.doubleValue)
         let expected = try #require(v["expected"]?.stringValue)

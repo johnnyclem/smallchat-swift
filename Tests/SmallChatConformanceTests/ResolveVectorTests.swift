@@ -17,7 +17,7 @@ struct ResolveVectorTests {
         #expect(Self.spec["version"]?.stringValue == "smallchat.resolve.v1")
     }
 
-    @Test("every case", arguments: Self.spec["cases"]!.arrayValue)
+    @Test("every case", arguments: ResolveVectorTests.spec["cases"]!.arrayValue)
     func resolveCase(_ c: AnyCodableValue) async throws {
         let name = c["name"]?.stringValue ?? "?"
         let intent = try #require(c["intent"]?.stringValue)

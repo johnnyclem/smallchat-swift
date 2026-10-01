@@ -47,7 +47,7 @@ struct ArtifactFixtureTests {
         #expect(again.json == artifact.json)
     }
 
-    @Test("every negative fixture is refused", arguments: Self.index["artifacts"]!.arrayValue)
+    @Test("every negative fixture is refused", arguments: ArtifactFixtureTests.index["artifacts"]!.arrayValue)
     func invalidRefused(_ entry: AnyCodableValue) throws {
         let file = try #require(entry["file"]?.stringValue)
         let rule = try #require(entry["rule"]?.doubleValue)
@@ -69,7 +69,7 @@ struct ArtifactFixtureTests {
         func embed(_ text: String) async throws -> [Float] { [Float](repeating: 0, count: dimensions) }
     }
 
-    @Test("an embedder that differs in any one fingerprint field is refused", arguments: Self.index["embedderMismatches"]!["cases"]!.arrayValue)
+    @Test("an embedder that differs in any one fingerprint field is refused", arguments: ArtifactFixtureTests.index["embedderMismatches"]!["cases"]!.arrayValue)
     func embedderMismatch(_ entry: AnyCodableValue) throws {
         let artifact = try Self.minimal()
         let data = try JSONEncoder().encode(try #require(entry["fingerprint"]))
