@@ -202,6 +202,17 @@ Add `await` where you call it outside the actor.
 event (including a closing `</channel>`) reaches the model as text. If you parsed
 the content back out of the tag, unescape those three entities.
 
+## Messenger (`SmallChatAgents`)
+
+### Switchboard protocol
+
+The switchboard's commands and output lines now carry a framing nonce. If you call
+`SwitchboardProtocol` directly, pass the nonce: `systemPrompt(name:nonce:)`,
+`relayCommand(ticket:to:cwd:body:nonce:)`, `listCommand(nonce:)` and
+`parse(_:nonce:)`, with one value from `SwitchboardProtocol.makeNonce()` per
+switchboard session. `Switchboard` and `ClaudeCodeTransport` do this for you. A
+`Switchboard.relay` that times out now throws `SwitchboardError`.
+
 ## Linux hashes
 
 On Linux, audit-log HMACs (`AuditLog`) and Dream artifact hashes

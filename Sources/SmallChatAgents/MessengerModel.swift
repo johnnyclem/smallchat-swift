@@ -521,9 +521,7 @@ public final class MessengerModel {
     }
 
     func handleInbound(_ reply: InboundReply) {
-        let name = reply.senderName.lowercased()
-        guard let agent = allAgents.first(where: { $0.claudeName?.lowercased() == name })
-            ?? allAgents.first(where: { $0.handle == Handles.normalize(name) }) else {
+        guard let agent = sender(named: reply.senderName) else {
             // Someone we don't track — surface it rather than drop it.
             if let id = selectedConversationId {
                 append(ChatMessage(author: .system, text: "Message from @\(reply.senderName) (unknown session):\n\(reply.text)"), to: id)
@@ -533,6 +531,19 @@ public final class MessengerModel {
         // Never yank the user's selection over to an unsolicited reply.
         let conversationId = replyRoute[agent.id] ?? ensureDirectConversation(agentId: agent.id)
         receiveReply(from: agent.id, text: reply.text, in: conversationId)
+    }
+
+    /// The agent a switchboard sender name belongs to. Claude Code's own
+    /// session names decide, and an ambiguous name matches nobody. The
+    /// smallchat handle is a fallback only for a live session whose Claude
+    /// name isn't known yet, so no session can take over an agent's identity
+    /// by naming itself after that agent's handle.
+    func sender(named rawName: String) -> AgentSession? {
+        let name = rawName.lowercased()
+        let byClaudeName = allAgents.filter { $0.claudeName?.lowercased() == name }
+        if !byClaudeName.isEmpty { return byClaudeName.count == 1 ? byClaudeName[0] : nil }
+        let byHandle = allAgents.filter { $0.isLive && $0.claudeName == nil && $0.handle == Handles.normalize(name) }
+        return byHandle.count == 1 ? byHandle[0] : nil
     }
 
     func receiveReply(from agentId: String, text: String, in conversationId: String) {

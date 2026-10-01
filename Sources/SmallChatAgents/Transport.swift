@@ -48,6 +48,8 @@ public final class ClaudeCodeTransport: AgentTransport, @unchecked Sendable {
         public var switchboardName: String = SwitchboardProtocol.defaultName
         public var switchboardModel: String = "haiku"
         public var stenographerModel: String = "sonnet"
+        /// Fixed switchboard framing nonce, for tests. nil: a fresh random one.
+        public var switchboardNonce: String?
 
         public init(executable: String) { self.executable = executable }
     }
@@ -62,7 +64,8 @@ public final class ClaudeCodeTransport: AgentTransport, @unchecked Sendable {
             executable: config.executable,
             name: config.switchboardName,
             model: config.switchboardModel,
-            cwd: FileManager.default.homeDirectoryForCurrentUser.path
+            cwd: FileManager.default.homeDirectoryForCurrentUser.path,
+            nonce: config.switchboardNonce ?? SwitchboardProtocol.makeNonce()
         )
         self.switchboard = switchboard
         inbound = AsyncStream { continuation in

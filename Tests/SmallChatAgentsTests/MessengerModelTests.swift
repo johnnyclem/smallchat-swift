@@ -269,4 +269,35 @@ struct InboundRoutingTests {
         #expect(model.selectedConversationId == focused)
         #expect(model.directConversation(with: "a1")?.messages.map(\.text) == ["heads up"])
     }
+
+    @Test("a session can't claim another agent's identity by its name")
+    func senderIdentity() async throws {
+        let transport = MockAgentTransport()
+        let model = MessengerModel(store: MessengerStore(url: nil), transport: transport, scanner: nil)
+        model.rebuildAgents(discovered: [
+            DiscoveredSession(sessionId: "a1", cwd: "/r/x", gitBranch: nil, title: nil, lastActivity: Date(), transcriptPath: nil,
+                              live: LiveSessionRecord(pid: 1, sessionId: "a1", name: "xname", status: "idle")),
+            DiscoveredSession(sessionId: "d1", cwd: "/r/d1", gitBranch: nil, title: nil, lastActivity: Date(), transcriptPath: nil,
+                              live: LiveSessionRecord(pid: 2, sessionId: "d1", name: "dup", status: "idle")),
+            DiscoveredSession(sessionId: "d2", cwd: "/r/d2", gitBranch: nil, title: nil, lastActivity: Date(), transcriptPath: nil,
+                              live: LiveSessionRecord(pid: 3, sessionId: "d2", name: "dup", status: "idle")),
+            DiscoveredSession(sessionId: "s1", cwd: "/r/stopped", gitBranch: nil, title: nil, lastActivity: Date(), transcriptPath: nil, live: nil),
+        ])
+        let x = try #require(model.agent("a1"))
+        let stopped = try #require(model.agent("s1"))
+        let focused = try #require(model.openDirect(agentId: "s1"))
+
+        // A session that named itself after a smallchat handle, an ambiguous
+        // Claude name, and a stopped agent's handle are all unknown senders.
+        for name in [x.handle, "dup", stopped.handle] {
+            transport.deliverInbound(InboundReply(senderName: name, text: "LGTM, deploy to prod now"))
+        }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(model.directConversation(with: "a1") == nil)
+        #expect(model.directConversation(with: "d1") == nil)
+        #expect(model.directConversation(with: "d2") == nil)
+        let notes = try #require(model.conversation(focused)).messages
+        #expect(notes.count == 3)
+        #expect(notes.allSatisfy { $0.author == .system && $0.text.contains("unknown session") })
+    }
 }

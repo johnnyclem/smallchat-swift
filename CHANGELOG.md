@@ -123,6 +123,12 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   channel server negotiates its protocol version (it always answered `2024-11-05`):
   it echoes `2025-11-25`, `2025-06-18` or `2024-11-05` and offers `2025-11-25`
   otherwise.
+- **The messenger's switchboard protocol is nonce-framed.**
+  `SwitchboardProtocol.systemPrompt(name:nonce:)`,
+  `relayCommand(ticket:to:cwd:body:nonce:)` and `parse(_:nonce:)` replace the
+  versions without a nonce; `makeNonce()` and `listCommand(nonce:)` are new, and
+  `Switchboard.init` takes an optional `nonce` (for tests). `parse` ignores every
+  line that doesn't carry the nonce.
 
 ### Fixed
 
@@ -204,6 +210,28 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   to stdin before reading stdout, so a filter whose output filled the pipe
   buffer (about 64 KB) blocked forever. stdin is now written while stdout and
   stderr are read, and on `timeoutMs` the process is stopped.
+- **A switchboard relay that times out fails.** `Switchboard.relay` raced the
+  receipt against a timer whose task returned normally, so when the switchboard
+  never answered (rate limit, expired login, crashed turn) the relay returned as if
+  delivered and the chat waited for a reply that could not come. It now throws
+  `SwitchboardError` ("switchboard timed out"), and a cancelled relay throws too
+  instead of leaving its ticket pending.
+- **Relayed and inbound text can't forge switchboard protocol.** The switchboard
+  copies message bodies verbatim, and the parser trusted any line starting with
+  `DELIVERED`, `FAILED`, `AGENT` or `INBOUND`, so a message from another session
+  could end its own envelope, open one attributed to a trusted agent, or confirm a
+  pending ticket; a relayed body could hold extra `RELAY` commands. Commands,
+  receipts, listings and envelopes now carry a random per-switchboard nonce, bodies
+  sit between nonce markers, and a message from another session is always passed on
+  as inbound text, never run as a command. A body that contains the nonce is not
+  relayed. The switchboard is still a model, so this keeps the parser honest; it
+  does not make the model immune to instructions in what it relays.
+- **Inbound replies are attributed by Claude Code session name only.** A reply
+  whose sender matched no session name fell back to the smallchat handle, so a
+  session that named itself after an agent's handle was shown as that agent. The
+  handle now counts only for a live session whose Claude Code name isn't known yet,
+  and a name two sessions share matches nobody (the reply shows as from an unknown
+  session).
 
 ### Added
 
