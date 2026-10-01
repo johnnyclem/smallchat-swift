@@ -398,6 +398,68 @@ Add `await` where you call it outside the actor.
 event (including a closing `</channel>`) reaches the model as text. If you parsed
 the content back out of the tag, unescape those three entities.
 
+## Truth (`SmallChatTruth`)
+
+SmallChatTruth reads Stenographer's truth format v2 (`Tests/Fixtures/truth-format/README.md`
+is the spec). Stenographer 1.0 writes it; Stenographer 0.x wrote version 1 lines,
+which are still read.
+
+### Statuses are open strings, and fold
+
+`TbStatus`, `UvStatus`, `TruthEvidence.Kind` and `TruthVerifyBy.Kind` are structs
+wrapping the string a line carries. `.active`, `.open`, `.commit` and the other known
+values still work, including in `==` and `switch`; `.struck` (TB and UV) and
+`.claimedCommand` are new. A `switch` over one now needs a `default:`. `rawValue` is
+the string as written, and a value this version doesn't know is kept, never turned
+into a known one.
+
+`TruthTbEntry.status` and `TruthUvEntry.status` are optional (`nil` when the line has
+no status) and hold the folded status: the last `TRANSITION` that targets the entry,
+else the line's own (`source?.lineStatus`). Don't decide what counts as truth by
+comparing statuses yourself: call `TruthWiki.classify(_:)` or
+`TruthWiki.selectCurrentTruth(_:)`, which also leave out struck, unsigned and
+inadmissible entries and any unknown or missing status.
+
+`TruthTbEntry`/`TruthUvEntry` initializers take `status:` as an optional and gain
+`extra:`, `source:` and `inadmissible:` parameters with defaults, so existing calls
+compile.
+
+### Reading
+
+- `TruthWiki.parse` returns `TruthReadError`s (`line`, `error`, `id`, `file`). A v2
+  stream with any refused line or a broken chain is refused whole:
+  `result.refused` is true and `result.entries` is empty. A version 1 file is still
+  read line by line.
+- Read several files with `TruthWiki.parseFiles([(name, text)])`, not by
+  concatenating their lines: each file is one writer's stream with its own chain.
+  `TruthLedgerSnapshot.load(paths:)` does this.
+- Version 1 TBs are not current truth (they carry no hash). To read a 0.x export as
+  before, pass `TruthReadOptions(admitV1Tbs: true)`; better, have Stenographer 1.0
+  export a new file of its own.
+- Version 1 lines need what Stenographer's import needs: an RFC 3339 `ts`, at least
+  one piece of evidence on a TB, and accountable identities.
+
+### Writing back
+
+`TruthWiki.serialize` returns each entry's original line. If you changed an entry
+and want a new line, set its `source` to `nil` first (you get the version 1 shape),
+but don't write it into a file Stenographer exports: each truth file has one writer.
+
+### Proposals
+
+`TruthProposals.serialize` writes PROPOSAL envelopes (truth format v2, hash-chained).
+To append to an existing proposals file, continue its chain:
+`TruthProposals.serialize(new, after: TruthProposals.head(of: existingLines))`. The
+default `signal.source` is `compaction-candidate`. `InvariantProposal` is no longer
+`Codable`; encode `proposal.envelope.line(after:)` instead.
+
+### Renderings
+
+Rendered sections, compaction items, invariant records and objection summaries
+escape markers inside ledger text (`[TB]` becomes `\[TB]`). Code that searched the
+rendered text for a claim containing `[` should search for the escaped form, or use
+the entries themselves.
+
 ## Messenger (`SmallChatAgents`)
 
 ### Switchboard protocol
@@ -450,6 +512,34 @@ In code:
 - `PendingProposal.notarizeURL` is gone. Build the URL with
   `NotaryClient.notarizeURL(restBase:proposalId:)`, which now returns an optional,
   and call `NotaryClient.parseInbox(_:)` without `restBase`.
+
+### Tombstones go to Stenographer, not to a wiki file
+
+Signing a tombstone no longer appends to a wiki file: the app submits a PROPOSAL
+envelope to Stenographer (`POST /proposals`) and notarizes it in your name
+(`POST /proposals/:id/notarize`). This needs Stenographer 1.0 running with its REST
+API (`--rest-port`, default 8787) and the messenger's notary secret and REST token
+(restart it with **Copy stenographer command**).
+
+- `try model.assertTombstone(draft)` is now `try await model.assertTombstone(draft)`.
+- `model.tombstoneTarget` is gone, and `settings.tombstoneFile` is ignored.
+- `TombstoneDraft.sign()` and `TruthWiki.append(_:toFileAt:)` are gone. Build the
+  envelope with `draft.proposal(author:)` and send it with
+  `NotaryClient.submitAndNotarize(_:notary:restBase:secret:restToken:)`.
+- Tombstones an older build wrote (by default to `smallchat-tombstones.jsonl` in your
+  wiki folder) are version 1 lines, which no longer count as truth. Sign them again
+  in the app, or have Stenographer `import_wiki_entries` that file, which files each
+  one as a proposal for you to notarize; then remove the file.
+
+### A third secret: Stenographer's REST token
+
+Stenographer 1.0 requires `Authorization: Bearer <token>` on every REST route
+(unless started with `--rest-insecure`). The messenger generates the token like its
+other secrets (`model.restToken`, `MessengerSecret.restToken`, kept in the Keychain)
+and the copied launch command passes it as `STENOGRAPHER_REST_TOKEN`. Restart
+Stenographer with the new command. `NotaryClient.request(for:notarizeURL:secret:restToken:)`
+and `NotaryClient.openDrafts(restBase:restToken:session:)` take it; `ensureSecrets`
+returns it too.
 
 ### Saving is asynchronous
 

@@ -282,6 +282,55 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   tool id, candidates and proof digest (`--json` prints the proof) and drops
   `--top-k` and `--threshold`; `repl`, `inspect` and `docs` read format 1.0.
 
+- **SmallChatTruth reads truth format v2, and fails closed.** Stenographer's
+  truth streams are hash-chained JSONL (`schemaVersion: 2`, `seq`, `prevHash`,
+  `hash` = SHA-256 of the line's JCS form) with `TRANSITION` lines for status
+  changes. `TruthWiki.parse` checks every line and the chain and refuses a v2
+  stream with any bad line or break (`ParseResult.refused`, no entries); its
+  `errors` are `TruthReadError`s (line, error, id, file), not `TruthError`s.
+  An entry's status is folded from the last `TRANSITION` that targets it.
+  `TbStatus`, `UvStatus`, `TruthEvidence.Kind` and `TruthVerifyBy.Kind` are open,
+  string-backed structs (the known values are static members, with
+  `TbStatus.struck`, `UvStatus.struck` and `TruthEvidence.Kind.claimedCommand`
+  added), and `TruthTbEntry.status`/`TruthUvEntry.status` are optional: an
+  unknown or missing status is kept as written and is history. A struck,
+  unsigned or inadmissible entry is history too, and `TruthObjections.check`
+  ignores every TB that isn't current truth. Version 1 TBs (no hash) are
+  unverifiable unless `TruthReadOptions(admitV1Tbs: true)`. Version 1 lines
+  must have a real `ts` and at least one piece of evidence, as Stenographer's
+  import requires.
+- **`TruthWiki.serialize` writes lines back as read.** An entry read from a
+  stream serializes to the exact line it came from (no `sortedKeys` rewrite, no
+  status rewrite); an entry built in code is written in the version 1 shape with
+  Stenographer's field order.
+- **Tombstones are no longer written to wiki files.** `TombstoneDraft.sign()`
+  and `TruthWiki.append(_:toFileAt:)` are removed. `TombstoneDraft.proposal(author:)`
+  builds a PROPOSAL envelope, and `MessengerModel.assertTombstone(_:)` is now
+  `async`: it submits the envelope to Stenographer (`POST /proposals`) and
+  notarizes it as the signer. `MessengerModel.tombstoneTarget` is gone and
+  `MessengerSettings.tombstoneFile` is no longer read.
+- **Proposals are the suite's PROPOSAL envelope.** `TruthProposals.serialize`
+  writes hash-chained truth format v2 lines (`after:` continues a file's stream);
+  `InvariantProposal.Signal` defaults to `compaction-candidate` (the retired
+  `shorthand-compaction` source is no longer written); `InvariantProposal` is no
+  longer `Codable`.
+- **The messenger keeps a third secret, Stenographer's REST token**
+  (`MessengerSecret.restToken`, `STENOGRAPHER_REST_TOKEN`), sent as
+  `Authorization: Bearer` on every Stenographer REST call and included in the
+  copied launch command. `NotaryClient.request(for:notarizeURL:secret:restToken:)`
+  and `NotaryClient.openDrafts(restBase:restToken:session:)` take it.
+- **Truth renderings escape untrusted text.** `TruthCompaction.renderSection`,
+  `compactionItems`, `invariantRecords`, `TruthObjection.summary` and the
+  stenographer's notes and prompt put a `\` before a frozen marker (`[TB…`,
+  `[UV…`) or a reproduced `## Asserted Truth` heading inside ledger fields and
+  transcript text, and collapse line breaks in ledger fields. An active TB with
+  an open contesting UV now renders as `[TB ⚠ CONTESTED]`.
+- **Identities compare by key.** `isAnonymousIdentity` folds width, case and
+  invisible characters (`ａｓｓｉｓｔａｎｔ` is anonymous), and
+  `assertAccountableAuthor` also refuses control characters and the reserved
+  `migration` and `detector:*` (unless `allowDetector`). `TruthError.malformedLine`
+  with line 0 describes itself as just its reason.
+
 ### Fixed
 
 - **Repeating an intent can't run a tool the first call refused (SC-SW-04).** The
@@ -468,8 +517,49 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   also no longer fails the tickets of the one that replaced it, and writes to a
   `claude` that stopped reading its stdin fail instead of raising `SIGPIPE`.
 
+- **An open UV contesting a TB is never dropped (SC-SW-05).** Rendering,
+  compaction items and the invariant skipped every UV with a `contests` field,
+  so a UV contesting an active TB (Stenographer's incremental export had not
+  re-sent the TB as contested) or a TB that wasn't loaded vanished from the brief
+  and compaction. An open contesting UV now rides its TB whatever the TB's
+  recorded status, and is rendered on its own when its TB isn't current truth.
+- **Unknown or missing statuses fail closed and are never rewritten (SC-SW-06,
+  XSUITE-08).** A TB whose status was `retracted`, or missing, was read as
+  `active` ground truth and written back as `"status":"active"`; an evidence kind
+  like `url` or a verifyBy kind like `query` made the whole line unreadable.
+- **Struck TBs are history and never object (SC-SW-07).** A strike reaches the
+  reader as a `TRANSITION` to `struck` (or, from Stenographer 0.x, an inbound
+  `strikes` link), and the TB leaves ground truth and stops raising objections.
+- **Literal validation is Stenographer's (SC-SW-33).** A literal without a subject
+  needs at least 4 UTF-16 code units and an ASCII letter (`日本語版` and `ÅÅÅÅ`
+  were accepted, `éé` written with combining accents refused), and an explicit
+  `"subject": null` is refused, as Stenographer's import refuses it.
+- **Signing a tombstone never touches Stenographer's export (SC-SW-14,
+  XSUITE-06).** The messenger appended human-signed TBs to the wiki file
+  Stenographer's full export rewrote, so they could be lost. It now submits a
+  PROPOSAL envelope over REST and notarizes it; Stenographer writes the TB.
+- **Re-serializing keeps key order (XSUITE-09).** Lines were rewritten with sorted
+  keys, which Stenographer's (0.x) import compared as different content and filed
+  as reconciliation proposals.
+
 ### Added
 
+- **Truth format v2 conformance in `swift test`.** `Scripts/sync-truth-fixtures.sh
+  <stenographer checkout>` copies Stenographer's `spec/truth-format` (README, JSON
+  Schema, golden fixtures) into `Tests/Fixtures/truth-format`, recording the commit
+  and every file's SHA-256 in `SOURCE`; `TruthFormatConformanceTests` runs every
+  fixture (valid lines against the schema and the codec, hashes, chains, the fold,
+  verbatim re-serialization, routing, v1 lines, and every invalid line).
+- **`TruthFormat`** (line codec: `decode`, `hash`, `checkChain`, `chain`,
+  `literalIssue`), **`TruthWiki.parseFiles`** (one stream per writer, merged on the
+  status lattice), `TruthWiki.statusTable`, **`TruthSignerRegistry`** (Stenographer's
+  `signers.json`), `TruthReadOptions`, **`TruthEscaping.escapeUntrusted`**, and
+  **`TruthProposalEnvelope`** (the suite PROPOSAL envelope, written byte for byte
+  as the golden fixtures).
+- **`NotaryClient.submitAndNotarize`** files a PROPOSAL envelope with Stenographer
+  (`POST /proposals`, idempotent by envelope id) and notarizes it, returning the
+  minted TB; `MessengerModel.authoredTombstones` keeps it in the ledger until a
+  wiki export carries it.
 - **@smallchat/core's conformance vectors run in `swift test`.**
   `Scripts/sync-spec.sh <smallchat checkout>` copies its `spec/` into
   `Tests/Fixtures/spec` (recording the commit in `SOURCE`) and regenerates the
@@ -511,13 +601,13 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   an interrupt into live sessions (a toggle turns relaying off), and
   deduplicated by objection id. The secret is generated on first launch.
 - **Authoring tombstones with literals.** `TombstoneDraft` covers claim,
-  evidence, literals, and an accountable signer. It signs into a TB that
-  `TruthWiki.append` writes to the wiki JSONL, and the app ledger reloads
-  so objections to the new literals start at once.
+  evidence, literals, and an accountable signer. It goes to Stenographer as a
+  PROPOSAL envelope that the signer notarizes, and the app ledger reloads so
+  objections to the new literals start at once.
 - **Literal validation** in the Swift wiki codec now matches Stenographer's
   write-time rule. A literal without a subject must be a distinctive
-  identifier (at least 4 characters, containing a letter); a TB line with
-  an invalid literal is rejected with a per-line error.
+  identifier (at least 4 UTF-16 code units, containing an ASCII letter); a TB
+  line with an invalid literal is rejected with a per-line error.
 
 ### Fixed
 
