@@ -172,57 +172,32 @@ struct InspectorView: View {
 
     private func loadArtifact() {
         do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: appState.inspectorFilePath))
-            guard let artifact = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return
+            // Artifact format 1.0, validated (schema, consistency, content hash).
+            let artifact = try ArtifactV1.read(contentsOf: URL(fileURLWithPath: appState.inspectorFilePath))
+
+            appState.inspectorVersion = "format \(ARTIFACT_FORMAT_VERSION)"
+            appState.inspectorTimestamp = "content hash \(artifact.contentHash.prefix(12))…"
+
+            appState.inspectorToolCount = artifact.tools.count
+            appState.inspectorSelectorCount = artifact.selectors.count
+            appState.inspectorProviderCount = artifact.providers.count
+            appState.inspectorCollisionCount = artifact.collisions.count
+            appState.inspectorMergedCount = 0
+
+            appState.inspectorEmbeddingModel = artifact.embedder.summary
+            appState.inspectorEmbeddingDimensions = artifact.embedder.dims
+
+            appState.inspectorSelectors = artifact.selectors.keys.sorted().map { canonical in
+                (canonical: canonical, arity: max(0, canonical.split(separator: ":").count - 1))
             }
 
-            appState.inspectorVersion = artifact["version"] as? String ?? "unknown"
-            appState.inspectorTimestamp = artifact["timestamp"] as? String ?? "unknown"
-
-            if let stats = artifact["stats"] as? [String: Any] {
-                appState.inspectorToolCount = stats["toolCount"] as? Int ?? 0
-                appState.inspectorSelectorCount = stats["uniqueSelectorCount"] as? Int ?? 0
-                appState.inspectorProviderCount = stats["providerCount"] as? Int ?? 0
-                appState.inspectorCollisionCount = stats["collisionCount"] as? Int ?? 0
-                appState.inspectorMergedCount = stats["mergedCount"] as? Int ?? 0
+            appState.inspectorProviders = artifact.providers.keys.sorted().map { providerId in
+                let tools = artifact.tools.values.filter { $0.providerId == providerId }.map(\.name).sorted()
+                return (id: providerId, tools: tools)
             }
 
-            if let emb = artifact["embedding"] as? [String: Any] {
-                appState.inspectorEmbeddingModel = emb["model"] as? String ?? ""
-                appState.inspectorEmbeddingDimensions = emb["dimensions"] as? Int ?? 0
-            }
-
-            // Selectors
-            if let sels = artifact["selectors"] as? [String: Any] {
-                appState.inspectorSelectors = sels.compactMap { _, value in
-                    guard let s = value as? [String: Any],
-                          let canonical = s["canonical"] as? String,
-                          let arity = s["arity"] as? Int else { return nil }
-                    return (canonical: canonical, arity: arity)
-                }.sorted(by: { $0.canonical < $1.canonical })
-            }
-
-            // Providers
-            if let tables = artifact["dispatchTables"] as? [String: Any] {
-                appState.inspectorProviders = tables.compactMap { providerId, value in
-                    guard let methods = value as? [String: Any] else { return nil }
-                    let tools = methods.compactMap { _, method -> String? in
-                        (method as? [String: Any])?["toolName"] as? String
-                    }.sorted()
-                    return (id: providerId, tools: tools)
-                }.sorted(by: { $0.id < $1.id })
-            }
-
-            // Collisions
-            if let cols = artifact["collisions"] as? [[String: Any]] {
-                appState.inspectorCollisions = cols.compactMap { c in
-                    guard let sA = c["selectorA"] as? String,
-                          let sB = c["selectorB"] as? String,
-                          let sim = c["similarity"] as? Double,
-                          let hint = c["hint"] as? String else { return nil }
-                    return (selectorA: sA, selectorB: sB, similarity: sim, hint: hint)
-                }
+            appState.inspectorCollisions = artifact.collisions.map { c in
+                (selectorA: c.selectorA, selectorB: c.selectorB, similarity: c.similarity, hint: c.hint)
             }
         } catch {
             appState.inspectorVersion = "Error: \(error.localizedDescription)"

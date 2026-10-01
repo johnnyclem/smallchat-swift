@@ -1,9 +1,10 @@
 import Foundation
+import SmallChatCore
 
 /// Timeout middleware that wraps transport execution with a configurable deadline.
 ///
-/// Uses `withThrowingTaskGroup` to race the operation against a timeout task.
-/// Mirrors the TypeScript `withTimeout` function.
+/// Delegates to `withTimeout(seconds:_:)`, so the deadline holds even when the
+/// operation ignores cancellation. Mirrors the TypeScript `withTimeout` function.
 public struct TimeoutMiddleware: Sendable {
 
     /// Default timeout in seconds.
@@ -24,28 +25,89 @@ public struct TimeoutMiddleware: Sendable {
         timeout duration: TimeInterval? = nil,
         _ operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
-        let effectiveTimeout = duration ?? self.timeout
-        let timeoutNanoseconds = UInt64(effectiveTimeout * 1_000_000_000)
+        try await withTimeout(seconds: duration ?? timeout, operation)
+    }
+}
 
-        return try await withThrowingTaskGroup(of: T.self) { group in
-            // The actual operation
-            group.addTask {
-                try await operation()
+/// Run `operation` with a deadline.
+///
+/// The operation runs in its own task. Whichever happens first decides the
+/// result, exactly once: the operation finishing, the deadline passing
+/// (`TransportError.timeout`), or the caller being cancelled
+/// (`CancellationError`). In the last two cases the operation's task is
+/// cancelled and this function returns at once; it does not wait for an
+/// operation that ignores cancellation (a task-group race would).
+///
+/// A `seconds` value that is not positive and finite means no deadline.
+public func withTimeout<T: Sendable>(
+    seconds: TimeInterval,
+    _ operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    let outcome = ResumeOnce<T>()
+    let work = Task {
+        do {
+            outcome.resume(with: .success(try await operation()))
+        } catch {
+            outcome.resume(with: .failure(error))
+        }
+    }
+    var timer: Task<Void, Never>?
+    if seconds > 0, seconds.isFinite {
+        let nanoseconds = UInt64(seconds * 1_000_000_000)
+        let durationMs = Int((seconds * 1000).rounded())
+        timer = Task {
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return // cancelled: the operation finished first
             }
+            outcome.resume(with: .failure(TransportError.timeout(durationMs: durationMs)))
+        }
+    }
+    defer {
+        work.cancel()
+        timer?.cancel()
+    }
+    return try await withTaskCancellationHandler {
+        try await outcome.value()
+    } onCancel: {
+        outcome.resume(with: .failure(CancellationError()))
+    }
+}
 
-            // The timeout task
-            group.addTask {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-                throw TransportError.timeout(durationMs: Int(effectiveTimeout * 1000))
-            }
+/// A one-shot result slot that any number of racers may try to fill; only the
+/// first `resume(with:)` counts. `value()` waits for it (or returns at once if
+/// it is already filled).
+final class ResumeOnce<T: Sendable>: Sendable {
+    private struct State {
+        var result: Result<T, Error>?
+        var continuation: CheckedContinuation<T, Error>?
+    }
 
-            // Return whichever finishes first
-            guard let result = try await group.next() else {
-                throw TransportError.timeout(durationMs: Int(effectiveTimeout * 1000))
+    private let state = PlatformLock(initialState: State())
+
+    /// Offer a result. Returns `true` if it was the first.
+    @discardableResult
+    func resume(with result: Result<T, Error>) -> Bool {
+        let (first, waiter) = state.withLock { state -> (Bool, CheckedContinuation<T, Error>?) in
+            guard state.result == nil else { return (false, nil) }
+            state.result = result
+            let waiter = state.continuation
+            state.continuation = nil
+            return (true, waiter)
+        }
+        waiter?.resume(with: result)
+        return first
+    }
+
+    func value() async throws -> T {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            let ready: Result<T, Error>? = state.withLock { state in
+                if let result = state.result { return result }
+                state.continuation = continuation
+                return nil
             }
-            // Cancel the other task
-            group.cancelAll()
-            return result
+            if let ready { continuation.resume(with: ready) }
         }
     }
 }

@@ -17,7 +17,7 @@ struct ServerView: View {
                     StatusBadge(running: state.serverRunning)
                 }
 
-                Text("Start and manage an MCP 2024-11-05 compliant tool server.")
+                Text("Serve a toolkit as an MCP server over Streamable HTTP.")
                     .foregroundStyle(.secondary)
 
                 Divider()
@@ -69,7 +69,7 @@ struct ServerView: View {
                 // Security Options
                 GroupBox("Security & Observability") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Enable OAuth 2.1 Authentication", isOn: $state.serverEnableAuth)
+                        Toggle("Require Bearer Token", isOn: $state.serverEnableAuth)
                         Toggle("Enable Rate Limiting", isOn: $state.serverEnableRateLimit)
                         if state.serverEnableRateLimit {
                             HStack {
@@ -111,9 +111,7 @@ struct ServerView: View {
                 if state.serverRunning {
                     GroupBox("Endpoints") {
                         VStack(alignment: .leading, spacing: 4) {
-                            EndpointRow(label: "Discovery", path: "/.well-known/mcp.json", host: state.serverHost, port: state.serverPort)
-                            EndpointRow(label: "JSON-RPC", path: "/", host: state.serverHost, port: state.serverPort)
-                            EndpointRow(label: "SSE", path: "/sse", host: state.serverHost, port: state.serverPort)
+                            EndpointRow(label: "MCP", path: "/mcp", host: state.serverHost, port: state.serverPort)
                             EndpointRow(label: "Health", path: "/health", host: state.serverHost, port: state.serverPort)
                             EndpointRow(label: "Metrics", path: "/metrics", host: state.serverHost, port: state.serverPort)
                         }
@@ -175,12 +173,13 @@ struct ServerView: View {
 
         do {
             let sessionTTLMs = Int(appState.serverSessionTTLHours * 3_600_000)
+            let authToken = appState.serverEnableAuth ? MCPServerConfig.generateAuthToken() : nil
             let config = MCPServerConfig(
                 port: appState.serverPort,
                 host: appState.serverHost,
                 sourcePath: appState.serverSourcePath,
                 dbPath: appState.serverDbPath,
-                enableAuth: appState.serverEnableAuth,
+                authToken: authToken,
                 enableRateLimit: appState.serverEnableRateLimit,
                 rateLimitRPM: appState.serverRateLimitRPM,
                 enableAudit: appState.serverEnableAudit,
@@ -192,7 +191,10 @@ struct ServerView: View {
 
             appState.mcpServer = server
             appState.serverRunning = true
-            appState.serverLog.append("Server running on http://\(appState.serverHost):\(appState.serverPort)")
+            appState.serverLog.append("Server running on http://\(appState.serverHost):\(appState.serverPort)/mcp")
+            if let authToken {
+                appState.serverLog.append("  Bearer token: \(authToken)")
+            }
 
             await refreshMetrics()
         } catch {

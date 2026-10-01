@@ -47,44 +47,50 @@ cos("find available flights", "book_hotel")     = 0.31
 cos("find available flights", "read_file")      = 0.12
 ```
 
-### 4. Dispatch
+### 4. Tier, verification and policy
 
-The highest-similarity match above the threshold (default 0.75) wins. The runtime dispatches to that tool's implementation.
+The best match's score sets its tier: EXACT (>= 0.95), HIGH (>= 0.85), MEDIUM
+(>= 0.75), LOW (>= 0.60). EXACT and HIGH matches run; a MEDIUM or LOW match runs only
+after an LLM verifier approves it, and a destructive tool only at EXACT or from a
+pinned phrase. Anything else is `needs-disambiguation` or `unresolved`: nothing runs,
+and the caller gets the nearest tools to choose from by id. See
+[Resolution Pipeline](./resolution-pipeline.md) for every step.
 
-## Canonicalization
+```swift
+let resolution = try await runtime.resolve("find available flights to Tokyo")
+// .resolved, chosen "flights/search_flights", tier .high -- nothing has run yet
+let result = try await runtime.dispatchById("flights/search_flights", args: ["to": "Tokyo"])
+```
 
-Before embedding, intents are canonicalized into a Smalltalk-style selector format:
+## Canonical forms and identity keys
+
+`canonicalize` turns an intent into a Smalltalk-style display form (punctuation
+deleted, stopwords dropped):
 
 ```
 "find recent documents"     → "find:recent:documents"
-"search for flights to NYC" → "search:for:flights:to:nyc"
+"don't delete the database" → "dont:delete:database"
 ```
 
-This normalization ensures consistent matching regardless of phrasing variations.
+It is for display only: it drops words such as "not", so different intents can share
+a canonical form. Identity uses whole-text keys instead: `intentKey` (case, Unicode NFC
+form and whitespace aside) keys the resolution cache, and `normalizePinPhrase` compares
+intent pins.
 
-## Selector Interning
+## No intent interning
 
-The `SelectorTable` deduplicates **compiled tool selectors**. If a tool's canonical name is registered and a later lookup (compile-time or an intent embedding at runtime) lands within the interning threshold (default 0.95) of it, that lookup resolves to the **same** tool selector rather than minting a new one:
-
-```swift
-// "search_flights" is a registered tool selector
-"search flights"    → selector_42  // exact canonical match
-"find flights"      → selector_42  // same! (embeds within 0.95 of the tool's own selector)
-"book a hotel room" → selector_87  // a different registered tool
-```
-
-This means natural paraphrases of a tool's own name resolve to the same dispatch path and cache entry.
-
-Only the compiled tool space is deduplicated this way. Runtime intents that *don't* land near an existing tool selector are cached in a separate, bounded, LRU-evicted intent cache — never inserted into the tool vector index itself. Earlier versions interned every resolved intent into the same table and index as compiled tools, which meant every distinct intent a long-running process ever saw was retained forever, diluting the fixed `topK` window that tool similarity search draws candidates from. Splitting the two spaces fixes both the unbounded growth and the crowding-out risk (see [smallchat-swift#36](https://github.com/johnnyclem/smallchat-swift/issues/36)).
+The `SelectorTable` holds compiled tool selectors only. A runtime intent is embedded on
+its own and never inserted into the table or the vector index, so the tools a search
+can return do not depend on which intents a process has seen, and a long-running
+process keeps no state per intent.
 
 ## Resolution Cache
 
-The `ResolutionCache` is an LRU cache (default 1024 entries) that stores resolved intent-to-tool mappings. It's version-aware — when a tool's schema changes or a new provider is registered, stale cache entries are automatically invalidated.
-
-```
-Cache hit:  ~0.001ms (direct lookup)
-Cache miss: ~0.1ms  (embed + vector search + overload resolution)
-```
+The `ResolutionCache` (LRU, default 1024 entries) remembers allowed resolutions of
+intent dispatches, keyed by `intentKey`. It is version-aware: when a tool's schema or a
+provider version changes, stale entries are invalidated. Pinned and destructive tools
+are never cached, and every hit goes through the dispatch policy again, so a cached
+resolution cannot run a tool that a fresh resolution would refuse.
 
 ## Overload Resolution
 
@@ -113,4 +119,4 @@ Scoring priority:
 | All tools in prompt | High | O(n) tools | Degrades with n | No |
 | Routing prompt | +1 LLM call | Medium | Variable | Somewhat |
 | Hard-coded routing | Low | None | Brittle | No |
-| **Semantic dispatch** | **~0.1ms** | **Zero** | **Consistent** | **Yes** |
+| **Semantic dispatch** | **~0.1ms** (hash embedder) | **Zero** | Depends on the embedder; asks instead of guessing below HIGH | **Yes** |

@@ -3,16 +3,18 @@
 import Foundation
 #if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
 #endif
 
 // MARK: - Audit Entry
 
 /// A structured log entry for an MCP operation.
 ///
-/// v0.3.0: Each entry includes a `chainHash` — an HMAC-SHA256 of the entry's
-/// content combined with the previous entry's hash. This forms a tamper-evident
-/// hash chain for audit integrity verification.
-public struct AuditEntry: Sendable, Codable {
+/// Each entry carries a `chainHash`: HMAC-SHA256, under the log's key, of the
+/// previous entry's hash and the canonical JSON of every other field of this
+/// entry. Changing, removing or reordering a retained entry breaks the chain.
+public struct AuditEntry: Sendable, Codable, Equatable {
     public let timestamp: String
     public let method: String
     public let sessionId: String?
@@ -20,7 +22,7 @@ public struct AuditEntry: Sendable, Codable {
     public let success: Bool
     public let durationMs: Int
     public let error: String?
-    /// HMAC-SHA256 hash chain link (v0.3.0). Hex-encoded.
+    /// HMAC-SHA256 hash chain link, hex-encoded. Set by `AuditLog.log(_:)`.
     public let chainHash: String?
 
     public init(
@@ -43,9 +45,31 @@ public struct AuditEntry: Sendable, Codable {
         self.chainHash = chainHash
     }
 
-    /// Content string used for hash chain computation.
-    var hashContent: String {
-        "\(timestamp)|\(method)|\(sessionId ?? "")|\(success)|\(durationMs)"
+    /// Canonical JSON (sorted keys) of every field except `chainHash`.
+    var hashContent: Data {
+        struct Fields: Encodable {
+            let timestamp: String
+            let method: String
+            let sessionId: String?
+            let clientId: String?
+            let success: Bool
+            let durationMs: Int
+            let error: String?
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let fields = Fields(
+            timestamp: timestamp, method: method, sessionId: sessionId, clientId: clientId,
+            success: success, durationMs: durationMs, error: error
+        )
+        return (try? encoder.encode(fields)) ?? Data()
+    }
+
+    func withChainHash(_ hash: String) -> AuditEntry {
+        AuditEntry(
+            timestamp: timestamp, method: method, sessionId: sessionId, clientId: clientId,
+            success: success, durationMs: durationMs, error: error, chainHash: hash
+        )
     }
 }
 
@@ -56,65 +80,63 @@ public struct AuditEntry: Sendable, Codable {
 /// Capped at maxEntries (default 10,000) to bound memory usage.
 /// Supports querying by method, session, success status, and time range.
 ///
-/// v0.3.0: Maintains a hash chain for tamper detection. Each entry's `chainHash`
-/// is an HMAC-SHA256 of its content concatenated with the previous entry's hash.
+/// The entries form an HMAC-SHA256 hash chain under a key the caller
+/// supplies (there is no built-in key: a published key would let anyone
+/// recompute a valid chain after editing entries). The chain detects edits
+/// to retained entries by someone without the key. It does not survive the
+/// process: the log is in memory only.
 public actor AuditLog {
+
+    private static let genesisHash = String(repeating: "0", count: 64)
 
     private var entries: [AuditEntry] = []
     private let maxEntries: Int
-    private var lastHash: String = "0000000000000000000000000000000000000000000000000000000000000000"
-    private let hmacKey: Data
+    private var lastHash: String = AuditLog.genesisHash
+    /// The hash that precedes the first retained entry (the last evicted
+    /// entry's hash), so the retained window still verifies after eviction.
+    private var anchorHash: String = AuditLog.genesisHash
+    private let hmacKey: SymmetricKey
 
-    /// Initialize with a maximum number of entries to retain.
-    /// The HMAC key is used for hash chain integrity (v0.3.0).
-    public init(maxEntries: Int = 10_000, hmacKey: Data? = nil) {
-        self.maxEntries = maxEntries
-        // Default: derive key from a fixed seed (callers should provide their own)
-        self.hmacKey = hmacKey ?? Data("smallchat-audit-v0.3.0".utf8)
+    /// - Parameters:
+    ///   - maxEntries: Entries kept before the oldest are evicted.
+    ///   - hmacKey: Secret key for the hash chain. Must not be empty; use
+    ///     `AuditLog.generateKey()` for a fresh random key.
+    public init(maxEntries: Int = 10_000, hmacKey: Data) {
+        precondition(!hmacKey.isEmpty, "AuditLog needs a non-empty HMAC key")
+        self.maxEntries = max(1, maxEntries)
+        self.hmacKey = SymmetricKey(data: hmacKey)
+    }
+
+    /// 32 random bytes, suitable as an audit chain key.
+    public static func generateKey() -> Data {
+        var rng = SystemRandomNumberGenerator()
+        return Data((0..<32).map { _ in UInt8.random(in: .min ... .max, using: &rng) })
     }
 
     /// Log a new audit entry, computing its chain hash.
     public func log(_ entry: AuditEntry) {
-        let chainInput = "\(lastHash)|\(entry.hashContent)"
-        let hash = computeHMACSHA256(chainInput, key: hmacKey)
-
-        let chainedEntry = AuditEntry(
-            timestamp: entry.timestamp,
-            method: entry.method,
-            sessionId: entry.sessionId,
-            clientId: entry.clientId,
-            success: entry.success,
-            durationMs: entry.durationMs,
-            error: entry.error,
-            chainHash: hash
-        )
-
+        let hash = chainHash(previous: lastHash, entry: entry)
         lastHash = hash
-        entries.append(chainedEntry)
+        entries.append(entry.withChainHash(hash))
         if entries.count > maxEntries {
-            entries = Array(entries.suffix(maxEntries))
+            let evicted = entries.count - maxEntries
+            anchorHash = entries[evicted - 1].chainHash ?? anchorHash
+            entries.removeFirst(evicted)
         }
     }
 
-    /// Verify the integrity of the audit log chain (v0.3.0).
+    /// Verify the integrity of the retained entries.
     ///
-    /// Returns `true` if all chain hashes are consistent.
-    /// Note: only verifiable from the start of the retained window (after eviction,
-    /// entries before the window are lost).
+    /// Returns `true` if every retained entry's hash matches its content and
+    /// its predecessor's hash, starting from the hash of the last evicted
+    /// entry (or the zero hash if nothing was evicted).
     public func verifyChain() -> Bool {
-        guard !entries.isEmpty else { return true }
-
-        var previousHash = "0000000000000000000000000000000000000000000000000000000000000000"
-
-        // If entries have been evicted, we can't verify from genesis.
-        // Verify internal consistency of retained entries.
+        var previousHash = anchorHash
         for entry in entries {
-            let chainInput = "\(previousHash)|\(entry.hashContent)"
-            let expected = computeHMACSHA256(chainInput, key: hmacKey)
-            guard entry.chainHash == expected else { return false }
+            guard entry.chainHash == chainHash(previous: previousHash, entry: entry) else { return false }
             previousHash = entry.chainHash ?? ""
         }
-        return true
+        return previousHash == lastHash
     }
 
     /// Get the most recent entries.
@@ -153,33 +175,20 @@ public actor AuditLog {
     /// Clear all entries and reset the chain.
     public func clear() {
         entries.removeAll()
-        lastHash = "0000000000000000000000000000000000000000000000000000000000000000"
+        lastHash = Self.genesisHash
+        anchorHash = Self.genesisHash
     }
 
-    /// Get the current chain head hash (v0.3.0).
+    /// Get the current chain head hash.
     public func chainHead() -> String {
         lastHash
     }
-}
 
-// MARK: - HMAC-SHA256 Helper
-
-/// Compute HMAC-SHA256, returning a hex-encoded string.
-private func computeHMACSHA256(_ message: String, key: Data) -> String {
-    let messageData = Data(message.utf8)
-
-    #if canImport(CryptoKit)
-    let symmetricKey = SymmetricKey(data: key)
-    let mac = HMAC<SHA256>.authenticationCode(for: messageData, using: symmetricKey)
-    return mac.map { String(format: "%02x", $0) }.joined()
-    #else
-    // Fallback: simple hash for platforms without CryptoKit
-    // This is a non-cryptographic fallback; CryptoKit should always be preferred.
-    var hash: UInt64 = 14695981039346656037 // FNV offset
-    for byte in key + messageData {
-        hash ^= UInt64(byte)
-        hash &*= 1099511628211 // FNV prime
+    private func chainHash(previous: String, entry: AuditEntry) -> String {
+        var message = Data(previous.utf8)
+        message.append(UInt8(ascii: "|"))
+        message.append(entry.hashContent)
+        let mac = HMAC<SHA256>.authenticationCode(for: message, using: hmacKey)
+        return mac.map { String(format: "%02x", $0) }.joined()
     }
-    return String(format: "%016x%016x%016x%016x", hash, hash &* 31, hash &* 37, hash &* 41)
-    #endif
 }

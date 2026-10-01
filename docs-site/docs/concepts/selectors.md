@@ -44,24 +44,21 @@ let vector = try await embedder.embed("search flights")
 // [0.23, 0.15, -0.08, ..., 0.89]
 ```
 
-## Selector Table (Interning)
+## Selector Table
 
-The `SelectorTable` is an interning table that deduplicates selectors. Two intents that embed to sufficiently similar vectors (cosine similarity > threshold) resolve to the same selector:
+The `SelectorTable` holds the selectors of compiled tools and their aliases.
 
-```swift
-// These might all intern to the same selector:
-"search flights"      → selector_42
-"find flights"        → selector_42 (similarity 0.97 > 0.95 threshold)
-"look up flights"     → selector_42 (similarity 0.96 > 0.95 threshold)
-
-// This would be different:
-"book a hotel"        → selector_87 (similarity 0.31 < 0.95 threshold)
-```
-
-Benefits:
-- Natural language paraphrases share dispatch paths
-- Cache entries are reused across phrasings
-- Reduces vector index size
+- `register(embedding:canonical:)` adds a selector under its exact canonical name and
+  never folds it into a similar one: two distinct tools always get two selectors. The
+  compiler and the artifact loaders use it.
+- `intern(embedding:canonical:)` returns an existing selector within the table's
+  threshold (0.95 by default) instead of adding a new one, for code that wants
+  near-identical selectors merged.
+- `resolve(intent)` embeds a runtime intent and returns a selector carrying its own
+  vector. The table and the vector index are left unchanged: intents are never
+  interned.
+- `searchTools(vector, topK:, threshold:)` returns the nearest registered selectors,
+  with scores quantized to 1e-4 and ties ordered by selector id.
 
 ## Selector Namespacing
 
@@ -77,18 +74,24 @@ namespace.protect("health:check")
 
 ## Intent Pinning
 
-The `IntentPinRegistry` prevents semantic collision attacks on sensitive selectors. Pins can enforce:
+The `IntentPinRegistry` guards sensitive tools against semantic collisions. A pin
+names a tool selector and a policy:
 
-- **Exact match** — Only the exact canonical form resolves
-- **Elevated threshold** — Requires higher similarity (e.g., 0.99) for resolution
+- **`exact`** — only the pin's own phrases (its canonical and aliases, compared as
+  whole phrases after NFKC, lower case and whitespace collapsing) resolve to the tool.
+- **`elevated`** — the intent's own embedding must reach the pin's threshold (0.98 by
+  default).
 
 ```swift
-// Pin "delete:account" to exact match only
-registry.pin("delete:account", policy: .exact)
+let pins = IntentPinRegistry()
+pins.pin(IntentPin(canonical: "account.delete_account", policy: .exact, aliases: ["delete my account"]))
 
-// "remove my account" won't resolve to "delete:account"
-// even if vector similarity is high
+// "delete my account"        → the pinned tool (still subject to the dispatch policy)
+// "remove my account"        → not the pinned tool, however similar it embeds
+// "do not delete my account" → not the pinned tool
 ```
+
+Pass pins to a runtime with `RuntimeOptions(intentPins:)`.
 
 ## Arity
 

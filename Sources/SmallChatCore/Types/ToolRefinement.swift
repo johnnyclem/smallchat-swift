@@ -1,7 +1,8 @@
 // MARK: - ToolRefinement
 
-/// Structured "tool_refinement_needed" payload returned for NONE-tier
-/// dispatches.
+/// Structured "tool_refinement_needed" payload: returned when resolution
+/// does not settle on one tool (needs-disambiguation or unresolved).
+/// Nothing ran; each near match carries a tool id to call by id.
 ///
 /// Mirrors the MCP result type added in TS PR #54. The payload tells the
 /// caller why no tool was confidently selected and what to ask next.
@@ -22,6 +23,9 @@ public struct ToolRefinement: Sendable, Codable, Equatable {
         public let providerId: String
         public let canonicalSelector: String
         public let confidence: Double
+
+        /// Canonical tool id: call it with `dispatchById`.
+        public var toolId: String { "\(providerId)/\(toolName)" }
 
         public init(
             toolName: String,

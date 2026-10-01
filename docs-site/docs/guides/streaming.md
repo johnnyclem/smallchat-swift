@@ -14,7 +14,7 @@ smallchat-swift provides three tiers of streaming for real-time output delivery,
 Token-by-token output from `InferenceIMP` tools:
 
 ```swift
-for try await token in runtime.inferenceStream("explain this code", args: ["code": snippet]) {
+for try await token in await runtime.inferenceStream("explain this code", args: ["code": snippet]) {
     print(token, terminator: "")
 }
 ```
@@ -26,7 +26,7 @@ This is the highest-fidelity streaming mode, delivering individual tokens as the
 Result chunks from `StreamableIMP` tools:
 
 ```swift
-for try await event in runtime.dispatchStream("search files", args: ["query": "config"]) {
+for try await event in await runtime.dispatchStream("search files", args: ["query": "config"]) {
     if case .chunk(let content, let index) = event {
         print("Chunk \(index): \(content)")
     }
@@ -38,7 +38,7 @@ for try await event in runtime.dispatchStream("search files", args: ["query": "c
 Standard `ToolIMP` tools return a single result, wrapped in a `.done` event:
 
 ```swift
-for try await event in runtime.dispatchStream("read file", args: ["path": "/tmp/x"]) {
+for try await event in await runtime.dispatchStream("read file", args: ["path": "/tmp/x"]) {
     if case .done(let result) = event {
         print(result.content!)
     }
@@ -64,7 +64,7 @@ enum DispatchEvent: Sendable {
 ### Full Event Stream Example
 
 ```swift
-for try await event in runtime.dispatchStream("find flights", args: ["to": "NYC"]) {
+for try await event in await runtime.dispatchStream("find flights", args: ["to": "NYC"]) {
     switch event {
     case .resolving(let intent):
         // Resolution started

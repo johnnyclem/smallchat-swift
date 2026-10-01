@@ -195,7 +195,7 @@ public struct KnowledgeBase: Sendable, Codable, Equatable {
     }
 
     public init(
-        version: String = "0.6.0",
+        version: String = SmallChatVersion.current,
         compiledAt: String,
         sources: [KnowledgeSource] = [],
         pages: [WikiPage] = [],

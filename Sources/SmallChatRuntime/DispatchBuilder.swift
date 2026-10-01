@@ -108,9 +108,14 @@ public struct DispatchBuilder<TArgs: Sendable>: Sendable {
         return result
     }
 
-    /// Execute and return only the content field of the result.
+    /// Execute and return only the content field of the result. Throws
+    /// `DispatchError` for an `isError` result (nothing ran, or the tool
+    /// failed), instead of returning its error payload as content.
     public func execContent<T>() async throws -> T {
         let result = try await exec()
+        if result.isError {
+            throw DispatchError(intent: intent, result: result)
+        }
         guard let content = result.content as? T else {
             throw DispatchContentCastError(
                 intent: intent,
@@ -219,6 +224,30 @@ public struct DispatchTimeoutError: Error, Sendable, CustomStringConvertible {
     public var description: String {
         let ms = timeoutNs / 1_000_000
         return "Dispatch timed out after \(ms)ms for intent \"\(intent)\""
+    }
+}
+
+/// An intent dispatch whose result is an error: nothing ran (see
+/// `outcome`), or the tool itself failed (outcome `resolved`).
+public struct DispatchError: Error, Sendable, CustomStringConvertible {
+    public let intent: String
+    public let result: ToolResult
+
+    public init(intent: String, result: ToolResult) {
+        self.intent = intent
+        self.result = result
+    }
+
+    /// `DispatchOutcomeCode` of the result (nil when it has none).
+    public var outcome: DispatchOutcomeCode? {
+        (result.metadata?[DispatchMetadataKey.outcome] as? String).flatMap(DispatchOutcomeCode.init(rawValue:))
+    }
+
+    public var description: String {
+        if case .dict(let content)? = result.content as? AnyCodableValue, case .string(let error)? = content["error"] {
+            return error
+        }
+        return "Dispatch of \"\(intent)\" failed (\(outcome?.rawValue ?? "error"))"
     }
 }
 

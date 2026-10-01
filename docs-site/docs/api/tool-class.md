@@ -13,6 +13,8 @@ Groups related tools with a dispatch table, overload tables, protocol conformanc
 final class ToolClass: @unchecked Sendable
 ```
 
+Its state is behind a lock; the properties below return snapshots.
+
 ## Initialization
 
 ```swift
@@ -176,12 +178,18 @@ let tools = ToolClass(name: "SearchTools")
 // Base method
 tools.addMethod(searchSelector, imp: BasicSearchTool())
 
-// Overload with more specific signature
+// Overloads with their signatures
 try tools.addOverload(
     searchSelector,
-    signature: SCMethodSignature(params: [
-        .init(name: "query", type: .string),
-        .init(name: "language", type: .string),
+    signature: SCMethodSignature(parameters: [param("query", 0, SCType.string())]),
+    imp: BasicSearchTool(),
+    originalToolName: "search"
+)
+try tools.addOverload(
+    searchSelector,
+    signature: SCMethodSignature(parameters: [
+        param("query", 0, SCType.string()),
+        param("language", 1, SCType.string()),
     ]),
     imp: CodeSearchTool(),
     originalToolName: "search_code",

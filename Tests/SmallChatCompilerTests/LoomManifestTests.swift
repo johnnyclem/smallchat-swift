@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import SmallChatCompiler
 import SmallChatCore
+import SmallChatEmbedding
 
 @Suite("LoomManifest")
 struct LoomManifestTests {
@@ -50,8 +51,8 @@ struct LoomManifestTests {
         #expect(tool.compilerHints?.aliases == ["find callers of foo", "who imports this"])
     }
 
-    @Test("parseMCPManifest folds provider + tool hints into embeddingText")
-    func embeddingTextIncludesHints() {
+    @Test("embeddingText is <name>: <description> plus the selector hint; aliases embed on their own")
+    func embeddingTextIncludesHints() async throws {
         let manifest = ProviderManifest(
             id: "loom",
             name: "Loom MCP",
@@ -79,12 +80,29 @@ struct LoomManifestTests {
         let parsed = parseMCPManifest(manifest)
         #expect(parsed.count == 1)
 
-        let text = parsed[0].embeddingText
-        #expect(text.contains("loom_find_importers"))
-        #expect(text.contains("Reverse-dependency lookup."))
-        #expect(text.contains("Find callers / importers of a symbol."))
-        #expect(text.contains("find callers of foo"))
-        #expect(text.contains("code-aware tools over a local AST index"))
+        // As @smallchat/core 1.0: the tool's own selectorHint wins over the
+        // provider's (semanticContext); aliases become their own selectors.
+        #expect(parsed[0].embeddingText == "loom_find_importers: Reverse-dependency lookup. Find callers / importers of a symbol.")
+
+        let result = try await ToolCompiler(embedder: LocalEmbedder(dimensions: 32), vectorIndex: MemoryVectorIndex()).compile([manifest])
+        #expect(result.tools.first?.selector == "loom.loom_find_importers")
+        #expect(result.tools.first?.aliases == [
+            "loom.loom_find_importers~alias~find_callers_of_foo",
+            "loom.loom_find_importers~alias~who_imports_this",
+        ])
+        #expect(result.dispatchTables["loom"]?.count == 3)
+    }
+
+    @Test("a provider's semanticContext is the selector hint of tools without their own")
+    func providerHintFallback() {
+        let manifest = ProviderManifest(
+            id: "loom",
+            name: "Loom MCP",
+            tools: [ToolDefinition(name: "loom_x", description: "X.", inputSchema: JSONSchemaType(type: "object"), providerId: "loom", transportType: .mcp)],
+            transportType: .mcp,
+            compilerHints: ProviderCompilerHints(semanticContext: "code-aware tools")
+        )
+        #expect(parseMCPManifest(manifest)[0].embeddingText == "loom_x: X. code-aware tools")
     }
 
     @Test("parseMCPManifest honors compilerHints.exclude = true")
@@ -135,9 +153,10 @@ struct LoomManifestTests {
         let parsed = parseMCPManifest(manifest)
         #expect(parsed.count == 28)
 
-        // Spot-check that the alias text made it into the embedding string.
+        // Aliases are their own selectors, not folded into the embedding text.
         let importers = parsed.first { $0.name == "loom_find_importers" }
         #expect(importers != nil)
-        #expect(importers?.embeddingText.contains("find callers of foo") == true)
+        #expect(importers?.compilerHints?.aliases?.contains("find callers of foo") == true)
+        #expect(importers?.embeddingText.contains("find callers of foo") == false)
     }
 }

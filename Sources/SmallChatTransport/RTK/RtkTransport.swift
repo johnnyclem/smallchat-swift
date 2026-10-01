@@ -79,11 +79,10 @@ public actor RtkTransport: Transport {
     private let config: RtkConfig
     private var binaryResolution: BinaryResolution = .unresolved
 
-    private static var counter: Int = 0
+    private static let ids = TransportIDSequence(prefix: "rtk")
 
     public init(wrapping inner: any Transport, config: RtkConfig = RtkConfig()) {
-        RtkTransport.counter += 1
-        self.id = "rtk-\(RtkTransport.counter)"
+        self.id = Self.ids.next()
         self.transportType = inner.transportType
         self.inner = inner
         self.config = config
@@ -285,55 +284,30 @@ public func filterContentWithRtk(
 
 /// Spawn `rtk filter [--aggressive]`, pipe `content` to stdin, collect stdout.
 ///
-/// Rejects on non-zero exit code or `timeoutMs` expiry. Shared by
-/// `RtkTransport` and `filterContentWithRtk`.
+/// stdin is written while stdout is read, so output larger than a pipe buffer
+/// cannot deadlock. Rejects on a non-zero exit code; on `timeoutMs` expiry the
+/// process is stopped and the call throws `TransportError.timeout`. Shared by
+/// `RtkTransport` and `filterContentWithRtk`. On platforms without
+/// subprocesses (iOS) it always throws, so callers fall back to the
+/// uncompressed body.
 func runRtkFilter(
     binary: String,
     content: Data,
     level: RtkFilterLevel,
     timeoutMs: Int
 ) async throws -> Data {
-    try await withThrowingTaskGroup(of: Data.self) { group in
-        group.addTask {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: binary)
-                process.arguments = level == .aggressive ? ["filter", "--aggressive"] : ["filter"]
-
-                let stdin = Pipe()
-                let stdout = Pipe()
-                process.standardInput = stdin
-                process.standardOutput = stdout
-                process.standardError = Pipe()
-
-                process.terminationHandler = { p in
-                    if p.terminationStatus == 0 {
-                        cont.resume(returning: stdout.fileHandleForReading.readDataToEndOfFile())
-                    } else {
-                        cont.resume(throwing: TransportError.unknown(
-                            message: "rtk filter exited with code \(p.terminationStatus)"
-                        ))
-                    }
-                }
-                do {
-                    try process.run()
-                    stdin.fileHandleForWriting.write(content)
-                    stdin.fileHandleForWriting.closeFile()
-                } catch {
-                    cont.resume(throwing: error)
-                }
-            }
-        }
-
-        group.addTask {
-            try await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
-            throw TransportError.timeout(durationMs: timeoutMs)
-        }
-
-        guard let data = try await group.next() else {
-            throw TransportError.unknown(message: "rtk filter: empty task group")
-        }
-        group.cancelAll()
-        return data
+    #if os(macOS) || os(Linux)
+    let result = try await runSubprocess(
+        executable: binary,
+        arguments: level == .aggressive ? ["filter", "--aggressive"] : ["filter"],
+        input: content,
+        timeoutMs: timeoutMs
+    )
+    guard result.status == 0 else {
+        throw TransportError.unknown(message: "rtk filter exited with code \(result.status)")
     }
+    return result.stdout
+    #else
+    throw TransportError.unknown(message: "rtk filter needs a subprocess, which this platform does not support")
+    #endif
 }

@@ -9,25 +9,25 @@ const features = [
   {
     title: "Semantic Dispatch",
     description:
-      "The LLM expresses intent. The runtime resolves it — using vector similarity, resolution caching, and superclass traversal. No routing code. No tool selection prompts.",
+      "The LLM expresses intent. The runtime proposes at most one tool by vector similarity, and runs it only when its dispatch policy allows; otherwise it returns the candidates. No routing code. No tool selection prompts.",
     icon: "🎯",
   },
   {
     title: "Swift 6 Native",
     description:
-      "Built with actors, structured concurrency, and Sendable types. Full thread safety with zero data races, leveraging the Swift type system.",
+      "Built in the Swift 6 language mode with actors and structured concurrency, so the compiler checks isolation and Sendable. Builds and tests on macOS and Linux; the libraries build for iOS.",
     icon: "🔷",
   },
   {
     title: "4-Phase Compiler",
     description:
-      "Parse manifests, embed selectors, link dispatch tables, output artifacts. One command compiles your MCP config into an optimized dispatch table.",
+      "Parse manifests, embed selectors, link dispatch tables, output artifacts. One command compiles your MCP config into a content-hashed artifact (@smallchat/core format 1.0) pinned to its embedder.",
     icon: "⚡",
   },
   {
     title: "MCP Server",
     description:
-      "Production-ready MCP 2024-11-05 server with SSE, OAuth 2.1, rate limiting, session persistence, and audit logging.",
+      "MCP server over Streamable HTTP (2025-11-25) that runs exactly the tool you call, with sessions, bearer-token auth, rate limiting, and an HMAC-chained audit log.",
     icon: "🌐",
   },
   {
@@ -37,9 +37,9 @@ const features = [
     icon: "📡",
   },
   {
-    title: "Security First",
+    title: "Guarded Dispatch",
     description:
-      "Intent pinning, selector namespacing, semantic rate limiting, type validation, and permission gating protect against adversarial inputs.",
+      "One dispatch policy on every path, intent pinning, JSON Schema argument validation and opt-in semantic rate limiting. Each control is documented with where it stops.",
     icon: "🔒",
   },
 ];
@@ -79,11 +79,8 @@ function HeroSection() {
         <div className={styles.codePreview}>
           <pre>
             <code>
-{`let runtime = ToolRuntime(
-    vectorIndex: MemoryVectorIndex(),
-    embedder: LocalEmbedder()
-)
-
+{`let runtime = try await MCPToolkit.load(source: "tools.toolkit.json").runtime
+let resolution = try await runtime.resolve("find flights")   // runs nothing
 let result = try await runtime.dispatch("find flights", args: ["to": "NYC"])`}
             </code>
           </pre>
@@ -119,12 +116,12 @@ export default function Home() {
               <code>
 {`// Package.swift
 dependencies: [
-    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "0.2.0"),
+    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "1.0.0"),
 ]`}
               </code>
             </pre>
             <p>
-              Requires Swift 6.0+, macOS 14+, or iOS 17+.{" "}
+              Requires Swift 6.1+ on macOS 14+, Linux, or iOS 17+ (libraries).{" "}
               <Link to="/getting-started/installation">Full installation guide →</Link>
             </p>
           </div>

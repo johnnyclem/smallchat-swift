@@ -188,7 +188,7 @@ public struct MemexCompiler: Sendable {
         let contradictions = detectContradictions(claims: claims)
 
         return KnowledgeBase(
-            version: "0.6.0",
+            version: SmallChatVersion.current,
             compiledAt: now,
             sources: sources,
             pages: pages,

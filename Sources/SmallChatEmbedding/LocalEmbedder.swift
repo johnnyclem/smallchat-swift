@@ -7,7 +7,8 @@ import Foundation
 /// (`src/embedding/local-embedder.ts`) so that artifacts compiled by either
 /// implementation resolve identically. The algorithm is deliberately *not*
 /// semantically meaningful — it is a deterministic placeholder that lets the
-/// dispatch pipeline run end-to-end. For real semantic vectors use `ONNXEmbedder`.
+/// dispatch pipeline run end-to-end. For semantic vectors, conform an
+/// `Embedder` backed by a real model (smallchat-swift ships none).
 ///
 /// ## ABI notes
 /// The reference implementation hashes UTF-16 code units (`charCodeAt`) and folds
@@ -21,6 +22,11 @@ public struct LocalEmbedder: Embedder, Sendable {
     public init(dimensions: Int = 384) {
         self.dimensions = dimensions
     }
+
+    /// `hash` / `smallchat-hash-v1` at this embedder's dimensions: the same
+    /// fingerprint as @smallchat/core's `HashEmbedder`, whose vectors this
+    /// embedder reproduces.
+    public var fingerprint: EmbedderFingerprint? { .hash(dims: dimensions) }
 
     public func embed(_ text: String) async throws -> [Float] {
         LocalEmbedder.hashEmbed(text, dimensions: dimensions)
@@ -50,7 +56,14 @@ public struct LocalEmbedder: Embedder, Sendable {
             }
         }
 
-        l2Normalize(&vector)
+        // L2-normalize as the reference does: the norm in double precision,
+        // each float32 component divided by it, so vectors match bit for bit.
+        var norm = 0.0
+        for v in vector { norm += Double(v) * Double(v) }
+        norm = norm.squareRoot()
+        if norm > 0 {
+            for i in 0..<vector.count { vector[i] = Float(Double(vector[i]) / norm) }
+        }
         return vector
     }
 
@@ -126,4 +139,23 @@ public struct LocalEmbedder: Embedder, Sendable {
         if n >= 2_147_483_648.0 { n -= twoTo32 }    // map to signed [-2^31, 2^31)
         return Int32(n)
     }
+}
+
+// MARK: - Built-in embedders by fingerprint
+
+/// The built-in embedder an artifact fingerprint names, ready to use with
+/// that artifact. smallchat-swift ships only the hash embedder
+/// (`LocalEmbedder`); an artifact compiled with ONNX (the @smallchat/core
+/// default) or a custom embedder needs one supplied by the caller that
+/// declares the same fingerprint. Throws `EmbedderMismatchError` otherwise.
+public func builtinEmbedder(for fingerprint: EmbedderFingerprint) throws -> any Embedder {
+    let hash = EmbedderFingerprint.hash(dims: fingerprint.dims)
+    if fingerprint == hash, fingerprint.dims > 0 {
+        return LocalEmbedder(dimensions: fingerprint.dims)
+    }
+    throw EmbedderMismatchError(
+        "The artifact was compiled with \(fingerprint.summary), and smallchat-swift has no built-in embedder "
+        + "for it (only \(EmbedderFingerprint.hashModel)). Pass an embedder that declares exactly this fingerprint, "
+        + "or recompile the toolkit with the hash embedder (`smallchat compile`)."
+    )
 }

@@ -40,6 +40,24 @@ struct TranscriptActivityTests {
         #expect(snap.lastSaid == "Found a real bug in my own detector.")
     }
 
+    @Test("an in-flight line bigger than the tail window still shows")
+    func lineLargerThanWindow() throws {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent("big-\(UUID().uuidString).jsonl").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let body = String(repeating: "x", count: 80_000)
+        let lines = [
+            Self.assistant(#"{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/r/a.swift"}}"#),
+            Self.result("t1"),
+            Self.assistant(#"{"type":"tool_use","id":"t2","name":"Write","input":{"file_path":"/r/b.swift","content":"\#(body)"}}"#),
+        ]
+        try (lines.joined(separator: "\n") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+        let snap = TranscriptActivity.read(transcriptAt: path, windowBytes: 64 * 1024)
+        #expect(snap.current?.label == "Write · b.swift")
+        // The window stops growing at its cap rather than reading the whole file.
+        let capped = TranscriptActivity.read(transcriptAt: path, windowBytes: 1024, maxWindowBytes: 4096)
+        #expect(capped.isEmpty)
+    }
+
     @Test("summaries pick the informative field and truncate")
     func summaries() {
         #expect(TranscriptActivity.summarize(tool: "Bash", input: ["command": "a\nb"]) == "a")

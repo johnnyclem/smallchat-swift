@@ -2,51 +2,51 @@ import SmallChatCore
 
 // MARK: - Refinement
 
-/// Build a `ToolRefinement` payload for a NONE-tier dispatch.
+/// Build a `ToolRefinement` payload: what to ask when resolution does not
+/// settle on one tool (needs-disambiguation, or unresolved with near
+/// matches). Nothing ran; each near match carries a tool id the caller can
+/// run with `dispatchById`.
 ///
-/// The payload is the body of the `tool_refinement_needed` MCP result
-/// returned to the caller. It carries the original intent, an explanation,
-/// near-miss candidates with confidences, optional clarifying questions
-/// from the LLM, and the resolution proof for replay/debugging.
+/// Near matches are the first five `candidates`, in the deterministic
+/// ranking order (quantized score, then tool id). The configured `LLMClient`
+/// may add clarifying questions.
 public func makeRefinement(
     originalIntent: String,
     candidates: [ToolCandidate],
     proof: ResolutionProof,
-    llm: any LLMClient = NoOpLLMClient()
+    llm: any LLMClient = NoOpLLMClient(),
+    reason: String? = nil
 ) async -> ToolRefinement {
 
     let nearMatches: [ToolRefinement.NearMatch] = candidates
-        .sorted { $0.confidence > $1.confidence }
+        .sorted { rankedBefore(score: $0.confidence, toolId: $0.imp.toolId, score: $1.confidence, toolId: $1.imp.toolId) }
         .prefix(5)
         .map { c in
             ToolRefinement.NearMatch(
                 toolName: c.imp.toolName,
                 providerId: c.imp.providerId,
                 canonicalSelector: c.selector.canonical,
-                confidence: c.confidence
+                confidence: quantizeScore(c.confidence)
             )
         }
 
-    let reason: String
-    if candidates.isEmpty {
-        reason = "No candidates above the minimum vector-search threshold."
-    } else if let best = candidates.max(by: { $0.confidence < $1.confidence }) {
-        reason = String(
-            format: "Best candidate \"%@\" only scored %.2f -- below the LOW threshold.",
-            best.imp.toolName, best.confidence
-        )
+    let explanation: String
+    if let reason {
+        explanation = reason
+    } else if let best = nearMatches.first {
+        explanation = "Best candidate \(best.toolId) only scored \(fixed3(best.confidence)); choose a tool and call it by id."
     } else {
-        reason = "Refinement required."
+        explanation = "No candidates above the minimum similarity."
     }
 
     let questions = await llm.clarifyingQuestions(
         intent: originalIntent,
-        nearMatches: nearMatches.map(\.toolName)
+        nearMatches: nearMatches.map(\.toolId)
     )
 
     return ToolRefinement(
         originalIntent: originalIntent,
-        reason: reason,
+        reason: explanation,
         clarifyingQuestions: questions,
         nearMatches: nearMatches,
         proof: proof

@@ -3,8 +3,9 @@ import Foundation
 // MARK: - Persistence
 //
 // Everything smallchat owns (handles, archive flags, conversations,
-// settings) lives in one JSON file. Claude Code's own files are only ever
-// read.
+// settings) lives in one JSON file, except its secrets, which live in a
+// `MessengerSecretStore` (see Secrets.swift). Claude Code's own files are
+// only ever read.
 
 /// What smallchat remembers about a session between launches.
 public struct AgentRecord: Sendable, Equatable, Codable {
@@ -37,17 +38,19 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
     /// Run the loopback bridge stenographer's `--objection-channel` posts to.
     public var objectionChannelEnabled: Bool
     public var objectionChannelPort: Int
-    /// Shared secret stenographer sends as `X-Channel-Secret`
-    /// (`SMALLCHAT_CHANNEL_SECRET`). Generated on first launch.
-    public var objectionChannelSecret: String
     /// Relay each objection into the offending agent's live session.
     public var relayObjections: Bool
     /// Who you sign tombstones as (an accountable identity, not "system").
     public var signerIdentity: String
-    /// Wiki JSONL file new tombstones are appended to (nil: first configured file).
+    /// No longer read: tombstones go to stenographer as proposals, never to a
+    /// wiki file (one writer per file). Kept so older settings round-trip.
     public var tombstoneFile: String?
     /// Stenographer's REST port (`--rest-port`), where agent drafts are notarized.
     public var stenographerRestPort: Int
+
+    /// Set when the decoded JSON still held the channel secret an older build
+    /// stored there, so the messenger rewrites the file without it. Never encoded.
+    var carriesLegacySecret = false
 
     public static let defaultObjectionChannelPort = 7337
     public static let defaultStenographerRestPort = 8787
@@ -61,7 +64,6 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
         recentDays: Int? = 30,
         objectionChannelEnabled: Bool = true,
         objectionChannelPort: Int = MessengerSettings.defaultObjectionChannelPort,
-        objectionChannelSecret: String = "",
         relayObjections: Bool = true,
         signerIdentity: String = "",
         tombstoneFile: String? = nil,
@@ -75,7 +77,6 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
         self.recentDays = recentDays
         self.objectionChannelEnabled = objectionChannelEnabled
         self.objectionChannelPort = objectionChannelPort
-        self.objectionChannelSecret = objectionChannelSecret
         self.relayObjections = relayObjections
         self.signerIdentity = signerIdentity
         self.tombstoneFile = tombstoneFile
@@ -84,8 +85,10 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
 
     enum CodingKeys: String, CodingKey {
         case claudePath, wikiPaths, switchboardModel, stenographerModel, stenographerWatching, recentDays
-        case objectionChannelEnabled, objectionChannelPort, objectionChannelSecret, relayObjections
+        case objectionChannelEnabled, objectionChannelPort, relayObjections
         case signerIdentity, tombstoneFile, stenographerRestPort
+        /// Read only to notice a secret older builds stored here.
+        case legacyObjectionChannelSecret = "objectionChannelSecret"
     }
 
     /// Lenient: settings saved by an older build (missing newer keys) still
@@ -103,7 +106,7 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
         recentDays = c.contains(.recentDays) ? try c.decodeIfPresent(Int.self, forKey: .recentDays) : defaults.recentDays
         objectionChannelEnabled = try c.decodeIfPresent(Bool.self, forKey: .objectionChannelEnabled) ?? defaults.objectionChannelEnabled
         objectionChannelPort = try c.decodeIfPresent(Int.self, forKey: .objectionChannelPort) ?? defaults.objectionChannelPort
-        objectionChannelSecret = try c.decodeIfPresent(String.self, forKey: .objectionChannelSecret) ?? defaults.objectionChannelSecret
+        carriesLegacySecret = c.contains(.legacyObjectionChannelSecret)
         relayObjections = try c.decodeIfPresent(Bool.self, forKey: .relayObjections) ?? defaults.relayObjections
         signerIdentity = try c.decodeIfPresent(String.self, forKey: .signerIdentity) ?? defaults.signerIdentity
         tombstoneFile = try c.decodeIfPresent(String.self, forKey: .tombstoneFile)
@@ -120,7 +123,6 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
         try c.encode(recentDays, forKey: .recentDays)  // null = all time
         try c.encode(objectionChannelEnabled, forKey: .objectionChannelEnabled)
         try c.encode(objectionChannelPort, forKey: .objectionChannelPort)
-        try c.encode(objectionChannelSecret, forKey: .objectionChannelSecret)
         try c.encode(relayObjections, forKey: .relayObjections)
         try c.encode(signerIdentity, forKey: .signerIdentity)
         try c.encodeIfPresent(tombstoneFile, forKey: .tombstoneFile)
@@ -150,10 +152,20 @@ public struct MessengerSnapshot: Sendable, Equatable, Codable {
 
 public struct MessengerStore: Sendable {
     public let url: URL?
+    /// Where the channel and notary secrets live (never in the JSON file).
+    public let secrets: any MessengerSecretStore
 
-    /// `url == nil` keeps everything in memory (previews, tests).
-    public init(url: URL?) {
+    /// `url == nil` keeps everything in memory (previews, tests). Without
+    /// `secrets`, a store with a file keeps its secrets in the platform's
+    /// store: the Keychain on macOS, elsewhere 0600 files in a `secrets`
+    /// directory beside the file.
+    public init(url: URL?, secrets: (any MessengerSecretStore)? = nil) {
         self.url = url
+        self.secrets = secrets ?? url.map {
+            MessengerSecretStores.platformDefault(
+                fileDirectory: $0.deletingLastPathComponent().appendingPathComponent("secrets", isDirectory: true)
+            )
+        } ?? InMemorySecretStore()
     }
 
     public static func defaultURL() -> URL {
@@ -173,9 +185,49 @@ public struct MessengerStore: Sendable {
         guard let url else { return }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(snapshot)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)
+    }
+}
+
+/// Writes snapshots one at a time on a background queue, in order, and never
+/// replaces a newer snapshot with an older one.
+final class MessengerStoreWriter: @unchecked Sendable {
+    private let store: MessengerStore
+    private let queue = DispatchQueue(label: "dev.smallchat.messenger-store", qos: .utility)
+    /// Generation of the last snapshot written. Only touched on `queue`.
+    private var written = 0
+
+    init(store: MessengerStore) {
+        self.store = store
+    }
+
+    /// Encode and write `snapshot` off the caller's thread.
+    func save(_ snapshot: MessengerSnapshot, generation: Int) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async {
+                continuation.resume(with: Result { try self.write(snapshot, generation: generation) })
+            }
+        }
+    }
+
+    /// Write `snapshot` before returning, after any write already queued.
+    func saveNow(_ snapshot: MessengerSnapshot, generation: Int) throws {
+        try queue.sync { try write(snapshot, generation: generation) }
+    }
+
+    /// Returns once every write queued so far is on disk.
+    func waitForPendingWrites() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { continuation.resume() }
+        }
+    }
+
+    private func write(_ snapshot: MessengerSnapshot, generation: Int) throws {
+        guard generation > written else { return }
+        try store.save(snapshot)
+        written = generation
     }
 }

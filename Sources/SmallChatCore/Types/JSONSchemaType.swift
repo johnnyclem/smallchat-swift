@@ -98,6 +98,17 @@ public final class Box<T: Sendable & Codable & Equatable>: Sendable, Codable, Eq
 
 // MARK: - JSONSchemaType
 
+/// A JSON Schema, with the keywords smallchat reads typed (`type`,
+/// `description`, `enum`, `items`, `properties`, `required`, `default`)
+/// and every other keyword kept verbatim.
+///
+/// Decoding never drops a keyword: `jsonValue` (and `encode(to:)`) give
+/// back the full schema, which is what argument validation and artifact
+/// format 1.0 use. A typed field set to a value replaces the decoded
+/// keyword; a typed field that is nil (or a `type` that is empty) falls
+/// back to the decoded keyword, so a schema whose `type` is an array of
+/// types, or whose `items` is a tuple or a boolean schema, survives a
+/// round trip. A schema without `type` decodes with `type == ""`.
 public struct JSONSchemaType: Sendable, Codable, Equatable {
     public var type: String
     public var description: String?
@@ -106,6 +117,9 @@ public struct JSONSchemaType: Sendable, Codable, Equatable {
     public var properties: [String: JSONSchemaType]?
     public var required: [String]?
     public var defaultValue: AnyCodableValue?
+    /// Every keyword of the decoded schema, verbatim (empty when the schema
+    /// was built in code).
+    public var keywords: [String: AnyCodableValue]
 
     public init(
         type: String,
@@ -123,15 +137,63 @@ public struct JSONSchemaType: Sendable, Codable, Equatable {
         self.properties = properties
         self.required = required
         self.defaultValue = defaultValue
+        self.keywords = [:]
     }
 
-    enum CodingKeys: String, CodingKey {
-        case type
-        case description
-        case enumValues = "enum"
-        case items
-        case properties
-        case required
-        case defaultValue = "default"
+    /// The schema of a JSON object (as found in a manifest or artifact).
+    public init(json object: [String: AnyCodableValue]) {
+        keywords = object
+        if case .string(let t)? = object["type"] { type = t } else { type = "" }
+        if case .string(let d)? = object["description"] { description = d } else { description = nil }
+        if case .array(let values)? = object["enum"] { enumValues = values } else { enumValues = nil }
+        if case .dict(let item)? = object["items"] { items = Box(JSONSchemaType(json: item)) } else { items = nil }
+        if case .dict(let props)? = object["properties"] {
+            var typed: [String: JSONSchemaType] = [:]
+            for (name, value) in props {
+                if case .dict(let schema) = value { typed[name] = JSONSchemaType(json: schema) }
+            }
+            properties = typed
+        } else {
+            properties = nil
+        }
+        if case .array(let names)? = object["required"] {
+            required = names.compactMap { if case .string(let n) = $0 { return n } else { return nil } }
+        } else {
+            required = nil
+        }
+        defaultValue = object["default"]
+    }
+
+    /// The full schema as a JSON object (see the type's documentation).
+    public var jsonValue: [String: AnyCodableValue] {
+        var object = keywords
+        if !type.isEmpty { object["type"] = .string(type) }
+        if let description { object["description"] = .string(description) }
+        if let enumValues { object["enum"] = .array(enumValues) }
+        if let items { object["items"] = .dict(items.value.jsonValue) }
+        if let properties {
+            var props: [String: AnyCodableValue] = [:]
+            if case .dict(let decoded)? = keywords["properties"] { props = decoded }
+            for (name, schema) in properties { props[name] = .dict(schema.jsonValue) }
+            object["properties"] = .dict(props)
+        }
+        if let required { object["required"] = .array(required.map { .string($0) }) }
+        if let defaultValue { object["default"] = defaultValue }
+        return object
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self.init(json: try container.decode([String: AnyCodableValue].self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(jsonValue)
+    }
+
+    /// Two schemas are equal when they are the same JSON Schema.
+    public static func == (lhs: JSONSchemaType, rhs: JSONSchemaType) -> Bool {
+        lhs.jsonValue == rhs.jsonValue
     }
 }

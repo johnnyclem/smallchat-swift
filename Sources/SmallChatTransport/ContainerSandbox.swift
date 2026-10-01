@@ -105,6 +105,9 @@ public enum ContainerSandbox {
         return dockerArgs
     }
 
+    // Process-spawning helpers: macOS/Linux only (iOS has no Foundation.Process).
+    #if os(macOS) || os(Linux)
+
     /// Check if Docker is available on the host.
     ///
     /// Spawns `docker info` and checks the exit code.
@@ -176,4 +179,6 @@ public enum ContainerSandbox {
         try process.run()
         return process
     }
+
+    #endif // os(macOS) || os(Linux)
 }

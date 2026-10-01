@@ -88,11 +88,23 @@ struct CanonicalizeTests {
         #expect(result == "find documents")
     }
 
-    @Test("Canonicalize enforces max token limit")
-    func canonicalizeMaxTokens() {
+    @Test("Canonicalize keeps every token (no cap, as in @smallchat/core 1.0)")
+    func canonicalizeKeepsAllTokens() {
         let manyWords = (0..<100).map { "word\($0)" }.joined(separator: " ")
-        let result = canonicalize(manyWords)
-        let tokens = result.split(separator: ":")
-        #expect(tokens.count <= maxCanonicalTokens)
+        #expect(canonicalize(manyWords).split(separator: ":").count == 100)
+    }
+
+    @Test("intentKey keeps negations and punctuation apart, folds case and spacing")
+    func intentKeys() {
+        #expect(intentKey("  Delete   the LOGS ") == "delete the logs")
+        #expect(intentKey("do not delete the logs") != intentKey("delete the logs"))
+        #expect(intentKey("e\u{301}tat") == intentKey("\u{e9}tat"))
+    }
+
+    @Test("normalizePinPhrase is NFKC, lower case, collapsed whitespace")
+    func pinPhrases() {
+        #expect(normalizePinPhrase("Transfer  Funds") == "transfer funds")
+        #expect(normalizePinPhrase("\u{FB01}le") == "file")
+        #expect(normalizePinPhrase("do not transfer funds") != normalizePinPhrase("transfer funds"))
     }
 }

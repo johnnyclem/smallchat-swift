@@ -10,10 +10,16 @@ import Foundation
 //   - ORSet            -- observed-remove set with tombstones
 //   - GCounter         -- grow-only counter
 //
-// Each type exposes a deterministic `merge(other:)` such that:
+// Each type exposes a `merged(with:)` meant to be:
 //   commutative:  merge(a, b) == merge(b, a)
 //   idempotent:   merge(a, a) == a
 //   associative:  merge(merge(a, b), c) == merge(a, merge(b, c))
+//
+// Known exception (SC-SW-29): `LWWMap` breaks ties only by replica id, so two
+// entries for one key with the same timestamp *and* replica keep whichever
+// side the merge started from (and a remove at the timestamp of a set is
+// ignored); merges are then not commutative. Give every write of a replica
+// its own timestamp.
 
 // MARK: - Replica id
 

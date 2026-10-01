@@ -144,52 +144,30 @@ struct ResolverView: View {
         appState.resolverLog.append("Loading artifact from \(appState.resolverArtifactPath)...")
 
         do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: appState.resolverArtifactPath))
-            guard let artifact = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let selectorsDict = artifact["selectors"] as? [String: Any],
-                  let dispatchTablesDict = artifact["dispatchTables"] as? [String: Any] else {
-                appState.resolverLog.append("ERROR: Failed to parse artifact")
-                appState.isResolving = false
-                return
-            }
-
-            let embedder = LocalEmbedder()
-            let vectorIndex = MemoryVectorIndex()
-            let selectorTable = SelectorTable(index: vectorIndex, embedder: embedder)
-
-            // Load selectors
-            for (_, selValue) in selectorsDict {
-                guard let sel = selValue as? [String: Any],
-                      let canonical = sel["canonical"] as? String,
-                      let vectorArr = sel["vector"] as? [NSNumber] else { continue }
-                let vector = vectorArr.map { Float(truncating: $0) }
-                _ = try await selectorTable.intern(embedding: vector, canonical: canonical)
-            }
-
-            // Resolve intent
-            let selector = try await selectorTable.resolve(appState.resolverIntent)
-            let matches = try await vectorIndex.search(
-                query: selector.vector,
-                topK: appState.resolverTopK,
-                threshold: appState.resolverThreshold
-            )
+            // Artifact format 1.0, resolved with the embedder it records.
+            let artifact = try ArtifactV1.read(contentsOf: URL(fileURLWithPath: appState.resolverArtifactPath))
+            let toolkit = try await MCPToolkit.make(artifact: artifact)
+            let resolution = try await toolkit.runtime.resolve(appState.resolverIntent)
 
             appState.resolverLog.append("Intent: \"\(appState.resolverIntent)\"")
-            appState.resolverLog.append("Resolved selector: \(selector.canonical)")
+            appState.resolverLog.append("Outcome: \(resolution.outcome.rawValue) (tier \(resolution.tier.rawValue), decision \(resolution.proof.decision.rawValue))")
+            if let chosen = resolution.chosen {
+                appState.resolverLog.append("Chosen: \(chosen)")
+            }
+            if let reason = resolution.reason {
+                appState.resolverLog.append("Reason: \(reason)")
+            }
+            appState.resolverLog.append("Proof: \(resolution.proof.proofDigest) (nothing was executed)")
 
-            appState.resolverMatches = matches.map { match in
-                let confidence = Double(1 - match.distance) * 100
-                var provider = "unknown"
-                for (providerId, table) in dispatchTablesDict {
-                    if let methods = table as? [String: Any], methods[match.id] != nil {
-                        provider = providerId
-                        break
-                    }
-                }
-                return ResolvedMatch(selector: match.id, confidence: confidence, provider: provider)
+            appState.resolverMatches = resolution.candidates.map { candidate in
+                ResolvedMatch(
+                    selector: candidate.selector,
+                    confidence: candidate.score * 100,
+                    provider: artifact.tools[candidate.toolId]?.providerId ?? "unknown"
+                )
             }
 
-            appState.resolverLog.append("Found \(matches.count) match(es)")
+            appState.resolverLog.append("Found \(resolution.candidates.count) candidate(s)")
 
         } catch {
             appState.resolverLog.append("ERROR: \(error.localizedDescription)")

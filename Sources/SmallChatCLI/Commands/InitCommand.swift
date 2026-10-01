@@ -76,7 +76,7 @@ struct InitCommand: AsyncParsableCommand {
 
         // Write config
         let config: [String: Any] = [
-            "version": "0.6.0",
+            "version": SmallChatVersion.current,
             "embedder": "local",
             "manifests": ["./manifests"],
             "output": "tools.toolkit.json",

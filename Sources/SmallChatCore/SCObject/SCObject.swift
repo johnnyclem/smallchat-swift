@@ -3,7 +3,7 @@ import Foundation
 import os
 #endif
 
-private let idGenerator = OSAllocatedUnfairLock(initialState: 0)
+private let idGenerator = PlatformLock(initialState: 0)
 private func nextId() -> Int {
     idGenerator.withLock { state in
         state += 1

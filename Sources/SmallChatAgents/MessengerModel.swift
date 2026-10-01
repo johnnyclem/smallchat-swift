@@ -1,5 +1,12 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Observation
+// The channel bridge types (ChannelBridgeServer, ChannelBridgeProtocol, ...)
+// lived in this module before 1.0; re-exported so code that imports only
+// SmallChatAgents keeps compiling.
+@_exported import SmallChatChannel
 import SmallChatTruth
 
 // MARK: - Messenger model
@@ -35,6 +42,15 @@ public final class MessengerModel {
     /// Tombstones agents drafted for the user to notarize, newest first.
     public private(set) var pendingProposals: [PendingProposal] = []
     public private(set) var objectionChannelStatus: ObjectionChannelStatus = .off
+    /// Authenticates stenographer's posts to the objection channel bridge
+    /// (`SMALLCHAT_CHANNEL_SECRET`).
+    public private(set) var channelSecret: String
+    /// Authenticates the messenger's proposal, notarize and dismiss calls to
+    /// stenographer (`STENOGRAPHER_NOTARY_SECRET`). Never the channel secret.
+    public private(set) var notarySecret: String
+    /// The bearer token every stenographer REST request carries
+    /// (`STENOGRAPHER_REST_TOKEN`). Distinct from both other secrets.
+    public private(set) var restToken: String
     /// Last problem worth telling the user about.
     public var lastError: String?
 
@@ -57,29 +73,95 @@ public final class MessengerModel {
     private var activitySizes: [String: UInt64] = [:]
     /// Result of the last disk scan, reused when rebuilding after local changes.
     private var lastDiscovered: [DiscoveredSession] = []
+    /// Sends a notary decision to stenographer (replaced in tests).
+    @ObservationIgnored
+    var notarySender: @Sendable (URLRequest) async throws -> String? = { try await NotaryClient.send($0) }
+
+    // Persistence: changes collect for `persistDelay`, then one snapshot is
+    // encoded and written on a background queue. Nothing is written on the
+    // main actor while the user waits, except when the app quits.
+
+    /// How long changes collect before they are written.
+    @ObservationIgnored var persistDelay: Duration = .milliseconds(500)
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
+    /// Changes made, and changes already handed to the writer.
+    @ObservationIgnored private var changeCount = 0
+    @ObservationIgnored private var savedChangeCount = 0
+    /// Snapshots handed to the writer so far.
+    @ObservationIgnored private(set) var snapshotsWritten = 0
+    private let writer: MessengerStoreWriter
+    @ObservationIgnored nonisolated(unsafe) private var terminationObserver: (any NSObjectProtocol)?
+
+    /// AppKit's `NSApplication.willTerminateNotification`, by name, so this
+    /// library needn't import AppKit.
+    public static let applicationWillTerminate = Notification.Name("NSApplicationWillTerminateNotification")
 
     public init(store: MessengerStore, transport: any AgentTransport, scanner: ClaudeSessionScanner?) {
         let snapshot = store.load()
         self.store = store
+        self.writer = MessengerStoreWriter(store: store)
         self.scanner = scanner
         self.transport = transport
         self.records = snapshot.agents
         self.conversations = snapshot.conversations
         self.stenographerSessions = snapshot.stenographerSessions
         self.settings = snapshot.settings
-        if settings.objectionChannelSecret.isEmpty {
-            settings.objectionChannelSecret = ChannelBridgeProtocol.generateSecret()
+        let secrets = Self.ensureSecrets(in: store.secrets)
+        self.channelSecret = secrets.channel
+        self.notarySecret = secrets.notary
+        self.restToken = secrets.restToken
+        if let problem = secrets.problem { lastError = problem }
+        if settings.carriesLegacySecret {
+            // An older build kept the channel secret in messenger.json; the
+            // secrets above are new, and the file is rewritten without it.
+            settings.carriesLegacySecret = false
             persist()
         }
         rebuildAgents()
         listenForInbound()
         reloadLedger()
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: Self.applicationWillTerminate, object: nil, queue: nil
+        ) { [weak self] _ in
+            // AppKit posts it on the main thread, right before exiting.
+            MainActor.assumeIsolated { self?.saveBeforeExit() }
+        }
+    }
+
+    deinit {
+        if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
+    }
+
+    /// The stored channel and notary secrets and REST token, generated
+    /// (distinct from each other) when missing. A store that can't be
+    /// written still yields secrets for this session, with a problem to show.
+    static func ensureSecrets(in store: any MessengerSecretStore) -> (channel: String, notary: String, restToken: String, problem: String?) {
+        var problem: String?
+        func value(_ secret: MessengerSecret, distinctFrom others: [String]) -> String {
+            if let existing = store.read(secret), !existing.isEmpty, !others.contains(existing) { return existing }
+            var fresh = ChannelBridgeProtocol.generateSecret()
+            while others.contains(fresh) { fresh = ChannelBridgeProtocol.generateSecret() }
+            do {
+                try store.write(fresh, for: secret)
+            } catch {
+                problem = "Couldn't save the \(secret.label): \(error). It will change on the next launch."
+            }
+            return fresh
+        }
+        let channel = value(.channel, distinctFrom: [])
+        let notary = value(.notary, distinctFrom: [channel])
+        let restToken = value(.restToken, distinctFrom: [channel, notary])
+        return (channel, notary, restToken, problem)
     }
 
     /// Swap the transport (e.g. after the `claude` path changes in Settings).
+    /// The old one is shut down, so its switchboard doesn't linger under the
+    /// same name and swallow replies nobody reads.
     public func setTransport(_ transport: any AgentTransport) {
+        let previous = self.transport
         self.transport = transport
         listenForInbound()
+        Task { await previous.shutdown() }
     }
 
     // MARK: Lookup
@@ -520,9 +602,7 @@ public final class MessengerModel {
     }
 
     func handleInbound(_ reply: InboundReply) {
-        let name = reply.senderName.lowercased()
-        guard let agent = allAgents.first(where: { $0.claudeName?.lowercased() == name })
-            ?? allAgents.first(where: { $0.handle == Handles.normalize(name) }) else {
+        guard let agent = sender(named: reply.senderName) else {
             // Someone we don't track — surface it rather than drop it.
             if let id = selectedConversationId {
                 append(ChatMessage(author: .system, text: "Message from @\(reply.senderName) (unknown session):\n\(reply.text)"), to: id)
@@ -532,6 +612,19 @@ public final class MessengerModel {
         // Never yank the user's selection over to an unsolicited reply.
         let conversationId = replyRoute[agent.id] ?? ensureDirectConversation(agentId: agent.id)
         receiveReply(from: agent.id, text: reply.text, in: conversationId)
+    }
+
+    /// The agent a switchboard sender name belongs to. Claude Code's own
+    /// session names decide, and an ambiguous name matches nobody. The
+    /// smallchat handle is a fallback only for a live session whose Claude
+    /// name isn't known yet, so no session can take over an agent's identity
+    /// by naming itself after that agent's handle.
+    func sender(named rawName: String) -> AgentSession? {
+        let name = rawName.lowercased()
+        let byClaudeName = allAgents.filter { $0.claudeName?.lowercased() == name }
+        if !byClaudeName.isEmpty { return byClaudeName.count == 1 ? byClaudeName[0] : nil }
+        let byHandle = allAgents.filter { $0.isLive && $0.claudeName == nil && $0.handle == Handles.normalize(name) }
+        return byHandle.count == 1 ? byHandle[0] : nil
     }
 
     func receiveReply(from agentId: String, text: String, in conversationId: String) {
@@ -595,7 +688,7 @@ public final class MessengerModel {
         guard settings.objectionChannelEnabled else { return }
         let server = ChannelBridgeServer(
             port: settings.objectionChannelPort,
-            secret: settings.objectionChannelSecret
+            secret: channelSecret
         ) { [weak self] event in
             Task { @MainActor in self?.handleChannelEvent(event) }
         }
@@ -618,6 +711,21 @@ public final class MessengerModel {
     /// The `--objection-channel` URL to give stenographer.
     public var objectionChannelURL: String {
         "http://127.0.0.1:\(objectionChannelStatus.port ?? settings.objectionChannelPort)"
+    }
+
+    /// Shell command that starts stenographer delivering objections to this
+    /// app. Each secret is read where the messenger keeps it (the Keychain on
+    /// macOS) when the command runs, so neither value is in the command, the
+    /// clipboard or the shell history.
+    public var stenographerLaunchCommand: String {
+        let environment = MessengerSecret.allCases.compactMap { secret in
+            store.secrets.shellExpression(for: secret).map { "\(secret.environmentVariable)=\"\($0)\"" }
+        }
+        return (environment + [
+            "npx -y @stenographer/core start <log-or-dir>",
+            "--objections deliver --objection-channel \(objectionChannelURL)",
+            "--rest-port \(settings.stenographerRestPort) --require-notary",
+        ]).joined(separator: " ")
     }
 
     /// Route a bridge event to the agents it names (`meta.session_ids`).
@@ -690,13 +798,14 @@ public final class MessengerModel {
     /// An agent drafted a tombstone: queue it for the user and say so in the
     /// drafting agent's chat. The draft never reaches the agent as truth.
     private func receiveProposal(_ event: ChannelInboundEvent) {
-        guard let id = event.proposalId, !pendingProposals.contains(where: { $0.id == id }) else { return }
+        guard let id = event.proposalId, NotaryClient.isValidProposalId(id),
+              !pendingProposals.contains(where: { $0.id == id }) else { return }
+        // `event.notarizeURL` is ignored: decisions go to the configured REST port.
         pendingProposals.insert(PendingProposal(
             id: id,
             draftedBy: event.draftedBy ?? event.sender ?? "an agent",
             sessionIds: event.sessionIds,
-            content: event.content,
-            notarizeURL: event.notarizeURL ?? NotaryClient.notarizeURL(restBase: stenographerRestBase, proposalId: id)
+            content: event.content
         ), at: 0)
         for target in event.sessionIds.compactMap({ agent($0) }) {
             append(ChatMessage(
@@ -711,7 +820,7 @@ public final class MessengerModel {
     /// Picks up drafts raised while the messenger wasn't listening.
     public func refreshProposals() async {
         do {
-            let open = try await NotaryClient.openDrafts(restBase: stenographerRestBase)
+            let open = try await NotaryClient.openDrafts(restBase: stenographerRestBase, restToken: restToken)
             let known = Set(pendingProposals.map(\.id))
             pendingProposals.insert(contentsOf: open.filter { !known.contains($0.id) }, at: 0)
         } catch {
@@ -722,11 +831,11 @@ public final class MessengerModel {
     /// Notarize (sign as the user) or decline a draft.
     public func decide(proposalId: String, _ decision: NotaryDecision) async {
         guard let proposal = pendingProposals.first(where: { $0.id == proposalId }), proposal.state.isOpen else { return }
-        guard let url = proposal.notarizeURL else {
-            setProposalState(proposalId, .failed("Stenographer didn't say where to notarize this. Is its REST API on?"))
+        guard let url = NotaryClient.notarizeURL(restBase: stenographerRestBase, proposalId: proposal.id) else {
+            setProposalState(proposalId, .failed("“\(proposal.id)” isn't a stenographer proposal id."))
             return
         }
-        guard !settings.objectionChannelSecret.isEmpty else {
+        guard !notarySecret.isEmpty else {
             setProposalState(proposalId, .failed("No notary secret is set."))
             return
         }
@@ -736,8 +845,8 @@ public final class MessengerModel {
         }
         setProposalState(proposalId, .working)
         do {
-            let request = try NotaryClient.request(for: decision, notarizeURL: url, secret: settings.objectionChannelSecret)
-            let entryId = try await NotaryClient.send(request)
+            let request = try NotaryClient.request(for: decision, notarizeURL: url, secret: notarySecret, restToken: restToken)
+            let entryId = try await notarySender(request)
             switch decision {
             case .approve: setProposalState(proposalId, .notarized(entryId: entryId))
             case .decline: setProposalState(proposalId, .declined)
@@ -766,44 +875,69 @@ public final class MessengerModel {
 
     // MARK: Authoring tombstones
 
-    /// The wiki file new tombstones go to: the configured one, else the first
-    /// wiki path (a directory gets `smallchat-tombstones.jsonl` inside it).
-    public var tombstoneTarget: String? {
-        let raw = settings.tombstoneFile ?? settings.wikiPaths.first
-        guard let raw, !raw.isEmpty else { return nil }
-        let path = (raw as NSString).expandingTildeInPath
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
-            return (path as NSString).appendingPathComponent("smallchat-tombstones.jsonl")
-        }
-        return path
-    }
+    /// The identity the messenger files tombstone proposals under. The
+    /// person who signs notarizes them, and stenographer refuses a notary
+    /// who also drafted the proposal, so this is never the signer.
+    public nonisolated static let proposalAuthor = "agent:smallchat-messenger"
 
-    /// Sign a tombstone and append it to the wiki. The stenographer starts
-    /// objecting to its literals immediately; stenographer proper picks it
-    /// up on its next `import_wiki_entries`.
+    /// Tombstones signed here, as stenographer minted them, until a wiki
+    /// export the messenger reads carries them (the export then speaks for
+    /// them, strikes included). They count as current truth only while the
+    /// exports read cleanly: a refused export might hold their strike.
+    public private(set) var authoredTombstones: [TruthTbEntry] = []
+    /// The envelope of a signing that didn't finish, reused when the same
+    /// draft is signed again: stenographer files an envelope once by its id.
+    @ObservationIgnored private var unfinishedTombstone: (draft: TombstoneDraft, envelope: TruthProposalEnvelope)?
+
+    /// Sign a tombstone. One writer per wiki file: nothing is written to a
+    /// wiki file. The draft goes to stenographer as a PROPOSAL envelope
+    /// (`POST /proposals`), and the signer notarizes it there
+    /// (`POST /proposals/:id/notarize`); stenographer mints the TB and
+    /// exports it. The stenographer here objects to its literals at once.
     @discardableResult
-    public func assertTombstone(_ draft: TombstoneDraft) throws -> TruthTbEntry {
-        guard let target = tombstoneTarget else {
-            throw TruthError.malformedLine(line: 0, reason: "Add a wiki file on the Stenographer page first — tombstones are written there.")
+    public func assertTombstone(_ draft: TombstoneDraft) async throws -> TruthTbEntry {
+        guard !notarySecret.isEmpty else {
+            throw TruthError.malformedLine(line: 0, reason: "No notary secret is set.")
         }
-        let entry = try draft.sign()
-        try TruthWiki.append([.tb(entry)], toFileAt: target)
-        // Make sure the ledger reads the file it was just written to.
-        let covered = settings.wikiPaths.contains { path in
-            let expanded = (path as NSString).expandingTildeInPath
-            return expanded == target || target.hasPrefix(expanded.hasSuffix("/") ? expanded : expanded + "/")
+        let envelope: TruthProposalEnvelope
+        if let unfinished = unfinishedTombstone, unfinished.draft == draft {
+            envelope = unfinished.envelope
+        } else {
+            envelope = try draft.proposal(author: Self.proposalAuthor)
+            unfinishedTombstone = (draft, envelope)
         }
-        if !covered { settings.wikiPaths.append(target) }
-        if settings.signerIdentity.isEmpty { settings.signerIdentity = draft.signer.trimmingCharacters(in: .whitespaces) }
+        let minted = try await NotaryClient.submitAndNotarize(
+            envelope, notary: draft.notary, restBase: stenographerRestBase, secret: notarySecret, restToken: restToken
+        )
+        unfinishedTombstone = nil
+        let tb = minted.tombstone ?? {
+            // Stenographer minted the draft as submitted; its reply just couldn't be read
+            guard case .tb(let claim, let evidence, let literals) = envelope.draft else { preconditionFailure("a tombstone envelope") }
+            return TruthTbEntry(
+                id: minted.entryId ?? minted.proposalId, ts: envelope.ts, author: draft.notary, claim: claim,
+                evidence: evidence, signedBy: draft.notary, status: .active, literals: literals
+            )
+        }()
+        authoredTombstones.removeAll { $0.id == tb.id }
+        authoredTombstones.append(tb)
+        if settings.signerIdentity.isEmpty { settings.signerIdentity = draft.notary }
         reloadLedger()
-        return entry
+        return tb
     }
 
     // MARK: Stenographer
 
     public func reloadLedger() {
-        ledger = TruthLedgerSnapshot.load(paths: settings.wikiPaths)
+        var snapshot = TruthLedgerSnapshot.load(paths: settings.wikiPaths)
+        let exported = Set(snapshot.entries.map(\.id))
+        authoredTombstones.removeAll { exported.contains($0.id) }
+        // A refused snapshot loads nothing (fail closed), and that includes
+        // what was signed here: the unreadable stream might strike it. The
+        // tombstones wait in `authoredTombstones` for a readable export.
+        if !snapshot.refused {
+            snapshot.entries += authoredTombstones.map { .tb($0) }
+        }
+        ledger = snapshot
     }
 
     private func askStenographer(_ question: String, in conversationId: String) {
@@ -870,17 +1004,55 @@ public final class MessengerModel {
         persist()
     }
 
+    /// Write pending changes now and wait until they are on disk.
+    public func flushPersistence() async {
+        saveTask?.cancel()
+        saveTask = nil
+        await savePending()
+        await writer.waitForPendingWrites()
+    }
+
+    /// Note a change; it is written within `persistDelay`.
     private func persist() {
+        guard store.url != nil else { return }
+        changeCount += 1
+        guard saveTask == nil else { return }
+        let delay = persistDelay
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            await self?.savePending()
+        }
+    }
+
+    private func savePending() async {
+        saveTask = nil
+        guard let (snapshot, generation) = takeSnapshotIfChanged() else { return }
+        do {
+            try await writer.save(snapshot, generation: generation)
+        } catch {
+            lastError = "Couldn't save: \(error.localizedDescription)"
+        }
+    }
+
+    /// The app is quitting: write what's pending before returning.
+    func saveBeforeExit() {
+        saveTask?.cancel()
+        saveTask = nil
+        guard let (snapshot, generation) = takeSnapshotIfChanged() else { return }
+        try? writer.saveNow(snapshot, generation: generation)
+    }
+
+    private func takeSnapshotIfChanged() -> (MessengerSnapshot, Int)? {
+        guard changeCount > savedChangeCount else { return nil }
+        savedChangeCount = changeCount
+        snapshotsWritten += 1
         let snapshot = MessengerSnapshot(
             agents: records,
             conversations: conversations,
             stenographerSessions: stenographerSessions,
             settings: settings
         )
-        do {
-            try store.save(snapshot)
-        } catch {
-            lastError = "Couldn't save: \(error.localizedDescription)"
-        }
+        return (snapshot, changeCount)
     }
 }

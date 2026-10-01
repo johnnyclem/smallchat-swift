@@ -101,7 +101,9 @@ let text: String = try await runtime
     .execContent()
 ```
 
-Throws `DispatchContentCastError` if the content can't be cast to `T`.
+Throws `DispatchError` if the result is an error (nothing ran, or the tool failed; see
+`DispatchError.outcome`), and `DispatchContentCastError` if the content can't be cast
+to `T`.
 
 ### stream
 
@@ -148,6 +150,16 @@ let chunks = try await runtime
 ```
 
 ## Error Types
+
+### DispatchError
+
+```swift
+struct DispatchError: Error, Sendable {
+    let intent: String
+    let result: ToolResult
+    var outcome: DispatchOutcomeCode? { get }   // e.g. .needsDisambiguation, .invalidArguments
+}
+```
 
 ### DispatchTimeoutError
 

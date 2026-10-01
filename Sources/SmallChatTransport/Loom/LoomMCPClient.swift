@@ -1,6 +1,10 @@
 import Foundation
 import SmallChatCore
 
+// LoomMCPClient spawns the loom server through MCPStdioTransport, so it is
+// macOS/Linux only (iOS has no Foundation.Process).
+#if os(macOS) || os(Linux)
+
 // MARK: - LoomMCPClient
 //
 // Thin convenience wrapper around `MCPStdioTransport` configured to spawn
@@ -136,6 +140,7 @@ public actor LoomMCPClient {
         "loom_workspace_stats",
     ]
 }
+#endif // os(macOS) || os(Linux)
 
 // MARK: - Detection helper
 

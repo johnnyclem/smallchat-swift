@@ -7,7 +7,10 @@ title: ChannelServer
 
 <span class="module-badge">SmallChatChannel</span>
 
-Bidirectional stdio JSON-RPC server for Claude Code integration.
+A Claude Code channel: an MCP server over stdio (JSON-RPC 2.0) that declares the
+`claude/channel` capability and pushes events into the Claude Code session as
+`notifications/claude/channel` notifications. With `twoWay`, it lists one tool (the
+reply tool, `reply` by default) that Claude Code calls to answer.
 
 ```swift
 actor ChannelServer
@@ -41,18 +44,30 @@ var events: AsyncStream<ChannelServerEvent>
 
 ### start
 
-Begin processing:
+Begin processing (emits `.ready`):
 
 ```swift
 func start()
 ```
 
-### shutdown
+### startHTTPBridge
 
-Stop the server:
+When `httpBridge` is configured, serve `POST /event` (authenticated with
+`X-Channel-Secret` or `Authorization: Bearer`; `httpBridgeSecret` is required) and
+`GET /health`. Each event is injected as if `injectEvent(_:)` were called; a rejected
+event gets `403`. Returns the bound port, or nil when the bridge is not configured.
 
 ```swift
-func shutdown()
+@discardableResult
+func startHTTPBridge() async throws -> Int?
+```
+
+### shutdown
+
+Stop the server and its HTTP bridge:
+
+```swift
+func shutdown() async
 ```
 
 ## Message Handling
@@ -79,10 +94,15 @@ Returns `true` if the event was accepted.
 
 ### sendPermissionVerdict
 
-Respond to a pending permission request:
+With `permissionRelay`, Claude Code's permission requests arrive as
+`.permissionRequestReceived` events and wait in `getPendingPermissions()`. Answer one:
 
 ```swift
 func sendPermissionVerdict(_ verdict: PermissionVerdict)
+```
+
+```swift
+await server.sendPermissionVerdict(PermissionVerdict(requestId: "abcde", behavior: .allow))
 ```
 
 ## Accessors
@@ -125,69 +145,71 @@ struct JsonRpcError: Sendable, Codable, Equatable {
 ```swift
 import SmallChatChannel
 
-let config = ChannelServerConfig()
+let config = ChannelServerConfig(channelName: "ci", twoWay: true)
 let server = ChannelServer(config: config)
 
-// Start the server
-server.start()
-
-// Process inbound messages (from stdin)
-Task {
-    for try await line in FileHandle.standardInput.bytes.lines {
-        await server.handleLine(line)
-    }
-}
-
 // Forward outbound messages (to stdout)
+let outbound = await server.outboundMessages
 Task {
-    for await message in server.outboundMessages {
+    for await message in outbound {
         print(message)
         fflush(stdout)
     }
 }
 
 // Handle events
+let events = await server.events
 Task {
-    for await event in server.events {
+    for await event in events {
         switch event {
         case .initialized:
-            // Channel ready
-            break
-        case .shutdown:
-            // Clean up
-            break
+            break   // Claude Code finished the handshake
+        case .reply(let channel, let message, _):
+            print("reply on \(channel): \(message)")
+        case .senderRejected(let sender):
+            print("rejected event from \(sender ?? "unknown")")
         default:
             break
         }
     }
 }
+
+await server.start()
+
+// Process inbound messages (from stdin)
+for try await line in FileHandle.standardInput.bytes.lines {
+    await server.handleLine(line)
+}
 ```
+
+`smallchat channel` does this for you, and reads stdin on its own thread.
 
 ## SenderGate
 
-Permission relay for tool execution:
+An allowlist of the senders whose events are injected (`senderAllowlist`,
+`senderAllowlistFile`). An empty allowlist admits every sender. Pairing codes let a new
+sender join: `generatePairingCode(for:)` returns a 6-hex-digit code that expires after
+5 minutes, and `completePairing(senderId:code:)` compares it in constant time.
 
 ```swift
 let gate = await server.getSenderGate()
-
-// Pending permissions are tracked
-let pending = await server.getPendingPermissions()
-
-// Approve a pending request
-server.sendPermissionVerdict(PermissionVerdict(
-    requestId: "req_123",
-    allowed: true
-))
+let code = await gate.generatePairingCode(for: "ci-bot")
+// later, when the sender presents the code:
+let paired = await gate.completePairing(senderId: "ci-bot", code: code)
 ```
 
 ## ChannelAdapter
 
-Bridges MCP notifications to channel events:
+Keeps the events the server injected and parses permission requests:
 
 ```swift
 let adapter = await server.getAdapter()
 // The adapter:
-// - Parses MCP notification params → ChannelEvent
-// - Serializes events to <channel> XML tags
-// - Filters sensitive metadata
+// - Records ingested ChannelEvents
+// - Parses Claude Code's permission_request params into PermissionRequest
 ```
+
+Before an event is sent, the server drops `meta` keys that are not identifiers
+(letters, digits, `_`) or are `__proto__`, `constructor` or `prototype`, and refuses
+content over `maxPayloadSize`. `serializeChannelTag(channel:content:meta:)` renders a
+`<channel>` tag with its content XML-escaped.

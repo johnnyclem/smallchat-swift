@@ -51,10 +51,17 @@ public struct SmallChatManifest: Sendable, Codable {
 
 /// Compiler configuration within a manifest.
 public struct ManifestCompilerConfig: Sendable, Codable {
-    /// Embedder type: "onnx" or "local".
+    /// Embedder type: "onnx" or "hash" ("local" is the 0.x name of "hash").
     public let embedder: String?
-    /// Deduplication threshold (0-1, default 0.95).
+    /// Cosine similarity at or above which two distinct tools are a
+    /// duplicate (0-1, default 0.95): a compile error unless
+    /// `allowDuplicates` is set.
+    public let duplicateThreshold: Double?
+    /// The 0.x name of `duplicateThreshold` (tools are no longer merged).
+    /// Read only when `duplicateThreshold` is absent.
     public let deduplicationThreshold: Double?
+    /// Keep near-duplicate tools as a warning instead of a compile error.
+    public let allowDuplicates: Bool?
     /// Collision warning threshold (0-1, default 0.89).
     public let collisionThreshold: Double?
     /// Enable semantic overload generation.
@@ -64,16 +71,25 @@ public struct ManifestCompilerConfig: Sendable, Codable {
 
     public init(
         embedder: String? = nil,
+        duplicateThreshold: Double? = nil,
         deduplicationThreshold: Double? = nil,
+        allowDuplicates: Bool? = nil,
         collisionThreshold: Double? = nil,
         generateSemanticOverloads: Bool? = nil,
         semanticOverloadThreshold: Double? = nil
     ) {
         self.embedder = embedder
+        self.duplicateThreshold = duplicateThreshold
         self.deduplicationThreshold = deduplicationThreshold
+        self.allowDuplicates = allowDuplicates
         self.collisionThreshold = collisionThreshold
         self.generateSemanticOverloads = generateSemanticOverloads
         self.semanticOverloadThreshold = semanticOverloadThreshold
+    }
+
+    /// `duplicateThreshold`, else the 0.x `deduplicationThreshold`.
+    public var effectiveDuplicateThreshold: Double? {
+        duplicateThreshold ?? deduplicationThreshold
     }
 }
 
@@ -103,21 +119,27 @@ public struct ManifestOutputConfig: Sendable, Codable {
 }
 
 /// Compiler hints for a specific tool.
+///
+/// Decoding accepts @smallchat/core's spellings too (`pinSelector`,
+/// `vendorMeta`) and keeps the hints object verbatim (`json`), which is
+/// what artifact format 1.0 records.
 public struct CompilerHint: Sendable, Codable, Equatable {
-    /// Selector hint override.
+    /// Selector hint override: appended to the text the tool's selector embeds.
     public let selectorHint: String?
-    /// Pinned canonical selector (bypasses embedding).
+    /// Pinned canonical selector (`pinSelector`): the tool's selector name, taken literally.
     public let pinnedSelector: String?
-    /// Alternative names that resolve to this tool.
+    /// Phrases that resolve to this tool; each gets its own selector.
     public let aliases: [String]?
-    /// Priority multiplier (>1.0 = boosted).
+    /// Priority multiplier. Ignored by dispatch (ranking is by similarity only).
     public let priority: Double?
-    /// Mark as preferred for its selector group.
+    /// Mark as preferred for its selector group (collision reports).
     public let preferred: Bool?
     /// Exclude from compilation.
     public let exclude: Bool?
     /// Vendor-specific metadata.
     public let vendorMetadata: [String: String]?
+    /// The hints object as decoded (empty when built in code).
+    public let json: [String: AnyCodableValue]
 
     public init(
         selectorHint: String? = nil,
@@ -135,17 +157,60 @@ public struct CompilerHint: Sendable, Codable, Equatable {
         self.preferred = preferred
         self.exclude = exclude
         self.vendorMetadata = vendorMetadata
+        self.json = [:]
+    }
+
+    public init(from decoder: Decoder) throws {
+        let object = try decoder.singleValueContainer().decode([String: AnyCodableValue].self)
+        json = object
+        selectorHint = object["selectorHint"]?.stringValue
+        pinnedSelector = object["pinSelector"]?.stringValue ?? object["pinnedSelector"]?.stringValue
+        aliases = object["aliases"]?.stringArray
+        priority = object["priority"]?.numberValue
+        preferred = object["preferred"]?.boolValue
+        exclude = object["exclude"]?.boolValue
+        vendorMetadata = (object["vendorMeta"] ?? object["vendorMetadata"])?.stringDictionary
+    }
+
+    /// The hints as a JSON object: verbatim when decoded, otherwise in
+    /// @smallchat/core's spelling.
+    public var jsonValue: [String: AnyCodableValue] {
+        if !json.isEmpty { return json }
+        var o: [String: AnyCodableValue] = [:]
+        if let selectorHint { o["selectorHint"] = .string(selectorHint) }
+        if let pinnedSelector { o["pinSelector"] = .string(pinnedSelector) }
+        if let aliases { o["aliases"] = .array(aliases.map { .string($0) }) }
+        if let priority { o["priority"] = .double(priority) }
+        if let preferred { o["preferred"] = .bool(preferred) }
+        if let exclude { o["exclude"] = .bool(exclude) }
+        if let vendorMetadata { o["vendorMeta"] = .dict(vendorMetadata.mapValues { .string($0) }) }
+        return o
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(jsonValue)
+    }
+
+    public static func == (lhs: CompilerHint, rhs: CompilerHint) -> Bool {
+        lhs.jsonValue == rhs.jsonValue
     }
 }
 
 /// Provider-level compiler hints.
+///
+/// Decoding accepts @smallchat/core's spellings too (`namespace`,
+/// `selectorHint`) and keeps the hints object verbatim (`json`).
 public struct ProviderCompilerHints: Sendable, Codable, Equatable {
-    /// Default priority for all tools from this provider.
+    /// Default priority for all tools from this provider (ignored by dispatch).
     public let defaultPriority: Double?
-    /// Namespace prefix for selectors.
+    /// Namespace prefix for selectors (`namespace`): selectors become `<namespace>.<tool>`.
     public let namespacePrefix: String?
-    /// Semantic context hint for the provider.
+    /// Semantic context (`selectorHint`): appended to the embedding text of
+    /// every tool of this provider that has no selectorHint of its own.
     public let semanticContext: String?
+    /// The hints object as decoded (empty when built in code).
+    public let json: [String: AnyCodableValue]
 
     public init(
         defaultPriority: Double? = nil,
@@ -155,6 +220,65 @@ public struct ProviderCompilerHints: Sendable, Codable, Equatable {
         self.defaultPriority = defaultPriority
         self.namespacePrefix = namespacePrefix
         self.semanticContext = semanticContext
+        self.json = [:]
+    }
+
+    public init(from decoder: Decoder) throws {
+        let object = try decoder.singleValueContainer().decode([String: AnyCodableValue].self)
+        json = object
+        defaultPriority = object["defaultPriority"]?.numberValue
+        namespacePrefix = object["namespace"]?.stringValue ?? object["namespacePrefix"]?.stringValue
+        semanticContext = object["selectorHint"]?.stringValue ?? object["semanticContext"]?.stringValue
+    }
+
+    /// The hints as a JSON object: verbatim when decoded, otherwise in
+    /// @smallchat/core's spelling.
+    public var jsonValue: [String: AnyCodableValue] {
+        if !json.isEmpty { return json }
+        var o: [String: AnyCodableValue] = [:]
+        if let defaultPriority { o["defaultPriority"] = .double(defaultPriority) }
+        if let namespacePrefix { o["namespace"] = .string(namespacePrefix) }
+        if let semanticContext { o["selectorHint"] = .string(semanticContext) }
+        return o
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(jsonValue)
+    }
+
+    public static func == (lhs: ProviderCompilerHints, rhs: ProviderCompilerHints) -> Bool {
+        lhs.jsonValue == rhs.jsonValue
+    }
+}
+
+extension AnyCodableValue {
+    var stringValue: String? {
+        if case .string(let s) = self { return s }
+        return nil
+    }
+
+    var boolValue: Bool? {
+        if case .bool(let b) = self { return b }
+        return nil
+    }
+
+    var numberValue: Double? {
+        switch self {
+        case .int(let i): return Double(i)
+        case .double(let d): return d
+        default: return nil
+        }
+    }
+
+    var stringArray: [String]? {
+        guard case .array(let items) = self else { return nil }
+        return items.compactMap(\.stringValue)
+    }
+
+    var stringDictionary: [String: String]? {
+        guard case .dict(let object) = self else { return nil }
+        return object.compactMapValues(\.stringValue)
     }
 }
 

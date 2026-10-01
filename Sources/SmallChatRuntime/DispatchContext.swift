@@ -1,52 +1,15 @@
+import Foundation
 import SmallChatCore
 
-// MARK: - Fallback Types
+// MARK: - RegisteredTool
 
-/// Fallback step in the forwarding chain
-public struct FallbackStep: Sendable {
-    public let strategy: FallbackStrategy
-    public let tried: String
-    public let result: FallbackResult
-
-    public enum FallbackStrategy: String, Sendable {
-        case superclass
-        case broadenedSearch = "broadened_search"
-        case llmDisambiguate = "llm_disambiguate"
-    }
-
-    public enum FallbackResult: String, Sendable {
-        case hit
-        case miss
-    }
-
-    public init(strategy: FallbackStrategy, tried: String, result: FallbackResult) {
-        self.strategy = strategy
-        self.tried = tried
-        self.result = result
-    }
-}
-
-/// Result of the fallback chain -- returned instead of throwing when no exact match is found.
-public struct FallbackChainResult: Sendable {
-    public let tool: String
-    public let message: String
-    public let intent: String
-    public let nearestSelectors: [SelectorMatch]
-    public let fallbackSteps: [FallbackStep]
-
-    public init(
-        tool: String,
-        message: String,
-        intent: String,
-        nearestSelectors: [SelectorMatch],
-        fallbackSteps: [FallbackStep]
-    ) {
-        self.tool = tool
-        self.message = message
-        self.intent = intent
-        self.nearestSelectors = nearestSelectors
-        self.fallbackSteps = fallbackSteps
-    }
+/// One executable tool in the dispatch index.
+public struct RegisteredTool: Sendable {
+    /// Canonical tool id `<providerId>/<toolName>`
+    public let id: String
+    public let imp: any ToolIMP
+    /// Selector canonicals that dispatch to this tool
+    public internal(set) var selectors: [String]
 }
 
 // MARK: - DispatchContext
@@ -54,8 +17,11 @@ public struct FallbackChainResult: Sendable {
 /// DispatchContext -- the runtime context for tool dispatch.
 ///
 /// Holds the selector table, resolution cache, tool classes (providers),
-/// vector index, and protocol registry. This is the environment in which
-/// toolkit_dispatch operates.
+/// vector index, protocol registry, intent pins and the dispatch policy
+/// configuration, plus the dispatch index (selector -> classes, tool id ->
+/// tool). `resolve(_:)` chooses a tool and never executes;
+/// `dispatchById(_:args:)` runs exactly the named tool; `dispatch` is
+/// resolve-then-run under the same policy.
 public actor DispatchContext {
     public let selectorTable: SelectorTable
     public let cache: ResolutionCache
@@ -64,11 +30,35 @@ public actor DispatchContext {
     public let selectorNamespace: SelectorNamespace
     public let intentPins: IntentPinRegistry
     public let dispatchConfig: DispatchConfig
+    /// LLM client for verification, decomposition and refinement questions.
+    public let llmClient: any LLMClient
+    /// Opt-in semantic rate limiter (nil unless `RuntimeOptions.rateLimiter` is set).
+    public let rateLimiter: SemanticRateLimiter?
+    /// contentHash of the artifact the tools came from, recorded in every proof.
+    public let artifactHash: String?
+    /// Records accepted and refined dispatches, when set.
+    public let observer: DispatchObserver?
 
     private var toolClasses: [String: ToolClass] = [:]
+    /// Class names in registration order (resolution walks classes in it).
+    private var classOrder: [String] = []
     private var protocols: [String: ToolProtocolDef] = [:]
-    /// All tool IMPs indexed by their selector canonical name
-    private var toolIndex: [String: [ToolCandidate]] = [:]
+    /// Selector canonical -> the classes that declare it (directly or through a superclass).
+    private var selectorToClasses: [String: [ToolClass]] = [:]
+    /// Canonical tool id -> the one IMP it names (O(1) dispatch by id).
+    private var toolsById: [String: RegisteredTool] = [:]
+    /// Ids claimed by two different IMPs; dispatch by such an id is refused.
+    private var ambiguousIds: Set<String> = []
+    /// Every IMP the dispatch index reaches (by object identity).
+    private var registeredImps: Set<ObjectIdentifier> = []
+
+    /// Changes whenever the dispatch index does (register, unregister,
+    /// reindex). Resolution caches only what it decided under the current
+    /// generation, and a cached entry is used only while the generation it
+    /// was stamped with is current, so a resolution that raced a registry
+    /// change never leaves a stale decision behind. Starts at a random
+    /// value, so contexts sharing one cache don't take each other's entries.
+    public private(set) var registryGeneration = UInt64.random(in: 0...(UInt64.max / 2))
 
     public init(
         selectorTable: SelectorTable,
@@ -77,7 +67,11 @@ public actor DispatchContext {
         embedder: any Embedder,
         selectorNamespace: SelectorNamespace? = nil,
         intentPins: IntentPinRegistry? = nil,
-        dispatchConfig: DispatchConfig = DispatchConfig()
+        dispatchConfig: DispatchConfig = DispatchConfig(),
+        llmClient: any LLMClient = NoOpLLMClient(),
+        rateLimiter: SemanticRateLimiter? = nil,
+        artifactHash: String? = nil,
+        observer: DispatchObserver? = nil
     ) {
         self.selectorTable = selectorTable
         self.cache = cache
@@ -86,28 +80,154 @@ public actor DispatchContext {
         self.selectorNamespace = selectorNamespace ?? SelectorNamespace()
         self.intentPins = intentPins ?? IntentPinRegistry()
         self.dispatchConfig = dispatchConfig
+        self.llmClient = llmClient
+        self.rateLimiter = rateLimiter
+        self.artifactHash = artifactHash
+        self.observer = observer
     }
 
-    /// Register a provider (ToolClass).
+    /// The policy options every dispatch path evaluates against.
+    public var policyOptions: DispatchPolicyOptions {
+        DispatchPolicyOptions(
+            thresholds: dispatchConfig.thresholds,
+            requireLLMForSubHighDispatch: dispatchConfig.requireLLMForSubHighDispatch,
+            treatUnannotatedAsDestructive: dispatchConfig.treatUnannotatedAsDestructive
+        )
+    }
+
+    // MARK: - Registration
+
+    /// Register a provider (ToolClass). A class with the same name replaces
+    /// the one registered before: its selectors and tool ids are re-indexed
+    /// from scratch, so nothing of the old class stays reachable. Cached
+    /// resolutions are flushed either way, and a dispatch already in flight
+    /// does not run a tool the index no longer holds (see `dispatch`).
     ///
     /// Throws SelectorShadowingError if the class contains selectors that
     /// would shadow protected core selectors.
     public func registerClass(_ toolClass: ToolClass) async throws {
-        // Guard: check all selectors in this class against the namespace
         let ownSelectors = Array(toolClass.dispatchTable.keys)
         try selectorNamespace.assertNoShadowing(toolClass.name, ownSelectors)
 
+        let replaces = toolClasses[toolClass.name] != nil
         toolClasses[toolClass.name] = toolClass
-
-        // Index all methods for vector search
-        for (canonical, imp) in toolClass.dispatchTable {
-            let selector = await selectorTable.get(canonical)
-            guard let selector else { continue }
-
-            var candidates = toolIndex[canonical] ?? []
-            candidates.append(ToolCandidate(imp: imp, confidence: 1.0, selector: selector))
-            toolIndex[canonical] = candidates
+        if replaces {
+            reindex()
+        } else {
+            classOrder.append(toolClass.name)
+            indexClass(toolClass)
+            registryGeneration &+= 1
         }
+        await cache.flush()
+    }
+
+    /// Remove a provider by name: its tools leave the dispatch index and the
+    /// cache is flushed. Returns false when no class has that name.
+    @discardableResult
+    public func unregisterClass(_ name: String) async -> Bool {
+        guard toolClasses.removeValue(forKey: name) != nil else { return false }
+        classOrder.removeAll { $0 == name }
+        reindex()
+        await cache.flush()
+        return true
+    }
+
+    /// Rebuild the dispatch index from scratch. Call after a registry
+    /// mutation that changes existing classes (categories, overloads,
+    /// swizzling); `ToolRuntime` does.
+    public func reindex() {
+        selectorToClasses.removeAll()
+        toolsById.removeAll()
+        ambiguousIds.removeAll()
+        registeredImps.removeAll()
+        for name in classOrder {
+            if let toolClass = toolClasses[name] { indexClass(toolClass) }
+        }
+        registryGeneration &+= 1
+    }
+
+    private func indexClass(_ toolClass: ToolClass) {
+        for canonical in Set(toolClass.allSelectors()).sorted() {
+            var owners = selectorToClasses[canonical] ?? []
+            if !owners.contains(where: { $0 === toolClass }) { owners.append(toolClass) }
+            selectorToClasses[canonical] = owners
+            if let imp = toolClass.resolveSelector(Self.probe(canonical)) {
+                indexTool(imp, selector: canonical)
+            }
+        }
+        for (canonical, table) in toolClass.overloadTables.sorted(by: { $0.key < $1.key }) {
+            for entry in table.allOverloads() { indexTool(entry.imp, selector: canonical) }
+        }
+        // Overload resolution falls back to superclasses' tables; those
+        // variants are reachable (and runnable) through this class too.
+        var visited: Set<ObjectIdentifier> = [ObjectIdentifier(toolClass)]
+        var ancestor = toolClass.superclass
+        while let cls = ancestor, visited.insert(ObjectIdentifier(cls)).inserted {
+            for table in cls.overloadTables.values {
+                for entry in table.allOverloads() { registeredImps.insert(ObjectIdentifier(entry.imp)) }
+            }
+            ancestor = cls.superclass
+        }
+    }
+
+    private func indexTool(_ imp: any ToolIMP, selector: String) {
+        registeredImps.insert(ObjectIdentifier(imp))
+        let id = imp.toolId
+        if var existing = toolsById[id] {
+            if existing.imp === imp {
+                if !existing.selectors.contains(selector) {
+                    existing.selectors.append(selector)
+                    toolsById[id] = existing
+                }
+            } else {
+                ambiguousIds.insert(id)
+            }
+        } else {
+            toolsById[id] = RegisteredTool(id: id, imp: imp, selectors: [selector])
+        }
+    }
+
+    /// A selector value to look a canonical up in a class's dispatch table.
+    static func probe(_ canonical: String) -> ToolSelector {
+        ToolSelector(vector: [], canonical: canonical, parts: [], arity: 0)
+    }
+
+    // MARK: - Lookup
+
+    /// The classes that declare a selector canonical -- the resolution candidates.
+    public func classesForSelector(_ canonical: String) -> [ToolClass] {
+        selectorToClasses[canonical] ?? []
+    }
+
+    /// The tool a canonical id names, or nil when no tool has that id (or two
+    /// different tools claim it). O(1); no embedding.
+    public func getTool(_ toolId: String) -> RegisteredTool? {
+        ambiguousIds.contains(toolId) ? nil : toolsById[toolId]
+    }
+
+    /// Whether the dispatch index still reaches this IMP. A tool whose class
+    /// was unregistered, replaced or swizzled away is not registered.
+    public func isRegistered(_ imp: any ToolIMP) -> Bool {
+        registeredImps.contains(ObjectIdentifier(imp))
+    }
+
+    /// Whether two different tools claim this id (dispatch by it is refused).
+    public func isAmbiguousToolId(_ toolId: String) -> Bool {
+        ambiguousIds.contains(toolId)
+    }
+
+    /// Every registered tool id, sorted.
+    public func toolIds() -> [String] {
+        toolsById.keys.filter { !ambiguousIds.contains($0) }.sorted()
+    }
+
+    /// The tool a selector canonical dispatches to (its first owning class).
+    public func toolForSelector(_ canonical: String) async -> (imp: any ToolIMP, selector: ToolSelector, toolId: String)? {
+        guard let selector = await selectorTable.get(canonical) else { return nil }
+        for toolClass in classesForSelector(canonical) {
+            if let imp = toolClass.resolveSelector(selector) { return (imp, selector, imp.toolId) }
+        }
+        return nil
     }
 
     /// Register a protocol
@@ -117,120 +237,89 @@ public actor DispatchContext {
 
     /// ISA chain -- check protocol conformance for a selector
     public func resolveViaProtocol(_ selector: ToolSelector) -> ToolCandidate? {
-        for (_, toolClass) in toolClasses {
+        for name in classOrder {
+            guard let toolClass = toolClasses[name] else { continue }
             for proto in toolClass.protocols {
-                let isRequired = proto.requiredSelectors.contains {
-                    $0.canonical == selector.canonical
-                }
-                let isOptional = proto.optionalSelectors.contains {
-                    $0.canonical == selector.canonical
-                }
-
-                if isRequired || isOptional {
-                    if let imp = toolClass.resolveSelector(selector) {
-                        return ToolCandidate(imp: imp, confidence: 0.8, selector: selector)
-                    }
+                let isRequired = proto.requiredSelectors.contains { $0.canonical == selector.canonical }
+                let isOptional = proto.optionalSelectors.contains { $0.canonical == selector.canonical }
+                if isRequired || isOptional, let imp = toolClass.resolveSelector(selector) {
+                    return ToolCandidate(imp: imp, confidence: 0.8, selector: selector)
                 }
             }
         }
         return nil
     }
 
-    /// Forwarding chain -- slow path when no compiled tool matches.
-    ///
-    /// Instead of throwing immediately, walks a fallback chain:
-    ///  1. Superclass traversal -- check superclass dispatch tables across all classes
-    ///  2. Broadened vector search -- lower the similarity threshold to find near-misses
-    ///  3. LLM disambiguation stub -- placeholder for Phase 3 LLM-assisted resolution
-    ///  4. Return a stub result inviting the caller to search, rather than crashing
-    public func forward(
-        _ selector: ToolSelector,
-        intent: String,
-        args: [String: any Sendable]?
-    ) async throws -> ToolResult {
-        var fallbackSteps: [FallbackStep] = []
-
-        // Step 1: SUPERCLASS TRAVERSAL -- walk isa chains for a match
-        for toolClass in getClasses() {
-            guard let sup = toolClass.superclass else { continue }
-
-            if let imp = sup.resolveSelector(selector) {
-                fallbackSteps.append(FallbackStep(
-                    strategy: .superclass,
-                    tried: "\(toolClass.name) -> \(sup.name)",
-                    result: .hit
-                ))
-                await cache.store(selector, imp: imp, confidence: 0.6)
-                return try await executeWithArgs(imp, args: args ?? [:])
-            }
-
-            fallbackSteps.append(FallbackStep(
-                strategy: .superclass,
-                tried: "\(toolClass.name) -> \(sup.name)",
-                result: .miss
-            ))
-        }
-
-        // Step 2: BROADENED SEARCH -- lower threshold to find near-misses
-        let broadMatches = try await vectorIndex.search(query: selector.vector, topK: 5, threshold: 0.5)
-        if !broadMatches.isEmpty {
-            for match in broadMatches {
-                let matchSelector = await selectorTable.get(match.id)
-                guard let matchSelector else { continue }
-
-                for toolClass in getClasses() {
-                    if let imp = toolClass.resolveSelector(matchSelector) {
-                        fallbackSteps.append(FallbackStep(
-                            strategy: .broadenedSearch,
-                            tried: "\(match.id) (distance: \(String(format: "%.3f", match.distance)))",
-                            result: .hit
-                        ))
-                        let confidence = Double(1 - match.distance)
-                        await cache.store(selector, imp: imp, confidence: confidence)
-                        return try await executeWithArgs(imp, args: args ?? [:])
-                    }
-                }
-            }
-
-            fallbackSteps.append(FallbackStep(
-                strategy: .broadenedSearch,
-                tried: broadMatches.map(\.id).joined(separator: ", "),
-                result: .miss
-            ))
-        }
-
-        // Step 3: LLM DISAMBIGUATION -- Phase 3 stub
-        fallbackSteps.append(FallbackStep(
-            strategy: .llmDisambiguate,
-            tried: "LLM disambiguation (not yet implemented)",
-            result: .miss
-        ))
-
-        // Step 4: Return a stub instead of throwing
-        let nearest = try await vectorIndex.search(query: selector.vector, topK: 3, threshold: 0.5)
-
-        let fallbackResult = FallbackChainResult(
-            tool: "unknown",
-            message: nearest.isEmpty
-                ? "No match for \"\(intent)\"--want me to search?"
-                : "No exact match for \"\(intent)\". Nearest: \(nearest.map(\.id).joined(separator: ", ")). Want me to search?",
-            intent: intent,
-            nearestSelectors: nearest,
-            fallbackSteps: fallbackSteps
-        )
-
-        return ToolResult(
-            content: AnyCodableValue.string(fallbackResult.message),
-            isError: false,
-            metadata: [
-                "fallback": true as any Sendable,
-                "stepsAttempted": fallbackSteps.count as any Sendable,
-            ]
-        )
+    /// All registered tool classes, in registration order.
+    public func getClasses() -> [ToolClass] {
+        classOrder.compactMap { toolClasses[$0] }
     }
 
-    /// Get all registered tool classes
-    public func getClasses() -> [ToolClass] {
-        Array(toolClasses.values)
+    // MARK: - Pins
+
+    /// The pinned canonicals that apply to a tool: every pinned selector the
+    /// tool is reachable through -- its own selectors, the overload tables it
+    /// is a variant in, and `via`, the selector a candidate matched through.
+    func pinnedCanonicals(of toolId: String, via: String?) -> [String] {
+        guard intentPins.size > 0 else { return [] }
+        var reachable = Set(toolsById[toolId]?.selectors ?? [])
+        if let via { reachable.insert(via) }
+        return intentPins.pinnedCanonicals().filter { reachable.contains($0) }
+    }
+
+    /// Whether any intent pin applies to this tool.
+    public func isPinnedTool(_ toolId: String, via: String? = nil) -> Bool {
+        !pinnedCanonicals(of: toolId, via: via).isEmpty
+    }
+
+    /// How the intent pins apply to one tool for one intent. `ownSimilarity`
+    /// computes the cosine similarity between the intent's own embedding and
+    /// a selector (for `elevated` pins).
+    func pinStates(
+        for toolId: String,
+        intent: String,
+        via: String?,
+        ownSimilarity: (ToolSelector) async throws -> Double
+    ) async throws -> [PinState] {
+        var states: [PinState] = []
+        for canonical in pinnedCanonicals(of: toolId, via: via) {
+            guard let pin = intentPins.getPin(canonical) else { continue }
+            let phrase = intentPins.matchesPinnedPhrase(canonical, intent: intent)
+            if pin.policy == .exact {
+                states.append(PinState(canonical: canonical, policy: .exact, satisfied: phrase))
+                continue
+            }
+            var similarity: Double?
+            if !phrase, let pinned = await selectorTable.get(canonical) {
+                similarity = try await ownSimilarity(pinned)
+            }
+            let verdict = intentPins.checkSimilarity(candidateCanonical: canonical, similarity: similarity ?? 0, intent: intent)
+            states.append(PinState(
+                canonical: canonical,
+                policy: .elevated,
+                satisfied: phrase || verdict?.verdict == .accept,
+                similarity: similarity,
+                requiredThreshold: verdict?.requiredThreshold
+            ))
+        }
+        return states
+    }
+
+    // MARK: - Proofs
+
+    /// A new proof stamped with this context's thresholds, guards and identity.
+    public func newProof(intent: String?) -> ResolutionProof {
+        ResolutionProof(
+            intent: intent,
+            thresholds: dispatchConfig.thresholds,
+            guards: ProofGuards(
+                requireLLMForSubHighDispatch: dispatchConfig.requireLLMForSubHighDispatch,
+                strict: dispatchConfig.strict,
+                llmVerifier: llmClient.providesVerification,
+                treatUnannotatedAsDestructive: dispatchConfig.treatUnannotatedAsDestructive
+            ),
+            embedder: embedder.fingerprint,
+            artifactHash: artifactHash
+        )
     }
 }

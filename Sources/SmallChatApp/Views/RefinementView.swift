@@ -41,7 +41,7 @@ struct RefinementView: View {
         VStack(alignment: .leading, spacing: 12) {
 
             HStack(alignment: .center, spacing: 8) {
-                TierBadge(tier: refinement.proof.finalTier, confidence: nil)
+                TierBadge(tier: refinement.proof.tier, confidence: nil)
                 Text("for intent: \"\(refinement.originalIntent)\"")
                     .font(.system(.body, design: .default))
             }
@@ -82,18 +82,20 @@ struct RefinementView: View {
             }
 
             if !refinement.proof.steps.isEmpty {
-                GroupBox("Proof trace (\(refinement.proof.totalElapsedMicroseconds)µs total)") {
+                GroupBox("Proof trace (\(String(format: "%.2f", refinement.proof.timings.totalMs)) ms total)") {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(refinement.proof.steps.enumerated()), id: \.offset) { _, step in
+                        ForEach(Array(refinement.proof.steps.enumerated()), id: \.offset) { index, step in
                             HStack {
-                                Text(step.stage)
+                                Text(step.stage.rawValue)
                                     .font(.system(.caption, design: .monospaced))
                                     .foregroundStyle(.primary)
-                                Text(step.detail)
+                                Text(step.decision)
                                     .font(.system(.caption, design: .monospaced))
                                     .foregroundStyle(.secondary)
                                 Spacer()
-                                Text("\(step.elapsedMicroseconds)µs")
+                                Text(refinement.proof.timings.stepsMs.indices.contains(index)
+                                     ? String(format: "%.2f ms", refinement.proof.timings.stepsMs[index])
+                                     : "")
                                     .font(.system(.caption, design: .monospaced))
                                     .foregroundStyle(.secondary)
                             }

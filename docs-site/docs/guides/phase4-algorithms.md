@@ -5,7 +5,7 @@ title: Phase 4 Algorithm Limitations
 
 # Phase 4 Algorithm Limitations
 
-SmallChatCompaction and SmallChatMemex were designed around a "heuristics now, LLM later" principle. Their algorithms are deterministic and dependency-free — they match the TypeScript reference shapes — so richer semantic implementations can land iteratively without changing the public API surface. This guide documents what each heuristic catches, what it misses, and how to upgrade.
+SmallChatCompaction and SmallChatMemex were designed around a "heuristics now, LLM later" principle. Their algorithms call no model and have no external dependencies, and their API shapes follow smallchat's 0.4-era TypeScript modules (TS PRs #57 and #60), so richer semantic implementations can land without changing the public API surface. (@shorthand/core 1.0 has since reworked its compaction and verification; these modules are not a port of it.) This guide documents what each heuristic catches, what it misses, and how to upgrade.
 
 ## SmallChatCompaction — Contradiction Detection
 
@@ -131,7 +131,7 @@ For the sentence-initial false-positive problem, `MemexConfig.minClaimLength` co
 
 The Memex contradiction pass (`detectContradictions(claims:)`) mirrors the Compaction heuristic with one difference: the Jaccard gate is **0.5** (vs 0.6 in Compaction) because claim texts are typically shorter and sparser than full compaction items.
 
-Limitations and upgrade path are the same as [SmallChatCompaction](#smallchatchatcompaction--contradiction-detection). To replace the result, rebuild the `KnowledgeBase` with a custom `contradictions` array after `compile(_:)` returns.
+Limitations and upgrade path are the same as [SmallChatCompaction](#smallchatcompaction--contradiction-detection). To replace the result, rebuild the `KnowledgeBase` with a custom `contradictions` array after `compile(_:)` returns.
 
 ---
 
@@ -143,7 +143,7 @@ Without embeddings, `MemexResolver` falls back to Jaccard similarity over token 
 
 ### Upgrade path
 
-Post-compile, embed each claim and insert into a vector index:
+Post-compile, embed each claim and insert it into a vector index:
 
 ```swift
 import SmallChatMemex
@@ -155,14 +155,16 @@ let kb = compiler.compile(sources)
 let embedder = LocalEmbedder()
 let index = MemoryVectorIndex()
 for claim in kb.claims {
-    let vector = embedder.embed(claim.text)
-    index.insert(vector, id: claim.id)
+    await index.insert(id: claim.id, vector: try await embedder.embed(claim.text))
 }
 
-// Semantic query — returns claim IDs ranked by cosine similarity.
-let queryVector = embedder.embed("deployment failure")
-let hits = index.query(queryVector, limit: 5)
+// Query: claim ids ranked by cosine similarity (distance = 1 - similarity).
+let queryVector = try await embedder.embed("deployment failure")
+let hits = await index.search(query: queryVector, topK: 5, threshold: 0.3)
 ```
+
+`LocalEmbedder` matches words and character trigrams, not meaning; for paraphrases, use
+an `Embedder` backed by a sentence-embedding model.
 
 ---
 
@@ -176,4 +178,12 @@ let hits = index.query(queryVector, limit: 5)
 | SmallChatMemex (contradictions) | Literal-negation + Jaccard ≥ 0.5 | Obvious surface flips | Semantic disagreement, paraphrase | Rebuild `KnowledgeBase.contradictions` |
 | SmallChatMemex (EMBED stage) | Omitted | — | Semantic similarity | Wire `SmallChatEmbedding` post-compile |
 
-SmallChatShorthand, SmallChatImportance, and SmallChatCRDT carry no comparable limitations: Shorthand is a primitive, CRDT correctness is mathematically guaranteed, and Importance's three signals (recency exponential decay, co-mention Jaccard centrality, novelty) are straightforward and fully documented in source.
+SmallChatShorthand and SmallChatImportance carry no comparable heuristics: Shorthand is a set of primitives, and Importance's three signals (recency exponential decay, co-mention Jaccard centrality, novelty) are documented in source.
+
+SmallChatCRDT has a known defect rather than a heuristic: `LWWMap` orders two entries for
+a key by timestamp, then by replica id, so two entries with the same timestamp *and*
+replica (two writes in one tick, or a set and a remove at the same timestamp) keep
+whichever side the merge started from, and such a remove is ignored. Merges are then not
+commutative. Give every write of a replica its own timestamp (a Lamport counter) until
+this is fixed. `ORSet`, `GCounter` and `VectorClock` merge by set union and per-replica
+maximum.

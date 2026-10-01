@@ -4,6 +4,7 @@ import FoundationNetworking
 #endif
 import Testing
 @testable import SmallChatAgents
+import SmallChatChannel
 
 /// What stenographer's channel sink posts (delivery.ts `createSinkTransport`).
 private let objectionBody = #"""
@@ -158,14 +159,85 @@ struct ObjectionRoutingTests {
         #expect(model.directConversation(with: "live-1")?.messages.contains { $0.author == .stenographer } == true)
     }
 
-    @Test("the bridge secret is generated once and persisted")
-    func secret() throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("m-\(UUID().uuidString).json")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let first = MessengerModel(store: MessengerStore(url: url), transport: MockAgentTransport(), scanner: nil)
-        #expect(first.settings.objectionChannelSecret.count == 64)
-        let second = MessengerModel(store: MessengerStore(url: url), transport: MockAgentTransport(), scanner: nil)
-        #expect(second.settings.objectionChannelSecret == first.settings.objectionChannelSecret)
+    @Test("two distinct secrets are generated once and kept out of messenger.json")
+    func secrets() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("m-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("messenger.json")
+        let store = MessengerStore(url: url, secrets: FileSecretStore(directory: dir.appendingPathComponent("secrets")))
+        let first = MessengerModel(store: store, transport: MockAgentTransport(), scanner: nil)
+        first.settings.signerIdentity = "johnny"  // forces a save
+        await first.flushPersistence()
+        #expect(first.channelSecret.count == 64)
+        #expect(first.notarySecret.count == 64)
+        #expect(first.notarySecret != first.channelSecret, "the notary secret is never the channel secret")
+
+        let json = try String(contentsOf: url, encoding: .utf8)
+        #expect(!json.contains(first.channelSecret) && !json.contains(first.notarySecret))
+        for name in ["channel-secret", "notary-secret"] {
+            let attributes = try FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent("secrets/\(name)").path)
+            #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+        }
+
+        let second = MessengerModel(store: store, transport: MockAgentTransport(), scanner: nil)
+        #expect(second.channelSecret == first.channelSecret)
+        #expect(second.notarySecret == first.notarySecret)
+    }
+
+    @Test("a secret an older build wrote into messenger.json is scrubbed and replaced")
+    func legacySecretScrubbed() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("m-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("messenger.json")
+        let legacy = String(repeating: "ab", count: 32)
+        try #"{"agents":{},"conversations":[],"stenographerSessions":{},"settings":{"objectionChannelSecret":"\#(legacy)","signerIdentity":"johnny"}}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        let store = MessengerStore(url: url, secrets: FileSecretStore(directory: dir.appendingPathComponent("secrets")))
+        let model = MessengerModel(store: store, transport: MockAgentTransport(), scanner: nil)
+        await model.flushPersistence()
+        #expect(model.settings.signerIdentity == "johnny")
+        #expect(model.channelSecret != legacy && model.notarySecret != legacy)
+        #expect(try !String(contentsOf: url, encoding: .utf8).contains(legacy))
+    }
+
+    @Test("the stenographer launch command reads the secrets at launch, never inlines them")
+    func launchCommand() {
+        let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("s-\(UUID().uuidString)"))
+        defer { try? FileManager.default.removeItem(at: secrets.directory) }
+        let model = MessengerModel(store: MessengerStore(url: nil, secrets: secrets), transport: MockAgentTransport(), scanner: nil)
+        let command = model.stenographerLaunchCommand
+        #expect(!command.contains(model.channelSecret))
+        #expect(!command.contains(model.notarySecret))
+        #expect(command.contains("SMALLCHAT_CHANNEL_SECRET=\"$("))
+        #expect(command.contains("STENOGRAPHER_NOTARY_SECRET=\"$("))
+        #expect(command.contains("npx -y @stenographer/core start"))
+        #expect(command.contains("--objection-channel http://127.0.0.1:\(MessengerSettings.defaultObjectionChannelPort)"))
+        #expect(command.contains("--rest-port \(MessengerSettings.defaultStenographerRestPort)"))
+    }
+}
+
+@Suite("Secret stores")
+struct SecretStoreTests {
+    @Test("file store: 0600 files in a 0700 directory, quoted shell reads")
+    func fileStore() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("it's-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = FileSecretStore(directory: dir)
+        #expect(store.read(.notary) == nil)
+        try store.write("n0tary", for: .notary)
+        #expect(store.read(.notary) == "n0tary")
+        #expect(store.read(.channel) == nil)
+        let dirMode = (try FileManager.default.attributesOfItem(atPath: dir.path)[.posixPermissions] as? NSNumber)?.intValue
+        #expect(dirMode == 0o700)
+        let expression = try #require(store.shellExpression(for: .notary))
+        #expect(expression == "$(cat '\(dir.path.replacingOccurrences(of: "'", with: "'\\''"))/notary-secret')")
+    }
+
+    @Test("each secret has its own stenographer variable")
+    func variables() {
+        #expect(MessengerSecret.channel.environmentVariable == "SMALLCHAT_CHANNEL_SECRET")
+        #expect(MessengerSecret.notary.environmentVariable == "STENOGRAPHER_NOTARY_SECRET")
     }
 }
 
@@ -193,5 +265,18 @@ struct SettingsCompatibilityTests {
         settings.recentDays = nil
         let data = try JSONEncoder().encode(settings)
         #expect(try JSONDecoder().decode(MessengerSettings.self, from: data).recentDays == nil)
+    }
+}
+
+@Suite("Channel bridge secret comparison")
+struct ChannelBridgeSecretTests {
+
+    @Test("a secret padded with 256 NUL bytes does not match")
+    func paddedSecretRejected() {
+        let secret = "s3cret"
+        #expect(!ChannelBridgeProtocol.constantTimeEqual(secret + String(repeating: "\u{0}", count: 256), secret))
+        #expect(!ChannelBridgeProtocol.constantTimeEqual(secret, secret + String(repeating: "\u{0}", count: 512)))
+        #expect(ChannelBridgeProtocol.constantTimeEqual(secret, secret))
+        #expect(!ChannelBridgeProtocol.constantTimeEqual(secret, "s3creT"))
     }
 }

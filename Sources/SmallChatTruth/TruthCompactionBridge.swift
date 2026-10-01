@@ -11,10 +11,18 @@ import SmallChatCompaction
 // The contract (§7):
 //   - Active TB      → ground truth: compacted, citable.
 //   - Contested TB   → carried WITH its contesting UVs; the dispute is
-//                      never resolved silently in either direction.
+//                      never resolved silently in either direction. An
+//                      active TB with an open contesting UV is carried as
+//                      contested too, even before a TRANSITION says so.
 //   - Open UV        → flagged `UNVERIFIED`; compaction never promotes a
-//                      UV into something that reads as proven.
-//   - History        → excluded; stale copies are displaced on re-sync.
+//                      UV into something that reads as proven, and never
+//                      drops one.
+//   - History        → excluded (struck, overridden, refuted, verified,
+//                      and any unknown or missing status); stale copies
+//                      are displaced on re-sync.
+//
+// Rendering uses the suite's frozen markers (`[TB]`, `[TB ⚠ CONTESTED]`,
+// `[UV — UNVERIFIED]`) and escapes them inside ledger fields.
 
 public enum TruthCompaction {
 
@@ -27,29 +35,52 @@ public enum TruthCompaction {
 
     // MARK: Rendering
 
+    /// Ledger fields are untrusted text: one line, no forged markers.
+    static func field(_ text: String) -> String {
+        TruthEscaping.escapeUntrusted(text, singleLine: true)
+    }
+
+    private static func signature(_ tb: TruthTbEntry) -> String {
+        tb.signedBy.map { "signed: \(field($0))" } ?? "unsigned"
+    }
+
     static func render(tb: TruthTbEntry) -> String {
-        "[TB] \(tb.claim) (signed: \(tb.signedBy ?? tb.author), evidence: \(tb.evidence.count))"
+        "[TB] \(field(tb.claim)) (\(signature(tb)), evidence: \(tb.evidence.count))"
     }
 
     static func render(contested tb: TruthTbEntry, contestedBy: [TruthUvEntry]) -> String {
-        var text = "[TB ⚠ CONTESTED] \(tb.claim) (signed: \(tb.signedBy ?? tb.author))"
+        var text = "[TB ⚠ CONTESTED] \(field(tb.claim)) (\(signature(tb)))"
         for uv in contestedBy {
-            text += "\n  disputed by \(unverifiedMarker) \(uv.assertion) (\(uv.author))"
+            text += "\n  disputed by \(unverifiedMarker) \(field(uv.assertion)) (\(field(uv.author)))"
         }
         return text
     }
 
     static func render(uv: TruthUvEntry) -> String {
-        "\(unverifiedMarker) \(uv.assertion) (basis: \(uv.basis); verify by \(uv.verifyBy.kind.rawValue): \(uv.verifyBy.value))"
+        let contests = uv.contests.map { "; contests \(field($0))" } ?? ""
+        return "\(unverifiedMarker) \(field(uv.assertion)) (basis: \(field(uv.basis)); verify by \(field(uv.verifyBy.kind.rawValue)): \(field(uv.verifyBy.value))\(contests))"
+    }
+
+    /// The open UVs rendered on their own: every one that doesn't ride a
+    /// contested TB in the selection — including a UV contesting a TB that
+    /// isn't current truth, or isn't loaded. Each open UV appears exactly
+    /// once, beside its TB or here; none is ever dropped.
+    static func standaloneUnverified(_ selection: TruthSelection) -> [TruthUvEntry] {
+        let attached = selection.attachedUvIds
+        return selection.unverified.filter { !attached.contains($0.id) }
     }
 
     /// Render a truth selection as the markdown block appended to
-    /// compacted summaries. Markers are load-bearing: `[TB]` may be relied
-    /// on, `[TB ⚠ CONTESTED]` carries its dispute, and the UNVERIFIED
-    /// marker must never be dropped by deeper compaction.
+    /// compacted summaries and given to the stenographer as its brief.
+    /// Markers are load-bearing: `[TB]` may be relied on, `[TB ⚠ CONTESTED]`
+    /// carries its dispute, and the UNVERIFIED marker must never be dropped
+    /// by deeper compaction. Ledger fields are escaped
+    /// (`TruthEscaping.escapeUntrusted`), so a field can never forge a
+    /// marker or a line.
     public static func renderSection(_ selection: TruthSelection) -> String {
         var lines = ["## Asserted Truth (ledger)"]
-        if selection.groundTruth.isEmpty, selection.contested.isEmpty, selection.unverified.isEmpty {
+        let standalone = standaloneUnverified(selection)
+        if selection.groundTruth.isEmpty, selection.contested.isEmpty, standalone.isEmpty {
             lines.append("(no current truth entries)")
             return lines.joined(separator: "\n")
         }
@@ -59,8 +90,7 @@ public enum TruthCompaction {
         for pair in selection.contested {
             lines.append("- " + render(contested: pair.tombstone, contestedBy: pair.contestedBy))
         }
-        for uv in selection.unverified where uv.contests == nil {
-            // Contesting UVs already ride their TB above.
+        for uv in standalone {
             lines.append("- " + render(uv: uv))
         }
         return lines.joined(separator: "\n")
@@ -70,7 +100,9 @@ public enum TruthCompaction {
 
     /// Project current truth into compaction corpus items. These are the
     /// durable residue: append them to a corpus before compaction and
-    /// verify with `TruthInvariants.preserved(_:)` after.
+    /// verify with `TruthInvariants.preserved(_:)` after. A contested TB's
+    /// item carries its contesting UVs; every other open UV is an item of
+    /// its own.
     public static func compactionItems(_ selection: TruthSelection) -> [CompactionItem] {
         var items: [CompactionItem] = []
         for tb in selection.groundTruth {
@@ -82,7 +114,7 @@ public enum TruthCompaction {
                 text: render(contested: pair.tombstone, contestedBy: pair.contestedBy)
             ))
         }
-        for uv in selection.unverified where uv.contests == nil {
+        for uv in standaloneUnverified(selection) {
             items.append(CompactionItem(id: itemIdPrefix + uv.id, text: render(uv: uv)))
         }
         return items
@@ -107,25 +139,25 @@ public enum TruthCompaction {
         for tb in selection.groundTruth {
             records.append(InvariantRecord(
                 key: itemIdPrefix + tb.id,
-                value: "[TB] \(tb.claim)",
+                value: "[TB] \(field(tb.claim))",
                 confidence: .tb,
                 contested: false
             ))
         }
         for pair in selection.contested {
-            let disputes = pair.contestedBy.map(\.assertion).joined(separator: " | ")
+            let disputes = pair.contestedBy.map { field($0.assertion) }.joined(separator: " | ")
             let suffix = disputes.isEmpty ? "" : " — disputed: \(disputes)"
             records.append(InvariantRecord(
                 key: itemIdPrefix + pair.tombstone.id,
-                value: "[TB ⚠ CONTESTED] \(pair.tombstone.claim)\(suffix)",
+                value: "[TB ⚠ CONTESTED] \(field(pair.tombstone.claim))\(suffix)",
                 confidence: .tb,
                 contested: true
             ))
         }
-        for uv in selection.unverified where uv.contests == nil {
+        for uv in standaloneUnverified(selection) {
             records.append(InvariantRecord(
                 key: itemIdPrefix + uv.id,
-                value: "\(unverifiedMarker) \(uv.assertion)",
+                value: "\(unverifiedMarker) \(field(uv.assertion))",
                 confidence: .uv,
                 contested: false
             ))
@@ -142,8 +174,10 @@ public enum TruthInvariants {
     /// UV may lose its UNVERIFIED marker (silent promotion to proven).
     public static func preserved(_ selection: TruthSelection) -> CompactionVerifier.Invariant {
         let required = TruthCompaction.compactionItems(selection)
+        // Standalone UVs, and contested TBs that carry their disputing UVs
         let unverifiedIds = Set(
-            selection.unverified.filter { $0.contests == nil }.map { TruthCompaction.itemIdPrefix + $0.id }
+            TruthCompaction.standaloneUnverified(selection).map { TruthCompaction.itemIdPrefix + $0.id }
+                + selection.contested.filter { !$0.contestedBy.isEmpty }.map { TruthCompaction.itemIdPrefix + $0.tombstone.id }
         )
         return { _, after in
             let afterById = Dictionary(after.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })

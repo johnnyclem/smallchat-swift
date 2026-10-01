@@ -4,7 +4,8 @@ import SmallChatTruth
 // MARK: - Stenographer
 //
 // Sits in every chat. Preloaded from the project wiki's truth ledger
-// (stenographer's TB/UV JSONL export), it does two things:
+// (stenographer's truth format v2 export, one stream per writer), it does
+// two things:
 //
 //   1. Watches passively and for free: every message is checked locally
 //      against tombstoned literals (objections) and open unverified claims
@@ -30,11 +31,14 @@ public struct TruthLedgerSnapshot: Sendable, Equatable {
     public var entries: [TruthLedgerEntry]
     public var sources: [String]
     public var errors: [String]
+    /// A stream was refused (a bad hash, a broken chain): nothing was loaded.
+    public var refused: Bool
 
-    public init(entries: [TruthLedgerEntry] = [], sources: [String] = [], errors: [String] = []) {
+    public init(entries: [TruthLedgerEntry] = [], sources: [String] = [], errors: [String] = [], refused: Bool = false) {
         self.entries = entries
         self.sources = sources
         self.errors = errors
+        self.refused = refused
     }
 
     public var selection: TruthSelection { TruthWiki.selectCurrentTruth(entries) }
@@ -43,13 +47,18 @@ public struct TruthLedgerSnapshot: Sendable, Equatable {
         entries.compactMap { if case .tb(let tb) = $0 { return tb } else { return nil } }
     }
 
+    /// Open UVs a reader admits: heads-ups, never demands.
     public var openClaims: [TruthUvEntry] {
-        entries.compactMap { if case .uv(let uv) = $0, uv.status == .open { return uv } else { return nil } }
+        entries.compactMap { if case .uv(let uv) = $0, TruthWiki.classify($0) == .flag { return uv } else { return nil } }
     }
 
-    /// Load and merge wiki JSONL files (or directories of them). Later
-    /// files win for a repeated id, matching the append-only ledger rule.
-    public static func load(paths: [String]) -> TruthLedgerSnapshot {
+    /// Load and merge truth streams (wiki JSONL files, or directories of
+    /// them): each file is one writer's stream, folded on its own, and each
+    /// entry takes the most advanced status any file reached. If any file is
+    /// refused (a bad hash, a broken chain), nothing is loaded — a stream
+    /// that can't be read might hold the strike that matters — and the
+    /// errors say why.
+    public static func load(paths: [String], options: TruthReadOptions = TruthReadOptions()) -> TruthLedgerSnapshot {
         let fm = FileManager.default
         var files: [String] = []
         for raw in paths {
@@ -63,16 +72,17 @@ public struct TruthLedgerSnapshot: Sendable, Equatable {
                 files.append(path)
             }
         }
-        var lines: [String] = []
+        var streams: [(name: String, text: String)] = []
         for file in files {
             guard let text = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
-            lines += text.components(separatedBy: "\n")
+            streams.append((file, text))
         }
-        let parsed = TruthWiki.parse(lines: lines)
+        let parsed = TruthWiki.parseFiles(streams, options: options)
         return TruthLedgerSnapshot(
             entries: parsed.entries,
             sources: files,
-            errors: parsed.errors.map(\.description)
+            errors: parsed.errors.map(\.description),
+            refused: parsed.refused
         )
     }
 }
@@ -91,18 +101,23 @@ public enum Stenographer {
             notes.append(StenographerNote(
                 kind: .objection,
                 entryId: objection.tombstone.id,
-                text: "\(objection.summary)\n> \(objection.transcriptLine)"
+                text: "\(objection.summary)\n> \(TruthEscaping.escapeUntrusted(objection.transcriptLine, singleLine: true))"
             ))
         }
         for uv in ledger.openClaims where reliesOn(text, claim: uv.assertion) {
             notes.append(StenographerNote(
                 kind: .unverified,
                 entryId: uv.id,
-                text: "\(TruthCompaction.unverifiedMarker) This leans on an unverified claim: “\(uv.assertion)” "
-                    + "(basis: \(uv.basis)). Verify by \(uv.verifyBy.kind.rawValue): \(uv.verifyBy.value)"
+                text: "\(TruthCompaction.unverifiedMarker) This leans on an unverified claim: “\(field(uv.assertion))” "
+                    + "(basis: \(field(uv.basis))). Verify by \(field(uv.verifyBy.kind.rawValue)): \(field(uv.verifyBy.value))"
             ))
         }
         return notes
+    }
+
+    /// A ledger field as untrusted text: one line, no forged truth markers.
+    static func field(_ text: String) -> String {
+        TruthEscaping.escapeUntrusted(text, singleLine: true)
     }
 
     /// Conservative lexical overlap: most of the claim's content words
@@ -145,9 +160,11 @@ public enum Stenographer {
     }
 
     /// The transcript excerpt sent with a question, so the stenographer
-    /// answers about *this* chat.
+    /// answers about *this* chat. The transcript is untrusted text: a
+    /// message that reproduces a `[TB]` line or the truth heading is
+    /// escaped, so it can't pass for the ledger in the brief.
     public static func prompt(question: String, recent: [ChatMessage], nameFor: (MessageAuthor) -> String) -> String {
-        let lines = recent.suffix(30).map { "\(nameFor($0.author)): \($0.text)" }
+        let lines = recent.suffix(30).map { "\(field(nameFor($0.author))): \(TruthEscaping.escapeUntrusted($0.text))" }
         return """
         Recent transcript (oldest first):
         \(lines.joined(separator: "\n"))

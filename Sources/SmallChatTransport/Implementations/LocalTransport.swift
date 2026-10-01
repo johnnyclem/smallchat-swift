@@ -19,12 +19,11 @@ public actor LocalTransport: Transport {
     private var fallbackHandler: LocalHandler?
     private var connected: Bool = true
 
-    private static var counter = 0
+    private static let ids = TransportIDSequence(prefix: "local")
 
     /// Initialize with an optional fallback handler for unregistered tool names.
     public init(handler: LocalHandler? = nil) {
-        Self.counter += 1
-        self.id = "local-\(Self.counter)"
+        self.id = Self.ids.next()
         self.fallbackHandler = handler
     }
 

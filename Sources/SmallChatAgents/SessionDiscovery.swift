@@ -94,11 +94,53 @@ public struct DiscoveredSession: Sendable, Equatable {
     public var live: LiveSessionRecord?
 }
 
+/// Transcript summaries already read, keyed by path and checked against the
+/// file's size and modification time, so a rescan reads only the transcripts
+/// that changed. Shared by every copy of the scanner that holds it.
+public final class TranscriptSummaryCache: @unchecked Sendable {
+    private struct Entry {
+        let size: Int
+        let modified: Date?
+        let summary: TranscriptSummary?
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+    private var _reads = 0
+
+    public init() {}
+
+    /// Transcripts read from disk (cache misses) so far.
+    public var reads: Int { lock.withLock { _reads } }
+    /// Transcripts currently cached.
+    public var count: Int { lock.withLock { entries.count } }
+
+    func summary(path: String, size: Int, modified: Date?, read: () -> TranscriptSummary?) -> TranscriptSummary? {
+        if let hit = lock.withLock({ entries[path] }), hit.size == size, hit.modified == modified {
+            return hit.summary
+        }
+        let summary = read()
+        lock.withLock {
+            entries[path] = Entry(size: size, modified: modified, summary: summary)
+            _reads += 1
+        }
+        return summary
+    }
+
+    /// Forget transcripts that are gone.
+    func keep(only paths: Set<String>) {
+        lock.withLock { entries = entries.filter { paths.contains($0.key) } }
+    }
+}
+
 public struct ClaudeSessionScanner: Sendable {
     /// Claude Code's config directory (`~/.claude`, or `$CLAUDE_CONFIG_DIR`).
     public var claudeHome: URL
     /// Bytes read from each end of a transcript.
     public var windowBytes: Int = 128 * 1024
+    /// Summaries from earlier scans; a transcript is re-read only when its
+    /// size or modification time changed.
+    public var summaryCache = TranscriptSummaryCache()
     /// Liveness probe for registry pids (injectable for tests).
     public var isProcessAlive: @Sendable (Int32) -> Bool = ClaudeSessionScanner.processAlive
 
@@ -192,20 +234,29 @@ public struct ClaudeSessionScanner: Sendable {
     }
 
     /// Top-level transcripts in every project directory. Subagent
-    /// transcripts live in nested directories and are skipped.
+    /// transcripts live in nested directories and are skipped. Unchanged
+    /// transcripts come from `summaryCache`.
     public func transcriptSummaries() -> [TranscriptSummary] {
         let projects = claudeHome.appendingPathComponent("projects")
         let fm = FileManager.default
         guard let projectDirs = try? fm.contentsOfDirectory(at: projects, includingPropertiesForKeys: [.isDirectoryKey]) else {
             return []
         }
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
         var out: [TranscriptSummary] = []
+        var seen = Set<String>()
         for dir in projectDirs {
-            guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { continue }
+            guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: Array(keys)) else { continue }
             for file in files where file.pathExtension == "jsonl" {
-                if let summary = summarize(transcriptAt: file) { out.append(summary) }
+                let values = try? file.resourceValues(forKeys: keys)
+                seen.insert(file.path)
+                let summary = summaryCache.summary(
+                    path: file.path, size: values?.fileSize ?? -1, modified: values?.contentModificationDate
+                ) { summarize(transcriptAt: file) }
+                if let summary { out.append(summary) }
             }
         }
+        summaryCache.keep(only: seen)
         return out
     }
 
@@ -275,12 +326,11 @@ public struct ClaudeSessionScanner: Sendable {
 
 // MARK: - Dates
 
-/// Parse ISO-8601 with or without fractional seconds.
+private let isoFractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+private let isoPlain = Date.ISO8601FormatStyle()
+
+/// Parse ISO-8601 with or without fractional seconds. The parse styles are
+/// shared values: building formatters per call dominated transcript scans.
 public func parseISODate(_ string: String) -> Date? {
-    let fractional = ISO8601DateFormatter()
-    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let d = fractional.date(from: string) { return d }
-    let plain = ISO8601DateFormatter()
-    plain.formatOptions = [.withInternetDateTime]
-    return plain.date(from: string)
+    (try? isoFractional.parse(string)) ?? (try? isoPlain.parse(string))
 }

@@ -4,33 +4,39 @@ import Testing
 @Suite("DispatchTier")
 struct DispatchTierTests {
 
-    @Test("Default config classifies confidence into tiers")
+    @Test("Default thresholds are the suite's: EXACT .95, HIGH .85, MEDIUM .75, LOW .60")
     func tierClassification() {
         let config = DispatchConfig()
         #expect(config.tier(for: 0.99) == .exact)
+        #expect(config.tier(for: 0.95) == .exact)
         #expect(config.tier(for: 0.90) == .high)
         #expect(config.tier(for: 0.75) == .medium)
+        #expect(config.tier(for: 0.72) == .low)
         #expect(config.tier(for: 0.60) == .low)
         #expect(config.tier(for: 0.40) == .none)
     }
 
-    @Test("Ambiguous runner-up downgrades the tier by one step")
-    func ambiguityDowngrade() {
-        let config = DispatchConfig(ambiguityGap: 0.05)
-        // Top is HIGH (0.90), runner-up only 0.02 behind -> downgrades to MEDIUM
-        #expect(config.tier(for: 0.90, runnerUp: 0.88) == .medium)
-        // Same top, runner-up >= ambiguityGap behind -> stays HIGH
-        #expect(config.tier(for: 0.90, runnerUp: 0.80) == .high)
+    @Test("Scores are quantized before they are compared with a threshold")
+    func quantizedTiers() {
+        #expect(DispatchConfig().tier(for: 0.94996) == .exact)
+        #expect(DispatchConfig().tier(for: 0.94994) == .high)
     }
 
-    @Test("Default vector-search threshold is 0.60 (was 0.75 in 0.3.0)")
-    func defaultThreshold() {
-        #expect(DispatchConfig().vectorSearchThreshold == 0.60)
+    @Test("A close runner-up does not change the tier (no ambiguity downgrade)")
+    func noAmbiguityDowngrade() {
+        // 0.6 downgraded 0.90 to MEDIUM when the runner-up was within 0.05;
+        // @smallchat/core has no such rule.
+        #expect(DispatchConfig().tier(for: 0.90) == .high)
     }
 
-    @Test("Strict mode is opt-in")
-    func strictDefault() {
-        #expect(DispatchConfig().strict == false)
+    @Test("Policy guards default to the suite's")
+    func policyDefaults() {
+        let config = DispatchConfig()
+        #expect(config.strict == false)
+        #expect(config.requireLLMForSubHighDispatch == true)
+        #expect(config.treatUnannotatedAsDestructive == false)
+        #expect(config.maxDecompositionDepth == 2)
+        #expect(config.maxSubDispatches == 16)
         #expect(DispatchConfig(strict: true).strict == true)
     }
 
@@ -38,9 +44,7 @@ struct DispatchTierTests {
     func miniLMPresetClassifiesTypicalScoresHigher() {
         let config = DispatchConfig.miniLM
         // Observed MiniLM cosine scores for a *correct* paraphrase match
-        // run 0.60-0.74 (see smallchat-swift#36). The preset keeps that band
-        // out of .low; its top still gets pre-flight verification (.medium),
-        // and 0.75+ dispatches directly (.high).
+        // run 0.60-0.74 (see smallchat-swift#36).
         #expect(config.tier(for: 0.75) == .high)
         #expect(config.tier(for: 0.74) == .medium)
         #expect(config.tier(for: 0.61) == .medium)
@@ -55,16 +59,21 @@ struct DispatchTierTests {
         #expect(miniLM.highThreshold < plain.highThreshold)
         #expect(miniLM.mediumThreshold < plain.mediumThreshold)
         #expect(miniLM.lowThreshold < plain.lowThreshold)
-        #expect(miniLM.vectorSearchThreshold < plain.vectorSearchThreshold)
     }
 
-    @Test("ResolutionProof records steps and totals microseconds")
+    @Test("ResolutionProof records steps, totals timings outside the digest")
     func proofRecording() {
-        var proof = ResolutionProof()
-        proof.record(ResolutionStep(stage: "a", detail: "x", outcome: .hit, elapsedMicroseconds: 10))
-        proof.record(ResolutionStep(stage: "b", detail: "y", outcome: .miss, elapsedMicroseconds: 25))
+        var proof = ResolutionProof(intent: "x")
+        proof.addStep(.vectorSearch, "searched", elapsedMs: 1.5)
+        proof.addStep(.policy, "allowed", elapsedMs: 2)
+        proof.finalize()
         #expect(proof.steps.count == 2)
-        #expect(proof.totalElapsedMicroseconds == 35)
+        #expect(proof.timings.totalMs == 3.5)
+
+        var slower = proof
+        slower.timings = ProofTimings(totalMs: 99, stepsMs: [50, 49])
+        #expect(slower.computeDigest() == proof.proofDigest)
+        #expect(proof.proofDigest.count == 64)
     }
 
     @Test("ToolRefinement carries the canonical MCP result-type discriminator")
@@ -83,9 +92,10 @@ struct DispatchTierTests {
                     confidence: 0.62
                 )
             ],
-            proof: ResolutionProof(finalTier: .none)
+            proof: ResolutionProof()
         )
         #expect(refinement.nearMatches.first?.confidence == 0.62)
-        #expect(refinement.proof.finalTier == .none)
+        #expect(refinement.nearMatches.first?.toolId == "loom/loom_find_importers")
+        #expect(refinement.proof.tier == .none)
     }
 }

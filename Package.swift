@@ -1,5 +1,30 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.1
 import PackageDescription
+
+// Platform support (see README "Platforms"):
+//   - Every library product builds on macOS 14+. All of them except SmallChatUI,
+//     and the `smallchat` CLI, also build on Linux (Swift 6.1+).
+//   - Every library product except SmallChatAgents (which spawns the `claude` CLI)
+//     builds on iOS 17+. On iOS the subprocess-backed APIs (MCPStdioTransport,
+//     LoomMCPClient, ContainerSandbox.spawnProcess/isDockerAvailable, the rtk filter
+//     subprocess) are compiled out, because Foundation.Process does not exist there.
+//   - SmallChatUI (SwiftUI + WebKit) and the SmallChatApp messenger (also AppKit)
+//     are declared only when the manifest is evaluated on a Mac, because Linux
+//     toolchains ship no SwiftUI, AppKit or WebKit. On Linux the SmallChat umbrella
+//     builds without SmallChatUI.
+
+#if os(macOS)
+let includeAppleUI = true
+#else
+let includeAppleUI = false
+#endif
+
+// CryptoKit on Apple platforms, swift-crypto (same API) everywhere else.
+let crypto: Target.Dependency = .product(
+    name: "Crypto",
+    package: "swift-crypto",
+    condition: .when(platforms: [.linux])
+)
 
 let package = Package(
     name: "SmallChat",
@@ -21,15 +46,14 @@ let package = Package(
         .library(name: "SmallChatMemex", targets: ["SmallChatMemex"]),
         .library(name: "SmallChatAgents", targets: ["SmallChatAgents"]),
         .library(name: "SmallChat", targets: ["SmallChat"]),
-        .library(name: "SmallChatUI", targets: ["SmallChatUI"]),
         .executable(name: "smallchat", targets: ["SmallChatCLI"]),
-        .executable(name: "SmallChatApp", targets: ["SmallChatApp"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
         .package(url: "https://github.com/stephencelis/SQLite.swift", from: "0.15.0"),
         .package(url: "https://github.com/apple/swift-nio", from: "2.70.0"),
         .package(url: "https://github.com/apple/swift-collections", from: "1.1.0"),
+        .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0" ..< "6.0.0"),
     ],
     targets: [
         // ---- Core ----
@@ -37,6 +61,7 @@ let package = Package(
             name: "SmallChatCore",
             dependencies: [
                 .product(name: "OrderedCollections", package: "swift-collections"),
+                crypto,
             ]
         ),
         // ---- Runtime ----
@@ -70,6 +95,9 @@ let package = Package(
                 "SmallChatCore",
                 "SmallChatRuntime",
                 "SmallChatTransport",
+                "SmallChatCompiler",
+                "SmallChatEmbedding",
+                crypto,
                 .product(name: "SQLite", package: "SQLite.swift"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -79,12 +107,18 @@ let package = Package(
         // ---- Channel ----
         .target(
             name: "SmallChatChannel",
-            dependencies: ["SmallChatCore", "SmallChatMCP"]
+            dependencies: [
+                "SmallChatCore",
+                "SmallChatMCP",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
         ),
         // ---- Dream ----
         .target(
             name: "SmallChatDream",
-            dependencies: ["SmallChatCore", "SmallChatCompiler", "SmallChatEmbedding"]
+            dependencies: ["SmallChatCore", "SmallChatCompiler", "SmallChatEmbedding", crypto]
         ),
         // ---- Shorthand (TS PR #58: extracted from compaction/CRDT/importance) ----
         .target(
@@ -125,16 +159,14 @@ let package = Package(
         .target(
             name: "SmallChatAgents",
             dependencies: [
+                "SmallChatCore",
                 "SmallChatTruth",
+                "SmallChatChannel",
+                "SmallChatTransport",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ]
-        ),
-        // ---- UI (App/UI layer — SwiftUI + WKWebView wrapper) ----
-        .target(
-            name: "SmallChatUI",
-            dependencies: []
         ),
         // ---- Umbrella ----
         .target(
@@ -154,8 +186,9 @@ let package = Package(
                 "SmallChatCompaction",
                 "SmallChatTruth",
                 "SmallChatMemex",
-                "SmallChatUI",
-            ]
+            ] + (includeAppleUI
+                ? [.target(name: "SmallChatUI", condition: .when(platforms: [.macOS, .iOS]))]
+                : [])
         ),
         // ---- CLI ----
         .executableTarget(
@@ -165,27 +198,87 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
-        // ---- macOS GUI App ----
-        .executableTarget(
-            name: "SmallChatApp",
-            dependencies: ["SmallChat", "SmallChatUI", "SmallChatAgents"]
-        ),
         // ---- Tests ----
         .testTarget(name: "SmallChatCoreTests", dependencies: ["SmallChatCore", "SmallChatEmbedding"]),
         .testTarget(name: "SmallChatRuntimeTests", dependencies: ["SmallChatRuntime", "SmallChatCore", "SmallChatEmbedding"]),
         .testTarget(name: "SmallChatCompilerTests", dependencies: ["SmallChatCompiler", "SmallChatCore", "SmallChatEmbedding"]),
         .testTarget(name: "SmallChatEmbeddingTests", dependencies: ["SmallChatEmbedding"]),
-        .testTarget(name: "SmallChatTransportTests", dependencies: ["SmallChatTransport", "SmallChatCore"]),
-        .testTarget(name: "SmallChatMCPTests", dependencies: ["SmallChatMCP", "SmallChatRuntime", "SmallChatEmbedding"]),
-        .testTarget(name: "SmallChatChannelTests", dependencies: ["SmallChatChannel"]),
+        .testTarget(
+            name: "SmallChatTransportTests",
+            dependencies: [
+                "SmallChatTransport",
+                "SmallChatCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
+        ),
+        .testTarget(
+            name: "SmallChatMCPTests",
+            dependencies: [
+                "SmallChatMCP",
+                "SmallChatRuntime",
+                "SmallChatEmbedding",
+                "SmallChatCompiler",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
+        ),
+        .testTarget(
+            name: "SmallChatChannelTests",
+            dependencies: [
+                "SmallChatChannel",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
+        ),
         .testTarget(name: "SmallChatDreamTests", dependencies: ["SmallChatDream"]),
         .testTarget(name: "SmallChatShorthandTests", dependencies: ["SmallChatShorthand"]),
         .testTarget(name: "SmallChatImportanceTests", dependencies: ["SmallChatImportance"]),
         .testTarget(name: "SmallChatCRDTTests", dependencies: ["SmallChatCRDT"]),
         .testTarget(name: "SmallChatCompactionTests", dependencies: ["SmallChatCompaction"]),
-        .testTarget(name: "SmallChatTruthTests", dependencies: ["SmallChatTruth", "SmallChatCompaction"]),
+        // Truth format v2 fixtures of stenographer's spec/truth-format (copied into
+        // Tests/Fixtures/truth-format by Scripts/sync-truth-fixtures.sh).
+        .testTarget(name: "SmallChatTruthTests", dependencies: ["SmallChatTruth", "SmallChatCompaction", "SmallChatCore"]),
         .testTarget(name: "SmallChatMemexTests", dependencies: ["SmallChatMemex", "SmallChatCore"]),
-        .testTarget(name: "SmallChatAgentsTests", dependencies: ["SmallChatAgents", "SmallChatTruth"]),
-        .testTarget(name: "SmallChatUITests", dependencies: ["SmallChatUI"]),
+        .testTarget(
+            name: "SmallChatAgentsTests",
+            dependencies: [
+                "SmallChatAgents",
+                "SmallChatTruth",
+                "SmallChatChannel",
+                "SmallChatCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
+        ),
+        // Golden vectors and fixtures of @smallchat/core's spec/ (copied into
+        // Tests/Fixtures/spec by Scripts/sync-spec.sh).
+        .testTarget(
+            name: "SmallChatConformanceTests",
+            dependencies: ["SmallChatCore", "SmallChatRuntime", "SmallChatEmbedding", "SmallChatCompiler", "SmallChatMCP"]
+        ),
     ]
 )
+
+if includeAppleUI {
+    package.products += [
+        .library(name: "SmallChatUI", targets: ["SmallChatUI"]),
+        .executable(name: "SmallChatApp", targets: ["SmallChatApp"]),
+    ]
+    package.targets += [
+        // ---- UI (App/UI layer — SwiftUI + WKWebView wrapper) ----
+        .target(
+            name: "SmallChatUI",
+            dependencies: []
+        ),
+        // ---- macOS GUI App ----
+        .executableTarget(
+            name: "SmallChatApp",
+            dependencies: ["SmallChat", "SmallChatUI", "SmallChatAgents"]
+        ),
+        .testTarget(name: "SmallChatUITests", dependencies: ["SmallChatUI"]),
+    ]
+}

@@ -17,10 +17,12 @@ public struct TruthObjection: Sendable, Equatable {
     public let transcriptLine: String
 
     /// Human-readable objection text, citing the replacement when known.
+    /// Ledger fields are escaped (`TruthEscaping`), so they can't forge a marker.
     public var summary: String {
-        let subject = literal.subject.map { "\($0) = " } ?? ""
-        let replacement = literal.current.map { " — current value is \($0)" } ?? ""
-        return "Objection: asserts \(subject)\(literal.dead), tombstoned by \(tombstone.id)\(replacement). \(tombstone.claim)"
+        let field = { TruthEscaping.escapeUntrusted($0, singleLine: true) }
+        let subject = literal.subject.map { "\(field($0)) = " } ?? ""
+        let replacement = literal.current.map { " — current value is \(field($0))" } ?? ""
+        return "Objection: asserts \(subject)\(field(literal.dead)), tombstoned by \(tombstone.id)\(replacement). \(field(tombstone.claim))"
     }
 }
 
@@ -58,12 +60,13 @@ public enum TruthObjections {
         return hits
     }
 
-    /// Check a message against every matchable tombstone. Overridden TBs are
-    /// history and never object; contested ones still do (the dispute is
-    /// carried, not resolved).
+    /// Check a message against every matchable tombstone. Only current
+    /// truth objects: an active or contested (the dispute is carried, not
+    /// resolved), signed, admissible TB. Overridden and struck TBs, and any
+    /// TB whose status is unknown or missing, are history and never object.
     public static func check(_ text: String, against tombstones: [TruthTbEntry]) -> [TruthObjection] {
         var objections: [TruthObjection] = []
-        for tb in tombstones where tb.status != .overridden {
+        for tb in tombstones where TruthWiki.classify(.tb(tb)) != .history {
             for literal in tb.literals {
                 for line in findLiteralHits(in: text, literal: literal) {
                     objections.append(TruthObjection(tombstone: tb, literal: literal, transcriptLine: line))

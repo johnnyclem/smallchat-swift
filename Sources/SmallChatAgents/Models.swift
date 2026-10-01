@@ -258,19 +258,17 @@ public struct PendingProposal: Sendable, Equatable, Identifiable {
     public let sessionIds: [String]
     /// The notice as stenographer wrote it: claim, literals, rationale.
     public let content: String
-    public let notarizeURL: URL?
     public let receivedAt: Date
     public var state: State
 
     public init(
         id: String, draftedBy: String, sessionIds: [String], content: String,
-        notarizeURL: URL?, receivedAt: Date = Date(), state: State = .awaiting
+        receivedAt: Date = Date(), state: State = .awaiting
     ) {
         self.id = id
         self.draftedBy = draftedBy
         self.sessionIds = sessionIds
         self.content = content
-        self.notarizeURL = notarizeURL
         self.receivedAt = receivedAt
         self.state = state
     }

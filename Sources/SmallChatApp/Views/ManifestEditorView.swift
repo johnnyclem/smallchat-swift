@@ -225,7 +225,7 @@ struct ManifestEditorView: View {
             appState.manifestDependencies = manifest.dependencies ?? [:]
             appState.manifestDirectories = manifest.manifests ?? []
             appState.manifestEmbedder = manifest.compiler?.embedder ?? "local"
-            appState.manifestDeduplicationThreshold = manifest.compiler?.deduplicationThreshold ?? 0.95
+            appState.manifestDeduplicationThreshold = manifest.compiler?.effectiveDuplicateThreshold ?? 0.95
             appState.manifestCollisionThreshold = manifest.compiler?.collisionThreshold ?? 0.89
             appState.manifestGenerateOverloads = manifest.compiler?.generateSemanticOverloads ?? false
             appState.manifestOutputPath = manifest.output?.path ?? "tools.toolkit.json"
@@ -270,7 +270,7 @@ struct ManifestEditorView: View {
             manifests: appState.manifestDirectories.isEmpty ? nil : appState.manifestDirectories,
             compiler: ManifestCompilerConfig(
                 embedder: appState.manifestEmbedder,
-                deduplicationThreshold: appState.manifestDeduplicationThreshold,
+                duplicateThreshold: appState.manifestDeduplicationThreshold,
                 collisionThreshold: appState.manifestCollisionThreshold,
                 generateSemanticOverloads: appState.manifestGenerateOverloads
             ),

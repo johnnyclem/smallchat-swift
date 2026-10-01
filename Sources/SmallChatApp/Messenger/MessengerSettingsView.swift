@@ -83,11 +83,11 @@ struct ObjectionChannelSettings: View {
             }
             LabeledContent("Secret") {
                 HStack {
-                    Text(revealSecret ? model.settings.objectionChannelSecret : String(repeating: "•", count: 16))
+                    Text(revealSecret ? model.channelSecret : String(repeating: "•", count: 16))
                         .font(.caption.monospaced())
                         .textSelection(.enabled)
                     Button(revealSecret ? "Hide" : "Show") { revealSecret.toggle() }
-                    Button("Copy") { copyToPasteboard(model.settings.objectionChannelSecret) }
+                    Button("Copy") { copyToPasteboard(model.channelSecret) }
                 }
             }
             Toggle("Relay objections into the agent's live session", isOn: $bindable.settings.relayObjections)
@@ -98,11 +98,11 @@ struct ObjectionChannelSettings: View {
                 Button("Apply", action: applyRestPort)
                 Text("where you approve agent-drafted tombstones").font(.caption).foregroundStyle(.secondary)
             }
-            Button("Copy stenographer command") { copyToPasteboard(stenographerCommand(model)) }
+            Button("Copy stenographer command") { copyToPasteboard(model.stenographerLaunchCommand) }
         } header: {
             Text("Objection channel")
         } footer: {
-            Text("Stenographer pushes each real-time objection here as it's raised (`--objections deliver --objection-channel`). It lands in the offending agent's chats and, if relaying is on, interrupts that live session so it can correct course. Tombstones agents draft arrive here too and wait for you to notarize them; with `--require-notary`, agents can't assert tombstones any other way. Loopback only.")
+            Text("Stenographer pushes each real-time objection here as it's raised (`--objections deliver --objection-channel`). It lands in the offending agent's chats and, if relaying is on, interrupts that live session so it can correct course. Tombstones agents draft arrive here too and wait for you to notarize them; with `--require-notary`, agents can't assert tombstones any other way. The app approves them with a separate notary secret, and sends Stenographer's REST token with every call. All three secrets stay in your Keychain: the copied command reads them when it runs and never contains them. Loopback only.")
         }
         .onAppear {
             port = String(model.settings.objectionChannelPort)
@@ -145,15 +145,4 @@ struct ObjectionChannelStatusLabel: View {
             Label("Couldn't start: \(reason)", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
         }
     }
-}
-
-/// Shell command that starts stenographer delivering objections to this app.
-@MainActor
-/// The same secret authenticates stenographer to the bridge and the messenger
-/// to stenographer's notary routes. Agents never get it.
-func stenographerCommand(_ model: MessengerModel) -> String {
-    let secret = model.settings.objectionChannelSecret
-    return "SMALLCHAT_CHANNEL_SECRET=\(secret) STENOGRAPHER_NOTARY_SECRET=\(secret) stenographer start <log-or-dir>"
-        + " --objections deliver --objection-channel \(model.objectionChannelURL)"
-        + " --rest-port \(model.settings.stenographerRestPort) --require-notary"
 }

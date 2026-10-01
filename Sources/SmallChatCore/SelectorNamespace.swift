@@ -19,10 +19,10 @@ public struct CoreSelectorEntry: Sendable {
 /// Guards core system selectors from being shadowed by plugins.
 /// Uses lock-based synchronization for synchronous reads on the dispatch hot path.
 public final class SelectorNamespace: Sendable {
-    private let lock: OSAllocatedUnfairLock<[String: CoreSelectorEntry]>
+    private let lock: PlatformLock<[String: CoreSelectorEntry]>
 
     public init() {
-        self.lock = OSAllocatedUnfairLock(initialState: [:])
+        self.lock = PlatformLock(initialState: [:])
     }
 
     /// Register a selector as a core system selector.

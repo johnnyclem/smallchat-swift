@@ -5,7 +5,7 @@ import SmallChat
 struct CompileCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "compile",
-        abstract: "Compile tool definitions from MCP server manifests"
+        abstract: "Compile tool definitions from MCP server manifests into an artifact (format 1.0)"
     )
 
     @Option(name: .shortAndLong, help: "Source directory or manifest file")
@@ -20,10 +20,16 @@ struct CompileCommand: AsyncParsableCommand {
     @Option(help: "Collision threshold (0.0–1.0)")
     var collisionThreshold: Double = 0.89
 
-    @Option(help: "Deduplication threshold (0.0–1.0)")
-    var deduplicationThreshold: Double = 0.95
+    @Option(help: "Distinct tools that embed at or above this cosine similarity are duplicates (an error unless --allow-duplicates)")
+    var duplicateThreshold: Double = 0.95
 
-    @Flag(help: "Treat selector collisions as compile errors and raise dedup/collision thresholds")
+    @Flag(help: "Keep duplicate tools (both are compiled and listed under duplicates) instead of failing")
+    var allowDuplicates: Bool = false
+
+    @Option(help: "Dimensions of the hash embedder")
+    var dims: Int = 384
+
+    @Flag(help: "Treat selector collisions as compile errors")
     var strict: Bool = false
 
     func run() async throws {
@@ -39,33 +45,37 @@ struct CompileCommand: AsyncParsableCommand {
 
         print("Found \(manifests.count) manifest(s)")
 
-        // Set up embedder and index
-        let embedder = LocalEmbedder()
-        let vectorIndex = MemoryVectorIndex()
-
-        // Under --strict, tighten the firewall: collisions become errors
-        // and the dedup threshold rises so near-duplicates fail compile.
-        let effectiveCollisionThreshold = strict ? max(collisionThreshold, 0.75) : collisionThreshold
-        let effectiveDedupThreshold = strict ? max(deduplicationThreshold, 0.97) : deduplicationThreshold
-
+        let embedder = LocalEmbedder(dimensions: dims)
         let options = CompilerOptions(
-            collisionThreshold: effectiveCollisionThreshold,
-            deduplicationThreshold: effectiveDedupThreshold,
+            collisionThreshold: collisionThreshold,
+            duplicateThreshold: duplicateThreshold,
+            allowDuplicates: allowDuplicates,
             generateSemanticOverloads: semanticOverloads
         )
-
-        let compiler = ToolCompiler(embedder: embedder, vectorIndex: vectorIndex, options: options)
+        let compiler = ToolCompiler(embedder: embedder, vectorIndex: MemoryVectorIndex(), options: options)
 
         let toolCount = manifests.reduce(0) { $0 + $1.tools.count }
         print("\nEmbedding \(toolCount) tools...")
-        print("  Model: hash-based (v0.0.1 placeholder)")
+        print("  Embedder: \(embedder.fingerprint!.summary)")
 
-        let result = try await compiler.compile(manifests)
+        let result: CompilationResult
+        do {
+            result = try await compiler.compile(manifests)
+        } catch let error as DuplicateToolError {
+            print("\nERROR: \(error)")
+            throw ExitCode(2)
+        } catch let error as SelectorConflictError {
+            print("\nERROR: \(error)")
+            throw ExitCode(2)
+        }
 
-        print("  Selectors generated: \(result.toolCount)")
-        print("  After dedup (threshold \(deduplicationThreshold)): \(result.uniqueSelectorCount) unique selectors")
-        if result.mergedCount > 0 {
-            print("  \(result.mergedCount) tools merged as semantically equivalent")
+        print("  Tools: \(result.toolCount)")
+        print("  Selectors: \(result.uniqueSelectorCount) (tools and aliases; tools are never merged)")
+        if !result.duplicates.isEmpty {
+            print("  Duplicates kept (--allow-duplicates): \(result.duplicates.count)")
+            for pair in result.duplicates {
+                print("    \(pair.toolA) <-> \(pair.toolB) (cosine \(String(format: "%.3f", pair.similarity)))")
+            }
         }
 
         print("\nLinking...")
@@ -83,16 +93,14 @@ struct CompileCommand: AsyncParsableCommand {
             }
         }
 
-        // Serialize output
-        let artifact = serializeResult(result, manifests: manifests)
-        let data = try JSONSerialization.data(withJSONObject: artifact, options: [.prettyPrinted, .sortedKeys])
-        let outputURL = URL(fileURLWithPath: output)
-        try data.write(to: outputURL)
+        let artifact = try ArtifactV1.build(result: result, manifests: manifests, embedder: embedder.fingerprint!)
+        try artifact.write(to: URL(fileURLWithPath: output))
 
-        print("\nOutput: \(output)")
-        print("  - \(result.uniqueSelectorCount) selectors")
-        print("  - \(result.toolCount) tools")
-        print("  - \(result.dispatchTables.count) providers")
+        print("\nOutput: \(output) (artifact format \(ARTIFACT_FORMAT_VERSION))")
+        print("  - \(artifact.tools.count) tools")
+        print("  - \(artifact.selectors.count) selectors")
+        print("  - \(artifact.providers.count) providers")
+        print("  - contentHash \(artifact.contentHash)")
     }
 
     private func loadManifests(from path: String) throws -> [ProviderManifest] {
@@ -116,7 +124,7 @@ struct CompileCommand: AsyncParsableCommand {
                     print("  \(manifest.id): \(manifest.tools.count) tools")
                 }
             }
-            return manifests
+            return manifests.sorted { $0.id < $1.id }
         } else {
             // Single file
             if let manifest = try? loadManifest(from: path) {
@@ -130,57 +138,5 @@ struct CompileCommand: AsyncParsableCommand {
     private func loadManifest(from path: String) throws -> ProviderManifest {
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         return try JSONDecoder().decode(ProviderManifest.self, from: data)
-    }
-
-    private func serializeResult(_ result: CompilationResult, manifests: [ProviderManifest]) -> [String: Any] {
-        var selectors: [String: Any] = [:]
-        for (key, sel) in result.selectors {
-            selectors[key] = [
-                "canonical": sel.canonical,
-                "parts": sel.parts,
-                "arity": sel.arity,
-                "vector": sel.vector,
-            ] as [String: Any]
-        }
-
-        var dispatchTables: [String: Any] = [:]
-        for (providerId, table) in result.dispatchTables {
-            var methods: [String: Any] = [:]
-            for (canonical, imp) in table {
-                methods[canonical] = [
-                    "providerId": imp.providerId,
-                    "toolName": imp.toolName,
-                    "transportType": imp.transportType.rawValue,
-                ] as [String: Any]
-            }
-            dispatchTables[providerId] = methods
-        }
-
-        return [
-            "version": "0.6.0",
-            "timestamp": ISO8601DateFormatter().string(from: Date()),
-            "embedding": [
-                "model": "hash-based",
-                "dimensions": 384,
-                "embedderType": "local",
-            ],
-            "stats": [
-                "toolCount": result.toolCount,
-                "uniqueSelectorCount": result.uniqueSelectorCount,
-                "mergedCount": result.mergedCount,
-                "providerCount": result.dispatchTables.count,
-                "collisionCount": result.collisions.count,
-            ],
-            "selectors": selectors,
-            "dispatchTables": dispatchTables,
-            "collisions": result.collisions.map { c in
-                [
-                    "selectorA": c.selectorA,
-                    "selectorB": c.selectorB,
-                    "similarity": c.similarity,
-                    "hint": c.hint,
-                ] as [String: Any]
-            },
-        ] as [String: Any]
     }
 }

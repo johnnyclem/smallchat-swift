@@ -62,10 +62,15 @@ struct DoctorCommand: AsyncParsableCommand {
         let c: [Float] = [0, 1, 0, 0]
         let simSame = cosineSimilarity(a, b)
         let simOrtho = cosineSimilarity(a, c)
+        #if canImport(Accelerate)
+        let cosineLabel = "Cosine similarity (Accelerate vDSP)"
+        #else
+        let cosineLabel = "Cosine similarity (scalar)"
+        #endif
         if abs(simSame - 1.0) < 0.001 && abs(simOrtho) < 0.001 {
-            print("  Accelerate vDSP cosine similarity: OK")
+            print("  \(cosineLabel): OK")
         } else {
-            print("  Accelerate vDSP cosine similarity: FAILED (same=\(simSame), ortho=\(simOrtho))")
+            print("  \(cosineLabel): FAILED (same=\(simSame), ortho=\(simOrtho))")
             allOk = false
         }
 
@@ -84,7 +89,7 @@ struct DoctorCommand: AsyncParsableCommand {
         if FileManager.default.fileExists(atPath: dbPath) {
             print("  \(dbPath): exists")
         } else {
-            print("  \(dbPath): not yet created (will be created on first compile)")
+            print("  \(dbPath): not yet created (`smallchat serve` creates it for its sessions)")
         }
 
         // Summary

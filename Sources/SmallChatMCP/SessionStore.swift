@@ -74,7 +74,7 @@ public actor SessionStore {
 
     /// Create a new session, returning it.
     public func create(
-        protocolVersion: String = "2024-11-05",
+        protocolVersion: String = mcpProtocolVersion,
         clientInfo: [String: String] = [:],
         metadata: [String: String] = [:]
     ) throws -> MCPSession {
@@ -173,6 +173,22 @@ public actor SessionStore {
     /// Count active sessions.
     public func count() throws -> Int {
         try db.scalar(sessions.filter(colStatus == SessionStatus.active.rawValue).count)
+    }
+
+    // MARK: - Session Validation
+
+    /// The session `id` if it exists, is active, and was used within the last
+    /// `ttlMs` milliseconds; it is touched. An expired session is closed and
+    /// nil is returned, as for an unknown or closed one.
+    public func activeSession(_ id: String, ttlMs: Int) throws -> MCPSession? {
+        guard let session = try get(id), session.status == .active else { return nil }
+        if let lastSeen = ISO8601DateFormatter().date(from: session.lastActivityAt),
+           Date().timeIntervalSince(lastSeen) * 1000 > Double(ttlMs) {
+            try close(id)
+            return nil
+        }
+        try touch(id)
+        return session
     }
 
     // MARK: - Session Resume

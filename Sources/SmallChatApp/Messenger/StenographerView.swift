@@ -77,7 +77,7 @@ struct StenographerView: View {
                 Text("Objection channel:").font(.caption)
                 ObjectionChannelStatusLabel().font(.caption)
                 Spacer()
-                Button("Copy stenographer command") { copyToPasteboard(stenographerCommand(model)) }
+                Button("Copy stenographer command") { copyToPasteboard(model.stenographerLaunchCommand) }
                     .controlSize(.small)
             }
             HStack(spacing: 8) {

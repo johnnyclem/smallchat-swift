@@ -58,44 +58,47 @@ public struct IntentPinMatch: Sendable {
 private let defaultElevatedThreshold: Double = 0.98
 
 /// Guards sensitive selectors against semantic collision attacks.
+///
+/// - `.exact`: only a pinned phrase dispatches to the pinned tool -- the
+///   pin's canonical or one of its aliases, compared as whole phrases after
+///   `normalizePinPhrase` (so "do not transfer funds" never matches the
+///   alias "transfer funds"). Cosine similarity is never enough.
+/// - `.elevated`: requires a cosine similarity, computed from the intent's
+///   own embedding, at or above the pin's threshold (default 0.98).
+///
 /// Lock-based for synchronous reads on the dispatch hot path.
 public final class IntentPinRegistry: Sendable {
-    private let lock: OSAllocatedUnfairLock<State>
+    private let lock: PlatformLock<State>
 
     struct State: Sendable {
         var pins: [String: IntentPin] = [:]
-        var aliasIndex: [String: String] = [:]  // alias canonical -> pin canonical
+        /// Normalized pinned phrase (canonical or alias) -> pin canonical
+        var phraseIndex: [String: String] = [:]
     }
 
     public init() {
-        self.lock = OSAllocatedUnfairLock(initialState: State())
+        self.lock = PlatformLock(initialState: State())
     }
 
-    /// Pin a selector with a given policy.
+    /// Pin a selector with a given policy (replacing an earlier pin on it).
     public func pin(_ entry: IntentPin) {
         lock.withLock { state in
+            Self.remove(entry.canonical, from: &state)
             state.pins[entry.canonical] = entry
-
-            // Index aliases
-            if let aliases = entry.aliases {
-                for alias in aliases {
-                    let aliasCanonical = canonicalize(alias)
-                    state.aliasIndex[aliasCanonical] = entry.canonical
-                }
+            for phrase in [entry.canonical] + (entry.aliases ?? []) {
+                state.phraseIndex[normalizePinPhrase(phrase)] = entry.canonical
             }
         }
     }
 
     /// Remove a pin.
     public func unpin(_ canonical: String) {
-        lock.withLock { state in
-            if let existing = state.pins[canonical], let aliases = existing.aliases {
-                for alias in aliases {
-                    state.aliasIndex.removeValue(forKey: canonicalize(alias))
-                }
-            }
-            state.pins.removeValue(forKey: canonical)
-        }
+        lock.withLock { state in Self.remove(canonical, from: &state) }
+    }
+
+    private static func remove(_ canonical: String, from state: inout State) {
+        state.phraseIndex = state.phraseIndex.filter { $0.value != canonical }
+        state.pins.removeValue(forKey: canonical)
     }
 
     /// Check if a selector canonical name is pinned.
@@ -119,63 +122,55 @@ public final class IntentPinRegistry: Sendable {
         }
     }
 
-    /// All pinned canonicals.
+    /// All pinned canonicals, sorted.
     public func pinnedCanonicals() -> [String] {
         lock.withLock { state in
-            Array(state.pins.keys)
+            state.pins.keys.sorted()
         }
     }
 
-    /// Check an intent against pins for exact canonical match.
-    /// Returns nil if the intent doesn't interact with any pinned selector.
-    public func checkExact(_ intentCanonical: String) -> IntentPinMatch? {
+    /// Whether `intent` is one of the pinned phrases of the pin on `canonical`.
+    public func matchesPinnedPhrase(_ canonical: String, intent: String) -> Bool {
         lock.withLock { state in
-            // Direct canonical match against a pinned selector
-            if let directPin = state.pins[intentCanonical] {
-                return IntentPinMatch(
-                    canonical: directPin.canonical,
-                    verdict: .accept,
-                    policy: directPin.policy
-                )
-            }
-
-            // Check alias index
-            if let aliasTarget = state.aliasIndex[intentCanonical],
-               let pin = state.pins[aliasTarget] {
-                return IntentPinMatch(
-                    canonical: pin.canonical,
-                    verdict: .accept,
-                    policy: pin.policy
-                )
-            }
-
-            return nil
+            state.phraseIndex[normalizePinPhrase(intent)] == canonical
         }
     }
 
-    /// Check whether a vector similarity match to a pinned selector should be accepted/rejected.
+    /// Is the intent, as a whole phrase, one of the pinned phrases (a pin's
+    /// canonical or alias, compared with `normalizePinPhrase`)? Returns the
+    /// accepted pin, or nil when the intent is not a pinned phrase.
+    ///
+    /// Pass the raw intent text. 0.x compared `canonicalize`d forms, which
+    /// drop words such as "not".
+    public func checkExact(_ intent: String) -> IntentPinMatch? {
+        lock.withLock { state in
+            guard let target = state.phraseIndex[normalizePinPhrase(intent)],
+                  let pin = state.pins[target] else { return nil }
+            return IntentPinMatch(canonical: pin.canonical, verdict: .accept, policy: pin.policy)
+        }
+    }
+
+    /// Whether a similarity match to a pinned selector is accepted under the
+    /// pin's policy. `similarity` must come from the intent's own embedding;
+    /// `intent` is the raw intent text. nil when the selector is not pinned.
     public func checkSimilarity(
         candidateCanonical: String,
         similarity: Double,
-        intentCanonical: String
+        intent: String
     ) -> IntentPinMatch? {
         lock.withLock { state in
             guard let pin = state.pins[candidateCanonical] else { return nil }
 
-            if pin.policy == .exact {
-                // Exact policy: only accept if canonical strings match exactly (or via alias)
-                let isExactMatch =
-                    intentCanonical == candidateCanonical ||
-                    state.aliasIndex[intentCanonical] == candidateCanonical
-
+            switch pin.policy {
+            case .exact:
+                // Only a pinned phrase is accepted, whatever the score.
+                let isPhrase = state.phraseIndex[normalizePinPhrase(intent)] == candidateCanonical
                 return IntentPinMatch(
                     canonical: pin.canonical,
-                    verdict: isExactMatch ? .accept : .reject,
+                    verdict: isPhrase ? .accept : .reject,
                     policy: .exact
                 )
-            }
-
-            if pin.policy == .elevated {
+            case .elevated:
                 let threshold = pin.threshold ?? defaultElevatedThreshold
                 return IntentPinMatch(
                     canonical: pin.canonical,
@@ -185,8 +180,6 @@ public final class IntentPinRegistry: Sendable {
                     requiredThreshold: threshold
                 )
             }
-
-            return nil
         }
     }
 }

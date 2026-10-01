@@ -5,10 +5,19 @@ import SmallChat
 struct ServeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "serve",
-        abstract: "Start an MCP 2024-11-05 compliant tool server"
+        abstract: "Serve a toolkit as an MCP server over Streamable HTTP",
+        discussion: """
+        Tools are listed as <provider>__<tool> (or, with --provider, one provider's \
+        tools under their upstream names), and tools/call runs exactly the named tool \
+        through its provider's manifest endpoint: MCP servers over Streamable HTTP, \
+        REST APIs as POST <endpoint>/<tool>. Its arguments are validated against the \
+        tool's inputSchema first. Tools whose provider declares no such endpoint are \
+        listed but fail when called. smallchat_resolve proposes a tool for a \
+        plain-language intent and never runs anything.
+        """
     )
 
-    @Option(name: .shortAndLong, help: "Source directory or compiled artifact (.json)")
+    @Option(name: .shortAndLong, help: "Manifest directory, manifest file, or compiled artifact (.json)")
     var source: String
 
     @Option(name: .shortAndLong, help: "Port to listen on")
@@ -20,42 +29,81 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "SQLite database path for sessions")
     var dbPath: String = "smallchat.db"
 
-    @Flag(help: "Enable OAuth 2.1 authentication")
+    @Option(help: "Serve only this provider's tools, under their upstream names")
+    var provider: String?
+
+    @Flag(help: "Do not list the read-only smallchat_resolve meta-tool (it proposes a tool for an intent and never runs one)")
+    var noResolveTool: Bool = false
+
+    @Flag(help: "Require a bearer token (from SMALLCHAT_MCP_TOKEN, or --auth-token-file)")
     var auth: Bool = false
 
-    @Flag(help: "Enable rate limiting")
+    @Option(help: "File holding the bearer token (mode 0600, refused if others can read it); created with a random token if missing")
+    var authTokenFile: String = "~/.smallchat/serve-token"
+
+    @Flag(help: "Enable rate limiting (per client address)")
     var rateLimit: Bool = false
 
     @Option(help: "Max requests per minute")
     var rateLimitRpm: Int = 600
 
-    @Flag(help: "Enable audit logging")
+    @Flag(help: "Enable audit logging (in memory, HMAC-chained)")
     var audit: Bool = false
+
+    @Option(help: "Maximum concurrent connections (0 = unlimited)")
+    var maxConnections: Int = 1000
 
     @Option(help: "Session TTL in hours")
     var sessionTtl: Double = 24
 
     func run() async throws {
         print("Loading toolkit from \(source)...")
+        let toolkit = try await MCPToolkit.load(source: source)
+        let naming: MCPToolNaming = provider.map { .provider($0) } ?? .aggregate
+        let catalog = MCPToolCatalog(artifact: toolkit.artifact, naming: naming)
+        if case .provider(let id) = naming, catalog.tools.isEmpty {
+            print("No tools for provider \(id).")
+            throw ExitCode.failure
+        }
 
-        let sessionTTLMs = Int(sessionTtl * 3_600_000)
+        let token = try auth ? resolveAuthToken() : nil
+        if !auth && !MCPServer.isLoopbackHost(host) {
+            FileHandle.standardError.write(Data(
+                "Warning: serving on \(host) without --auth; anyone who can reach it can call every tool.\n".utf8
+            ))
+        }
 
         let config = MCPServerConfig(
             port: port,
             host: host,
-            sourcePath: source,
+            sourcePath: "",
             dbPath: dbPath,
-            enableAuth: auth,
+            authToken: token?.value,
             enableRateLimit: rateLimit,
             rateLimitRPM: rateLimitRpm,
             enableAudit: audit,
-            sessionTTLMs: sessionTTLMs
+            sessionTTLMs: Int(sessionTtl * 3_600_000),
+            maxConnections: maxConnections,
+            toolNaming: naming,
+            resolveTool: !noResolveTool
         )
 
         let server = try MCPServer(config: config)
+        await server.setArtifact(toolkit.artifact)
+        await server.setRuntime(toolkit.runtime, resolveTool: !noResolveTool)
 
-        print("Starting smallchat MCP server on \(host):\(port)")
-        print("  Auth: \(auth ? "enabled" : "disabled")")
+        print("  \(catalog.tools.count) tools listed (\(naming == .aggregate ? "<provider>__<tool>" : "upstream names"))")
+        for skipped in catalog.skipped {
+            print("  not listed: \(skipped.toolId): \(skipped.reason)")
+        }
+        let listed = Set(catalog.tools.map(\.toolId))
+        for unavailable in toolkit.unavailable where listed.contains(unavailable.toolId) {
+            print("  cannot run: \(unavailable.toolId): \(unavailable.reason)")
+        }
+        if !noResolveTool {
+            print("  Intent resolution: smallchat_resolve (proposes a tool; never runs one)")
+        }
+        print("  Auth: \(token.map { "bearer token (\($0.origin))" } ?? "none")")
         print("  Rate limiting: \(rateLimit ? "enabled (\(rateLimitRpm) rpm)" : "disabled")")
         print("  Audit: \(audit ? "enabled" : "disabled")")
         print("  Session TTL: \(sessionTtl)h")
@@ -63,11 +111,10 @@ struct ServeCommand: AsyncParsableCommand {
 
         try await server.start()
 
-        print("\nServer running. Press Ctrl+C to stop.")
-        print("  Discovery: http://\(host):\(port)/.well-known/mcp.json")
-        print("  JSON-RPC:  http://\(host):\(port)/")
-        print("  SSE:       http://\(host):\(port)/sse")
-        print("  Health:    http://\(host):\(port)/health")
+        print("\nServer running (MCP \(mcpSupportedProtocolVersions.joined(separator: ", "))). Press Ctrl+C to stop.")
+        print("  MCP:     http://\(host):\(port)\(MCPServer.endpointPath)")
+        print("  Health:  http://\(host):\(port)/health")
+        print("  Metrics: http://\(host):\(port)/metrics")
 
         // Keep running until signal, then shut down gracefully
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -82,5 +129,21 @@ struct ServeCommand: AsyncParsableCommand {
         }
 
         try await server.stop()
+    }
+
+    /// The bearer token: `SMALLCHAT_MCP_TOKEN`, else the token file (see
+    /// `MCPAuthTokenFile`: created 0600 when missing, refused when other
+    /// users can read it).
+    private func resolveAuthToken() throws -> (value: String, origin: String) {
+        if let env = ProcessInfo.processInfo.environment["SMALLCHAT_MCP_TOKEN"], !env.isEmpty {
+            return (env, "SMALLCHAT_MCP_TOKEN")
+        }
+        let path = (authTokenFile as NSString).expandingTildeInPath
+        do {
+            let file = try MCPAuthTokenFile.loadOrCreate(at: path)
+            return (file.token, file.created ? "new token in \(path)" : path)
+        } catch let error as MCPAuthTokenFileError {
+            throw ValidationError(error.description)
+        }
     }
 }

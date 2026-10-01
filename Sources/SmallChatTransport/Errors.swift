@@ -36,6 +36,10 @@ public enum TransportError: Error, Sendable, CustomStringConvertible {
     /// An invalid or malformed response was received.
     case invalidResponse(message: String)
 
+    /// The request could not be built from the tool's arguments (for example
+    /// a route placeholder with no value); nothing was sent.
+    case invalidRequest(message: String)
+
     /// The transport or connection pool has been disposed.
     case disposed
 
@@ -68,6 +72,8 @@ public enum TransportError: Error, Sendable, CustomStringConvertible {
             return "Container sandbox error: \(message)"
         case .invalidResponse(let message):
             return "Invalid response: \(message)"
+        case .invalidRequest(let message):
+            return "Invalid request: \(message)"
         case .disposed:
             return "Transport has been disposed"
         case .unknown(let message):
@@ -89,7 +95,7 @@ public enum TransportError: Error, Sendable, CustomStringConvertible {
         case .connectionFailed:
             return true
         case .circuitOpen, .handlerNotFound, .sandboxViolation,
-             .containerSandboxError, .invalidResponse, .disposed, .sseError, .unknown:
+             .containerSandboxError, .invalidResponse, .invalidRequest, .disposed, .sseError, .unknown:
             return false
         }
     }

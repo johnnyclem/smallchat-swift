@@ -6,7 +6,7 @@ import os
 public final class SCObjectRegistry: Sendable {
     public static let shared = SCObjectRegistry()
 
-    private let lock: OSAllocatedUnfairLock<RegistryState>
+    private let lock: PlatformLock<RegistryState>
 
     struct RegistryState: Sendable {
         var classes: [String: String?] = ["SCObject": nil]
@@ -14,7 +14,7 @@ public final class SCObjectRegistry: Sendable {
     }
 
     private init() {
-        self.lock = OSAllocatedUnfairLock(initialState: RegistryState())
+        self.lock = PlatformLock(initialState: RegistryState())
     }
 
     public func register(_ name: String, superclass: String) {

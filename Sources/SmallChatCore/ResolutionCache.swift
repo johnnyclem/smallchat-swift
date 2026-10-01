@@ -3,8 +3,14 @@ import OrderedCollections
 
 /// ResolutionCache -- the method cache for toolkit_dispatch.
 ///
-/// Fixed-size LRU cache mapping selector hashes to resolved tools.
-/// Equivalent to `objc_msgSend`'s per-class inline cache.
+/// Fixed-size LRU cache mapping an intent's identity key (`intentKey`, the
+/// selector's `key`) to the tool it resolved to. A selector without a key
+/// (a tool selector) is keyed by its canonical. Equivalent to
+/// `objc_msgSend`'s per-class inline cache.
+///
+/// The cache stores decisions, not permissions: dispatch caches only plain
+/// HIGH/EXACT vector resolutions of tools that are neither pinned nor
+/// destructive, and every hit goes through the dispatch policy again.
 ///
 /// Entries are tagged with provider version, model version, and schema
 /// fingerprint at store-time. On lookup, stale entries (version/schema
@@ -20,14 +26,10 @@ public actor ResolutionCache {
     private var versionContext: CacheVersionContext
     private var hooks: [InvalidationHook] = []
 
-    /// Semantic rate limiter -- prevents vector flooding DoS.
-    public nonisolated let rateLimiter: SemanticRateLimiter
-
     public init(
         maxSize: Int = 1024,
         minConfidence: Double = 0.85,
-        versionContext: CacheVersionContext? = nil,
-        rateLimiterOptions: SemanticRateLimiterOptions? = nil
+        versionContext: CacheVersionContext? = nil
     ) {
         self.cache = OrderedDictionary()
         self.maxSize = maxSize
@@ -37,7 +39,6 @@ public actor ResolutionCache {
             modelVersion: "",
             schemaFingerprints: [:]
         )
-        self.rateLimiter = SemanticRateLimiter(options: rateLimiterOptions ?? SemanticRateLimiterOptions())
     }
 
     // MARK: - Lookup & Store
@@ -47,7 +48,11 @@ public actor ResolutionCache {
     /// Transparently evicts stale entries (version or schema mismatch)
     /// so the caller simply sees a miss and re-resolves.
     public func lookup(_ selector: ToolSelector) -> ResolvedTool? {
-        let key = selector.canonical
+        lookup(key: Self.key(of: selector))
+    }
+
+    /// Look up by identity key (an intent's `intentKey`) -- no embedding needed.
+    public func lookup(key: String) -> ResolvedTool? {
         guard var cached = cache[key] else { return nil }
 
         // Check staleness: provider version
@@ -89,11 +94,12 @@ public actor ResolutionCache {
     /// should not shortcut next time.
     ///
     /// Tags the entry with current provider version, model version,
-    /// and schema fingerprint so future lookups can detect staleness.
-    public func store(_ selector: ToolSelector, imp: any ToolIMP, confidence: Double) {
+    /// and schema fingerprint so future lookups can detect staleness, and
+    /// with the caller's `registryGeneration` (see `ResolvedTool`).
+    public func store(_ selector: ToolSelector, imp: any ToolIMP, confidence: Double, registryGeneration: UInt64? = nil) {
         guard confidence >= minConfidence else { return }
 
-        let key = selector.canonical
+        let key = Self.key(of: selector)
 
         // Evict oldest if at capacity
         if cache.count >= maxSize && cache[key] == nil {
@@ -108,7 +114,8 @@ public actor ResolutionCache {
             hitCount: 1,
             providerVersion: versionContext.providerVersions[imp.providerId],
             modelVersion: versionContext.modelVersion.isEmpty ? nil : versionContext.modelVersion,
-            schemaFingerprint: versionContext.schemaFingerprints[imp.providerId]
+            schemaFingerprint: versionContext.schemaFingerprints[imp.providerId],
+            registryGeneration: registryGeneration
         )
     }
 
@@ -128,7 +135,7 @@ public actor ResolutionCache {
 
     /// Invalidate entries for a specific selector.
     public func flushSelector(_ selector: ToolSelector) {
-        cache.removeValue(forKey: selector.canonical)
+        cache.removeValue(forKey: Self.key(of: selector))
         emit(.selector(selector))
     }
 
@@ -170,6 +177,11 @@ public actor ResolutionCache {
     public var size: Int { cache.count }
 
     // MARK: - Private
+
+    /// Cache key of a selector: an intent's identity key, else the canonical.
+    private static func key(of selector: ToolSelector) -> String {
+        selector.key ?? selector.canonical
+    }
 
     private func emit(_ event: InvalidationEvent) {
         for hook in hooks { hook(event) }

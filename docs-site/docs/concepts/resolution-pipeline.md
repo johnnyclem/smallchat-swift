@@ -5,171 +5,193 @@ title: Resolution Pipeline
 
 # Resolution Pipeline
 
-The resolution pipeline is the sequence of steps that transform a natural language intent into a resolved tool implementation. This is the equivalent of `objc_msgSend` in the Objective-C runtime.
+Resolution turns a natural-language intent into **at most one** tool. It is the
+equivalent of `objc_msgSend`'s method lookup, split from the call itself:
 
-## Pipeline Steps
+- `resolve(intent)` decides and runs nothing. It returns a `Resolution` with an
+  outcome (`resolved`, `needs-disambiguation`, `unresolved` or `throttled`), the tier,
+  the chosen canonical tool id (`<providerId>/<toolName>`), the ranked candidates and a
+  `ResolutionProof`.
+- `dispatchById(toolId, args:)` validates the arguments and runs exactly that tool.
+- `dispatch(intent, args:)` is `resolve` (with the cache) followed by `dispatchById` of
+  the chosen tool. When resolution does not settle on one tool, nothing runs.
 
-### 1. Canonicalization
+The rules are those of @smallchat/core 1.0, and smallchat-swift runs its conformance
+vectors (`Tests/Fixtures/spec/resolve`, `spec/ranking`) in `swift test`.
 
-The raw intent string is normalized:
+## Pipeline steps
 
-```
-"Find me some recent documents" → "find:me:some:recent:documents"
-```
+### 1. Validate the intent
 
-### 2. Embedding
+Null bytes and control characters are stripped and length is capped
+(`validateIntent`). An empty intent is an error.
 
-The canonical form is embedded into a 384-dimensional vector:
+### 2. Pinned phrase
 
-```
-"find:me:some:recent:documents" → [0.23, 0.15, ..., 0.89]
-```
+If the intent is, as a whole phrase, the canonical or an alias of an
+[intent pin](#intent-pins) (`normalizePinPhrase`: Unicode NFKC, lower case, collapsed
+whitespace), its tool is the only candidate, and it still goes through the dispatch
+policy.
 
-### 3. Selector Interning
+### 3. Cache (intent dispatch only)
 
-The vector is checked against the `SelectorTable`'s compiled tool selectors. If it's sufficiently similar to an existing tool selector (cosine similarity > 0.95), that tool selector is reused. Otherwise the intent gets its own `ToolSelector` value, cached in a bounded, LRU-evicted intent cache that's kept separate from the tool selector table and vector index — intents never get inserted into either, so they can't accumulate unbounded state or crowd real tools out of the top-K window in step 6.
+`dispatch` (and `resolve` with `ResolveOptions(learn: true)`) consult the
+`ResolutionCache`, keyed by `intentKey(intent)`: the whole intent text up to case,
+Unicode NFC form and whitespace. Two intents that differ in any word, "not" included,
+never share an entry. Only calls without arguments use it. A hit is judged by the
+dispatch policy again, and strict mode ignores cached resolutions below EXACT.
 
-### 4. Intent Pin Check (Fast Path)
+### 4. Rate limit (opt-in)
 
-The `IntentPinRegistry` is checked first. If the selector has an exact pin, only the pinned tool can match. This is a security mechanism for sensitive operations.
+With `RuntimeOptions.rateLimiter` set, a principal that sends too many novel intents
+in a window gets the `throttled` outcome with `retryAfterMs`, before the intent is
+embedded.
 
-### 5. Cache Lookup
+### 5. Embed and search
 
-The `ResolutionCache` (LRU, default 1024 entries) is checked. Cache entries include version information — if the tool's schema or the provider version has changed since the entry was cached, it's treated as a miss.
+The intent is embedded on its own; its vector is never interned into the selector
+table or the index. The vector index returns the 5 nearest tool selectors at or above
+the candidate floor: LOW (0.60), or MEDIUM (0.75) in strict mode. Scores are cosine
+similarities quantized to 1e-4 (`quantizeScore`), and equal scores are ordered by
+tool id (`rankedBefore`).
 
-```swift
-// Cache hit: ~0.001ms
-// Cache miss: continue to step 6
-```
+### 6. Overloads and protocol conformance
 
-### 6. Vector Index Search
+When the call carries arguments and a matched selector has overloads, the overload
+that accepts those arguments is the candidate. Protocol conformance is tried only when
+no selector matched.
 
-On cache miss, the `VectorIndex` is searched for the top-K (default 5) most similar selectors above the minimum threshold (default 0.75):
+### 7. Pin gate
 
-```swift
-let matches = await vectorIndex.search(
-    query: selector.vector,
-    topK: 5,
-    threshold: 0.75
-)
-// Returns: [(selectorId, similarity)]
-```
+A tool with an intent pin is never a candidate for an intent its pin refuses: an
+`exact` pin accepts only its pinned phrases, an `elevated` pin only a similarity of the
+intent's own embedding at or above its threshold (0.98 by default). Excluded candidates
+are listed in the proof.
 
-### 7. Overload Resolution
+### 8. Tier
 
-If the top match has overloads, the runtime scores each overload against the provided arguments:
+| Tier | Score | |
+|------|-------|---|
+| `.exact` | >= 0.95 | |
+| `.high` | >= 0.85 | |
+| `.medium` | >= 0.75 | needs verification |
+| `.low` | >= 0.60 | needs verification; `dispatch` may decompose it |
+| `.none` | < 0.60 | never runs |
 
-| Score | Match Type |
-|-------|-----------|
-| 4 | Exact type match |
-| 3 | Superclass match |
-| 2 | Union type match |
-| 1 | Any type (catch-all) |
+`DispatchConfig(thresholds:)` changes the bars; `DispatchConfig.miniLM` is a preset
+for lower-contrast sentence embedders. With nothing above the floor, the outcome is
+`unresolved` with the nearest tools (from 0.3 up) as refinement options.
 
-Tiebreakers:
-1. Higher total score wins
-2. Equal score → prefer developer-defined over semantic overloads
-3. Still tied → prefer higher arity match
-4. Still tied → `OverloadAmbiguityError`
+### 9. Verification
 
-### 8. Signature Validation
+Below HIGH (below EXACT in strict mode) the best candidate, then each alternate, must
+pass verification: the tool's required parameters are present when the arguments are
+known, the intent shares keywords with the tool's name and description, and below HIGH
+an LLM verifier approves it. With `requireLLMForSubHighDispatch` (the default) and no
+verifying `LLMClient` (`NoOpLLMClient` has `providesVerification == false`), a MEDIUM
+or LOW match is needs-disambiguation.
 
-The resolved overload's parameter signature is validated against the provided arguments. This prevents type confusion attacks where an adversarial intent tricks the runtime into calling a tool with unexpected argument types.
+### 10. Dispatch policy
 
-### 9. ISA Chain Traversal
+`evaluateDispatchPolicy` is the same rule set on every path (pinned phrase, cache hit,
+vector and overload candidates, protocol conformance, decomposed sub-intents):
 
-If the tool class can't handle the selector, the runtime walks up the superclass chain:
+1. A call by exact tool id is always allowed.
+2. Intent pins as in step 7.
+3. A destructive tool runs by intent only from a pinned phrase or an EXACT similarity
+   of the intent's own embedding. A tool is destructive when its MCP annotations say
+   `destructiveHint: true`, or `readOnlyHint: false` without `destructiveHint`
+   (`isDestructive`); `treatUnannotatedAsDestructive` extends this to tools with no
+   annotations.
+4. Below HIGH, only with an LLM verifier's approval (unless
+   `requireLLMForSubHighDispatch` is off).
+5. Below LOW, never.
 
-```
-FileTools (miss)
-  → IOTools (miss)
-    → BaseTools (hit!)
-```
+A denial is the `needs-disambiguation` outcome with the candidates as a
+`ToolRefinement`; no other path is tried. Allowed vector resolutions of tools that are
+neither pinned nor destructive are cached.
 
-### 10. Forwarding Chain
+### 11. Run (`dispatchById`)
 
-If the ISA chain is exhausted, the forwarding chain engages:
+The arguments are validated against the tool's JSON Schema `inputSchema`
+(`JSONSchemaValidator`; drafts 2020-12, 2019-09 and 07). A failing call runs nothing
+and returns outcome `invalid-arguments` with the errors. Otherwise the call digest
+(`callDigest(toolId:arguments:)`, SHA-256 over the RFC 8785 canonical JSON of the tool
+id and arguments) is recorded in the proof and exactly that tool runs. A task
+cancelled before the tool starts gets outcome `aborted`.
 
-1. **Broadened search** — Lower the similarity threshold and search again
-2. **LLM disambiguation** — (Stub) Ask the LLM to disambiguate between near-matches
-3. **UnrecognizedIntent** — No resolution found
+## Results
 
-### 11. Cache Population
+`dispatch` and `dispatchById` return a `ToolResult` whose `metadata` holds
+(`DispatchMetadataKey`):
 
-Successful resolutions are stored in the cache with the current version stamps.
+| Key | Value |
+|-----|-------|
+| `outcome` | `resolved`, `needs-disambiguation`, `unresolved`, `throttled`, `invalid-arguments`, `aborted`, `not-dispatched` |
+| `toolId` | The tool that ran (or would have) |
+| `proof` | The `ResolutionProof` |
+| `callDigest` | Canonical call digest of what ran |
+| `refinement` | `ToolRefinement` with near matches (by tool id) |
+| `validationErrors` | `[ValidationError]` for `invalid-arguments` |
 
-### 12. Execution
+Only `resolved` means a tool ran; every other outcome is `isError` and ran nothing. A
+tool that ran and failed is `isError` with outcome `resolved`.
 
-The resolved `ToolIMP` is executed with the provided arguments:
+## Strict mode
 
-```swift
-let result = try await imp.execute(args: args)
-```
+`DispatchConfig(strict: true)` verifies every match below EXACT (HIGH included) and
+considers nothing below MEDIUM. It does not make a MEDIUM match run: below HIGH the LLM
+verifier rule applies in every mode.
 
-## Streaming Variant
+## Proofs and determinism
 
-The streaming pipeline (`smallchatDispatchStream`) yields `DispatchEvent` values at each stage:
+Each resolution records its steps, candidates (eligible and excluded), guards, call
+digest, artifact hash and embedder fingerprint in a `ResolutionProof`. `proofDigest`
+is a SHA-256 over the proof without its timings.
+
+For the same artifact, embedder and runtime state (registered classes, intent pins,
+resolution cache, options), resolving the same intent text yields the same outcome,
+chosen tool, candidate order and `proofDigest`; intents resolved earlier do not enter
+into it. This does not cover an LLM verifier's or decomposer's answers, an opted-in
+rate limiter's window, or float differences between platforms larger than half a score
+quantum. Proof digests are per runtime: the TypeScript runtime's step texts differ, so
+compare outcomes, tool ids and tiers across the two.
+
+## Decomposition
+
+`dispatch` (not `resolve`) may ask the `LLMClient` to split a LOW-tier or unmatched
+compound intent into sub-intents. Each sub-intent is dispatched through the same
+pipeline and policy, up to `maxDecompositionDepth` levels and `maxSubDispatches`
+sub-intents; sub-intents past the cap are `not-dispatched`. `NoOpLLMClient` never
+decomposes.
+
+## Streaming variant
+
+`dispatchStream` resolves first and streams only an allowed resolution;
+`dispatchStreamById` streams exactly one tool. They yield `DispatchEvent` values:
 
 ```swift
 .resolving(intent: "find flights")
-.toolStart(toolName: "search_flights", providerId: "flights", confidence: 0.94, selector: "search:flights")
+.toolStart(toolName: "search_flights", providerId: "flights", confidence: 0.94, selector: "flights.search_flights")
 .chunk(content: ..., index: 0)
-.chunk(content: ..., index: 1)
 .done(result: ToolResult(...))
 ```
 
-The execution phase selects the best streaming tier:
-1. **InferenceIMP** — Token-level deltas (`.inferenceDelta`)
-2. **StreamableIMP** — Chunk-level results (`.chunk`)
-3. **ToolIMP** — Single-shot, wrapped in `.done`
+The execution phase picks the richest tier the tool supports: `InferenceIMP` (token
+deltas), `StreamableIMP` (chunks), or a single-shot `ToolIMP` wrapped in `.done`.
 
-## Tiered Dispatch (0.5.0+)
-
-`tieredDispatch` wraps the pipeline above with confidence-tier classification (`DispatchTier`: `.exact`, `.high`, `.medium`, `.low`, `.none`), each with distinct behavior:
-
-| Tier | Behavior |
-|------|----------|
-| `.exact` / `.high` | Execute immediately |
-| `.medium` | Run pre-flight `verifyCandidate`; on failure, downgrade to `.low` (or error, under `strict`) |
-| `.low` | Attempt rule-based `decomposeIntent`; on failure, fall through to refinement |
-| `.none` | Emit a `ToolRefinement` (`tool_refinement_needed`) |
-
-### Behavior without an `LLMClient`
-
-`tieredDispatch` takes an `LLMClient` (default `NoOpLLMClient`). Every stage degrades to a deterministic, non-LLM strategy rather than skipping its safety check:
-
-- **`.medium` verification** (`verifyCandidate`) still validates required arguments against the tool's schema and computes a keyword-overlap score between the intent and the tool's name/description. Only when *both* pass — and no `LLMClient` is available to weigh in further — is the dispatch allowed to proceed.
-- **`.low` decomposition** (`decomposeIntent`) only splits on explicit rule-based conjunctions ("then", "and then", "; ", etc.). If no conjunction is found and no `LLMClient` is configured, it does **not** fall through to executing the top match — it returns to `makeRefinement`, which asks the user to disambiguate.
-
-In short: running without an `LLMClient` makes tier classification coarser (verification and decomposition lose their LLM-assisted strategies), but it does not turn `.medium`/`.low` into silent auto-execute paths. If you *do* want an even stricter posture for destructive tools, set `DispatchConfig.strict = true` so any tier below `.high` returns a `StrictAmbiguityError` instead of dispatching.
-
-### Threshold calibration
-
-The default `DispatchConfig` thresholds (`exactThreshold: 0.98`, `highThreshold: 0.85`, `mediumThreshold: 0.70`, `lowThreshold: 0.55`, `vectorSearchThreshold: 0.60`) assume a relatively high-contrast embedding space. Lower-contrast sentence embedders — `all-MiniLM-L6-v2` in particular — commonly score clear, correct-tool paraphrases in the 0.60–0.74 range, which the defaults classify as `.low` even though the match is unambiguous. If you're embedding with MiniLM (or seeing most of your traffic land in `.low`/`.none` despite good matches), start from `DispatchConfig.miniLM` instead of the plain default and tune from there against your own toolkit:
+## Intent pins
 
 ```swift
-let config = DispatchConfig.miniLM
-let context = DispatchContext(..., dispatchConfig: config)
+let runtime = ToolRuntime(
+    vectorIndex: MemoryVectorIndex(),
+    embedder: LocalEmbedder(),
+    options: RuntimeOptions(intentPins: [
+        IntentPin(canonical: "bank.transfer", policy: .exact, aliases: ["transfer funds"]),
+    ])
+)
 ```
 
-## Error Cases
-
-| Error | Cause |
-|-------|-------|
-| `UnrecognizedIntent` | No selector matched above threshold |
-| `OverloadAmbiguityError` | Multiple overloads scored equally |
-| `SignatureValidationError` | Arguments don't match resolved signature |
-| `SelectorShadowingError` | Plugin tried to override protected selector |
-| `VectorFloodError` | Semantic rate limiter triggered |
-
-## Performance Characteristics
-
-| Operation | Typical Latency |
-|-----------|----------------|
-| Canonicalization | ~0.01ms |
-| Embedding (LocalEmbedder) | ~0.05ms |
-| Cache hit | ~0.001ms |
-| Vector search (1000 tools) | ~0.1ms |
-| Overload resolution | ~0.01ms |
-| **Total (cache hit)** | **~0.07ms** |
-| **Total (cache miss)** | **~0.2ms** |
+`"transfer funds"` resolves to the pinned tool; `"do not transfer funds"` and
+`"transfer funds to bob"` do not match the pin, and the pinned tool is not a candidate
+for them.

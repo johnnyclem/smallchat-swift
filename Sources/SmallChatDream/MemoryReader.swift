@@ -2,7 +2,7 @@ import Foundation
 
 /// Standard memory file locations to scan.
 private let standardMemoryPaths: [String] = {
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let home = NSHomeDirectory()
     return [
         home + "/.claude/CLAUDE.md",
         "CLAUDE.md",

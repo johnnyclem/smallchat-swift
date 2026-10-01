@@ -6,13 +6,72 @@ on:
   pull_request:
 
 jobs:
+  # Toolchain floor on macOS: Xcode 16.4 (Swift 6.1).
   macos:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
       - name: Toolchain
         run: swift --version
       - name: Build (library, CLI, and SwiftUI app)
         run: swift build
       - name: Test
         run: swift test
+
+  # Newest stable Xcode: the macos-26 image's default Xcode (26.x).
+  macos-latest-xcode:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Build (library, CLI, and SwiftUI app)
+        run: swift build
+      - name: Test
+        run: swift test
+
+  # The library products declared for iOS. `SmallChat` is the umbrella scheme, so
+  # this compiles every iOS library (SmallChatUI included). SmallChatAgents, the CLI
+  # and the macOS app are not iOS targets (see README "Platforms").
+  ios:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: xcodebuild -version
+      - name: Build SmallChat for iOS
+        run: |
+          xcodebuild build \
+            -scheme SmallChat \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO
+
+  # Linux: every target except the SwiftUI ones (the manifest leaves those out on
+  # non-Apple hosts).
+  linux:
+    name: linux (swift ${{ matrix.swift }})
+    runs-on: ubuntu-24.04
+    container: swift:${{ matrix.swift }}
+    strategy:
+      fail-fast: false
+      matrix:
+        swift: ["6.1", "6.3", "6.4"]
+        include:
+          # Swift 6.1's Linux libswiftObservation.so references
+          # swift::threading::fatal, which its libswiftCore.so doesn't export
+          # (6.2 fixed it). SmallChatAgents uses @Observable, so every
+          # executable that links it, the test bundle included, needs this.
+          - swift: "6.1"
+            link-flags: "-Xlinker --allow-shlib-undefined"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Build (libraries and CLI)
+        run: swift build
+      - name: Test
+        run: swift test ${{ matrix.link-flags }}

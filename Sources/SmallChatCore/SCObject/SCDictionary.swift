@@ -9,12 +9,12 @@ public final class SCDictionary: SCObject, @unchecked Sendable {
         return true
     }()
 
-    private let storage: OSAllocatedUnfairLock<[String: SCObject]>
+    private let storage: PlatformLock<[String: SCObject]>
 
     override public var isa: String { "SCDictionary" }
 
     public init(entries: [String: SCObject] = [:]) {
-        self.storage = OSAllocatedUnfairLock(initialState: entries)
+        self.storage = PlatformLock(initialState: entries)
         super.init()
         _ = Self.registered
     }

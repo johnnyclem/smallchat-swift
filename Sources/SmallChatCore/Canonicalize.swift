@@ -18,10 +18,6 @@ private let stopwords: Set<String> = [
 /// Intents exceeding this length are truncated to prevent resource exhaustion.
 public let maxIntentLength: Int = 1024
 
-/// Maximum number of tokens (colon-separated segments) in a canonical selector.
-/// Prevents pathologically long selectors from degrading vector search performance.
-public let maxCanonicalTokens: Int = 32
-
 /// Sanitize a raw intent string before processing.
 ///
 /// - Strips null bytes and control characters (U+0000–U+001F except space)
@@ -75,29 +71,99 @@ public func validateIntent(_ intent: String) throws -> String {
     return sanitized
 }
 
-/// Convert a natural language intent into a canonical selector form.
-/// "find my recent documents" -> "find:recent:documents"
+// MARK: - Display canonical and identity keys (@smallchat/core 1.0)
+
+/// Convert a natural language intent into a canonical selector form, for
+/// display: "find my recent documents" -> "find:recent:documents".
+///
+/// Unicode NFC, lower case, every character that is not a letter, number,
+/// mark or whitespace deleted (so "foo-bar" -> "foobar" and "créer" stays
+/// "créer"), split on whitespace, stopwords (including "not") dropped,
+/// joined with ":". Same rules as @smallchat/core's `canonicalize()`.
+///
+/// It drops words such as "not", so two different intents can share a
+/// canonical form: never use it as an identity key -- use `intentKey(_:)`
+/// (cache, feedback) or `normalizePinPhrase(_:)` (intent pins).
 public func canonicalize(_ intent: String) -> String {
-    let lowered = intent.lowercased()
-
-    // Remove non-alphanumeric characters (keep spaces and digits)
-    let cleaned = lowered.unicodeScalars.map { scalar -> Character in
-        if CharacterSet.alphanumerics.contains(scalar) || scalar == " " {
-            return Character(scalar)
+    let lowered = intent.precomposedStringWithCanonicalMapping.lowercased()
+    var words: [String] = []
+    var current = String.UnicodeScalarView()
+    func flush() {
+        if !current.isEmpty {
+            let word = String(current)
+            if !stopwords.contains(word) { words.append(word) }
+            current = String.UnicodeScalarView()
         }
-        return " "
     }
-
-    var words = String(cleaned)
-        .split(separator: " ")
-        .map { String($0) }
-        .filter { !$0.isEmpty && !stopwords.contains($0) }
-
-    // Enforce max token count to prevent pathologically long selectors
-    if words.count > maxCanonicalTokens {
-        words = Array(words.prefix(maxCanonicalTokens))
+    for scalar in lowered.unicodeScalars {
+        if isECMAScriptWhitespace(scalar) {
+            flush()
+        } else if isLetterNumberOrMark(scalar) {
+            current.append(scalar)
+        }
+        // anything else is deleted (not a separator)
     }
-
+    flush()
     let result = words.joined(separator: ":")
     return result.isEmpty ? "unknown" : result
+}
+
+/// The identity of an intent: its full text in Unicode NFC, trimmed, runs
+/// of whitespace collapsed to one space, lower case. Nothing else is
+/// removed -- negations, stopwords, punctuation and non-Latin scripts all
+/// keep two intents apart. The resolution cache keys on it. Same rules as
+/// @smallchat/core's `intentKey()`.
+public func intentKey(_ intent: String) -> String {
+    collapseECMAScriptWhitespace(intent.precomposedStringWithCanonicalMapping)
+        .lowercased()
+        .precomposedStringWithCanonicalMapping
+}
+
+/// The form pinned phrases are compared in: Unicode NFKC, lower case,
+/// trimmed, internal whitespace collapsed to one space. Nothing else is
+/// removed, so negations and qualifiers keep two phrases apart ("do not
+/// transfer funds" is not the phrase "transfer funds"). Same rules as
+/// @smallchat/core's `normalizePinPhrase()`.
+public func normalizePinPhrase(_ text: String) -> String {
+    collapseECMAScriptWhitespace(text.precomposedStringWithCompatibilityMapping.lowercased())
+}
+
+/// Trim, and collapse every run of ECMAScript whitespace to one space.
+private func collapseECMAScriptWhitespace(_ text: String) -> String {
+    var out = String.UnicodeScalarView()
+    var pendingSpace = false
+    for scalar in text.unicodeScalars {
+        if isECMAScriptWhitespace(scalar) {
+            pendingSpace = !out.isEmpty
+        } else {
+            if pendingSpace { out.append(" ") }
+            pendingSpace = false
+            out.append(scalar)
+        }
+    }
+    return String(out)
+}
+
+/// The ECMAScript `\s` class (WhiteSpace and LineTerminator), which is also
+/// what `String.prototype.trim` removes.
+public func isECMAScriptWhitespace(_ scalar: Unicode.Scalar) -> Bool {
+    switch scalar.value {
+    case 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0, 0x1680,
+         0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF:
+        return true
+    default:
+        return false
+    }
+}
+
+/// `\p{L}`, `\p{N}` or `\p{M}`.
+private func isLetterNumberOrMark(_ scalar: Unicode.Scalar) -> Bool {
+    switch scalar.properties.generalCategory {
+    case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
+         .decimalNumber, .letterNumber, .otherNumber,
+         .nonspacingMark, .spacingMark, .enclosingMark:
+        return true
+    default:
+        return false
+    }
 }

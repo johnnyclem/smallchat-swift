@@ -5,7 +5,7 @@ import SmallChat
 struct DocsCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "docs",
-        abstract: "Generate Markdown documentation from a compiled artifact"
+        abstract: "Generate Markdown documentation from a compiled artifact (format 1.0)"
     )
 
     @Argument(help: "Path to the compiled toolkit file")
@@ -15,10 +15,11 @@ struct DocsCommand: AsyncParsableCommand {
     var output: String = "TOOLS.md"
 
     func run() async throws {
-        let data = try Data(contentsOf: URL(fileURLWithPath: file))
-        guard let artifact = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let stats = artifact["stats"] as? [String: Any] else {
-            print("Failed to parse artifact")
+        let artifact: ArtifactV1
+        do {
+            artifact = try ArtifactV1.read(contentsOf: URL(fileURLWithPath: file))
+        } catch {
+            FileHandle.standardError.write(Data("\(error)\n".utf8))
             throw ExitCode.failure
         }
 
@@ -33,50 +34,43 @@ struct DocsCommand: AsyncParsableCommand {
         lines.append("")
         lines.append("| Metric | Value |")
         lines.append("|--------|-------|")
-        lines.append("| Total tools | \(stats["toolCount"] ?? 0) |")
-        lines.append("| Unique selectors | \(stats["uniqueSelectorCount"] ?? 0) |")
-        lines.append("| Providers | \(stats["providerCount"] ?? 0) |")
-        lines.append("| Collisions | \(stats["collisionCount"] ?? 0) |")
-
-        if let emb = artifact["embedding"] as? [String: Any] {
-            lines.append("| Embedding model | \(emb["model"] as? String ?? "unknown") |")
-            lines.append("| Dimensions | \(emb["dimensions"] ?? "unknown") |")
-        }
+        lines.append("| Total tools | \(artifact.tools.count) |")
+        lines.append("| Selectors | \(artifact.selectors.count) |")
+        lines.append("| Providers | \(artifact.providers.count) |")
+        lines.append("| Collisions | \(artifact.collisions.count) |")
+        lines.append("| Embedder | \(artifact.embedder.summary) |")
+        lines.append("| Content hash | `\(artifact.contentHash)` |")
         lines.append("")
 
         // Tools by provider
-        if let tables = artifact["dispatchTables"] as? [String: Any] {
-            lines.append("## Tools by Provider")
+        lines.append("## Tools by Provider")
+        lines.append("")
+        for providerId in artifact.providers.keys.sorted() {
+            let toolIds = artifact.toolIds.filter { artifact.tools[$0]?.providerId == providerId }
+            lines.append("### \(providerId) (\(toolIds.count) tools)")
             lines.append("")
-            for (providerId, tableValue) in tables {
-                if let methods = tableValue as? [String: Any] {
-                    lines.append("### \(providerId) (\(methods.count) tools)")
-                    lines.append("")
-                    for (selector, methodValue) in methods {
-                        if let method = methodValue as? [String: Any],
-                           let toolName = method["toolName"] as? String {
-                            lines.append("#### `\(toolName)`")
-                            lines.append("")
-                            lines.append("- **Selector**: `\(selector)`")
-                            lines.append("- **Transport**: `\(method["transportType"] as? String ?? "unknown")`")
-                            lines.append("")
-                        }
-                    }
+            for toolId in toolIds {
+                guard let tool = artifact.tools[toolId] else { continue }
+                lines.append("#### `\(toolId)`")
+                lines.append("")
+                if !tool.description.isEmpty { lines.append(tool.description); lines.append("") }
+                lines.append("- **Selector**: `\(tool.selector)`")
+                lines.append("- **Transport**: `\(tool.transportType)`")
+                if let annotations = tool.annotations, !annotations.isEmpty {
+                    let hints = annotations.jsonValue.keys.sorted().map { "\($0): \(annotations.jsonValue[$0]!)" }
+                    lines.append("- **Annotations**: \(hints.joined(separator: ", "))")
                 }
+                lines.append("")
             }
         }
 
         // Collisions
-        if let cols = artifact["collisions"] as? [[String: Any]], !cols.isEmpty {
+        if !artifact.collisions.isEmpty {
             lines.append("## Selector Collisions")
             lines.append("")
-            for c in cols {
-                let sA = c["selectorA"] as? String ?? ""
-                let sB = c["selectorB"] as? String ?? ""
-                let sim = c["similarity"] as? Double ?? 0
-                let hint = c["hint"] as? String ?? ""
-                lines.append("- **\(sA)** vs **\(sB)** — similarity: \(String(format: "%.1f", sim * 100))%")
-                lines.append("  - \(hint)")
+            for c in artifact.collisions {
+                lines.append("- **\(c.selectorA)** vs **\(c.selectorB)** — similarity: \(String(format: "%.1f", c.similarity * 100))%")
+                lines.append("  - \(c.hint)")
             }
             lines.append("")
         }
@@ -84,6 +78,6 @@ struct DocsCommand: AsyncParsableCommand {
         let markdown = lines.joined(separator: "\n")
         try markdown.write(toFile: output, atomically: true, encoding: .utf8)
         print("Documentation generated: \(output)")
-        print("  \(stats["toolCount"] ?? 0) tools across \(stats["providerCount"] ?? 0) providers")
+        print("  \(artifact.tools.count) tools across \(artifact.providers.count) providers")
     }
 }

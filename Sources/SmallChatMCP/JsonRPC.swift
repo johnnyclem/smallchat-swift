@@ -5,12 +5,34 @@ import SmallChatCore
 
 // MARK: - Protocol Constants
 
-/// MCP protocol version supported by this implementation.
-public let mcpProtocolVersion: String = "2024-11-05"
+/// MCP protocol versions the server negotiates, newest first.
+///
+/// Only versions whose required behavior the server implements: a single
+/// Streamable HTTP endpoint answering with `application/json`, sessions
+/// (`Mcp-Session-Id`), `MCP-Protocol-Version` header checks, `202` for
+/// notifications, Origin validation (`403`), no JSON-RPC batches, and
+/// `structuredContent` in tool results. 2025-03-26 (which requires accepting
+/// batches) and 2024-11-05 (HTTP+SSE transport) are not claimed.
+public let mcpSupportedProtocolVersions: [String] = ["2025-11-25", "2025-06-18"]
+
+/// The newest MCP protocol version this implementation speaks.
+public let mcpProtocolVersion: String = mcpSupportedProtocolVersions[0]
+
+/// Negotiate a protocol version the way MCP's `initialize` specifies: a
+/// requested version that is supported is echoed; anything else (or nothing)
+/// gets the newest supported version, and the client decides whether it can
+/// speak it.
+public func negotiateMCPProtocolVersion(
+    _ requested: String?,
+    supported: [String] = mcpSupportedProtocolVersions
+) -> String {
+    if let requested, supported.contains(requested) { return requested }
+    return supported[0]
+}
 
 /// Server identification constants.
 public let mcpServerName: String = "smallchat"
-public let mcpServerVersion: String = "0.6.0"
+public let mcpServerVersion: String = SmallChatVersion.current
 
 // MARK: - JSON-RPC Request ID
 
@@ -171,7 +193,6 @@ public enum MCPErrorCode: Int, Sendable {
 public enum MCPMethod: String, Sendable, CaseIterable {
     case initialize = "initialize"
     case ping = "ping"
-    case shutdown = "shutdown"
     case notificationsInitialized = "notifications/initialized"
 
     case toolsList = "tools/list"
@@ -339,6 +360,8 @@ public func validateRPCEnvelope(_ dict: [String: AnyCodableValue]) -> Result<JSO
         switch idValue {
         case .string(let s): id = .string(s)
         case .int(let i): id = .int(i)
+        // `1.0` (or 1e3) reads as a double, as JSON.parse would; its value is an integer.
+        case .double(let d) where d.rounded() == d && abs(d) <= 9_007_199_254_740_992: id = .int(Int(d))
         case .null: id = .null
         default:
             return .failure(JSONRPCError(

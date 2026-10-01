@@ -6,11 +6,21 @@ import SmallChatCore
 public struct RuntimeOptions: Sendable {
     public var selectorThreshold: Float
     public var cacheSize: Int
+    /// Lowest score the resolution cache stores (default 0.85: HIGH and EXACT).
     public var minConfidence: Double
     public var modelVersion: String?
     public var selectorNamespace: SelectorNamespace?
+    /// Opt-in semantic rate limiting of novel intents, per principal. Off when nil.
     public var rateLimiter: SemanticRateLimiterOptions?
+    /// Tier thresholds and the dispatch policy's guards.
     public var dispatchConfig: DispatchConfig
+    /// LLM client for verification (required below HIGH by default),
+    /// decomposition and refinement questions.
+    public var llmClient: any LLMClient
+    /// Intent pins (see `IntentPinRegistry`).
+    public var intentPins: [IntentPin]
+    /// contentHash of the artifact the tools came from, recorded in every proof.
+    public var artifactHash: String?
 
     public init(
         selectorThreshold: Float = 0.95,
@@ -19,7 +29,10 @@ public struct RuntimeOptions: Sendable {
         modelVersion: String? = nil,
         selectorNamespace: SelectorNamespace? = nil,
         rateLimiter: SemanticRateLimiterOptions? = nil,
-        dispatchConfig: DispatchConfig = DispatchConfig()
+        dispatchConfig: DispatchConfig = DispatchConfig(),
+        llmClient: any LLMClient = NoOpLLMClient(),
+        intentPins: [IntentPin] = [],
+        artifactHash: String? = nil
     ) {
         self.selectorThreshold = selectorThreshold
         self.cacheSize = cacheSize
@@ -28,6 +41,9 @@ public struct RuntimeOptions: Sendable {
         self.selectorNamespace = selectorNamespace
         self.rateLimiter = rateLimiter
         self.dispatchConfig = dispatchConfig
+        self.llmClient = llmClient
+        self.intentPins = intentPins
+        self.artifactHash = artifactHash
     }
 }
 
@@ -64,21 +80,22 @@ public actor ToolRuntime {
         let cache = ResolutionCache(
             maxSize: options.cacheSize,
             minConfidence: options.minConfidence,
-            versionContext: versionContext,
-            rateLimiterOptions: options.rateLimiter
+            versionContext: versionContext
         )
         self.cache = cache
 
         let selectorTable = SelectorTable(
             index: vectorIndex,
             embedder: embedder,
-            threshold: options.selectorThreshold,
-            rateLimiter: cache.rateLimiter
+            threshold: options.selectorThreshold
         )
         self.selectorTable = selectorTable
 
         let selectorNamespace = options.selectorNamespace ?? SelectorNamespace()
         self.selectorNamespace = selectorNamespace
+
+        let pins = IntentPinRegistry()
+        for pin in options.intentPins { pins.pin(pin) }
 
         self.context = DispatchContext(
             selectorTable: selectorTable,
@@ -86,7 +103,11 @@ public actor ToolRuntime {
             vectorIndex: vectorIndex,
             embedder: embedder,
             selectorNamespace: selectorNamespace,
-            dispatchConfig: options.dispatchConfig
+            intentPins: pins,
+            dispatchConfig: options.dispatchConfig,
+            llmClient: options.llmClient,
+            rateLimiter: options.rateLimiter.map { SemanticRateLimiter(options: $0) },
+            artifactHash: options.artifactHash
         )
     }
 
@@ -98,6 +119,12 @@ public actor ToolRuntime {
     /// would shadow protected core selectors.
     public func registerClass(_ toolClass: ToolClass) async throws {
         try await context.registerClass(toolClass)
+    }
+
+    /// Remove a provider by name. Returns false when none has that name.
+    @discardableResult
+    public func unregisterClass(_ name: String) async -> Bool {
+        await context.unregisterClass(name)
     }
 
     /// Register a tool class as a core system provider.
@@ -139,7 +166,8 @@ public actor ToolRuntime {
             }
         }
 
-        // Flush cache -- new methods may shadow cached resolutions
+        // Re-index and flush -- new methods may shadow cached resolutions
+        await context.reindex()
         await cache.flush()
     }
 
@@ -162,7 +190,8 @@ public actor ToolRuntime {
             originalToolName: originalToolName,
             isSemanticOverload: isSemanticOverload
         )
-        // Flush cache -- overloads change resolution behavior
+        // Re-index and flush -- overloads change resolution behavior
+        await context.reindex()
         await cache.flush()
     }
 
@@ -181,8 +210,10 @@ public actor ToolRuntime {
 
         let original = toolClass.swizzleMethod(selector, newImp: newImp)
 
-        // Flush cache entries for this selector -- critical!
-        await cache.flushSelector(selector)
+        // Re-index (tool ids change) and flush every cached resolution:
+        // they are keyed by intent, not by selector.
+        await context.reindex()
+        await cache.flush()
 
         return original
     }
@@ -197,9 +228,29 @@ public actor ToolRuntime {
         DispatchBuilder(context: context, intent: intent)
     }
 
-    /// Direct dispatch -- legacy API that executes immediately with args.
-    public func dispatch(_ intent: String, args: [String: any Sendable]) async throws -> ToolResult {
-        try await toolkitDispatch(context: context, intent: intent, args: args)
+    /// Resolve an intent to at most one tool (`Resolution`). Never executes.
+    /// Run the proposal with `dispatchById(_:args:options:)`, passing
+    /// `resolution.proof.proofDigest` as `resolutionDigest` to link the two.
+    public func resolve(_ intent: String, options: ResolveOptions = ResolveOptions()) async throws -> Resolution {
+        try await context.resolve(intent, options: options)
+    }
+
+    /// Execute exactly the tool `toolId` (`<providerId>/<toolName>`): O(1),
+    /// no embedding. Arguments are validated against its inputSchema first.
+    public func dispatchById(
+        _ toolId: String,
+        args: [String: any Sendable] = [:],
+        options: DispatchByIdOptions = DispatchByIdOptions()
+    ) async throws -> ToolResult {
+        try await context.dispatchById(toolId, args: args, options: options)
+    }
+
+    /// Resolve an intent and execute exactly the chosen tool under the
+    /// dispatch policy. When resolution does not settle on one tool, nothing
+    /// runs: the result is `isError` with `metadata["outcome"]`
+    /// (`DispatchOutcomeCode`) and the candidates.
+    public func dispatch(_ intent: String, args: [String: any Sendable], options: DispatchOptions = DispatchOptions()) async throws -> ToolResult {
+        try await context.dispatch(intent, args: args, options: options)
     }
 
     /// Fluent dispatch builder -- chainable API for constructing dispatches.
@@ -262,6 +313,14 @@ public actor ToolRuntime {
         args: [String: any Sendable]? = nil
     ) -> AsyncThrowingStream<DispatchEvent, Error> {
         smallchatDispatchStream(context: context, intent: intent, args: args)
+    }
+
+    /// Streaming dispatch of exactly the tool `toolId`.
+    public func dispatchStreamById(
+        _ toolId: String,
+        args: [String: any Sendable] = [:]
+    ) -> AsyncThrowingStream<DispatchEvent, Error> {
+        smallchatDispatchStreamById(context: context, toolId: toolId, args: args)
     }
 
     /// Progressive inference stream -- convenience that yields only the token
@@ -365,8 +424,9 @@ public actor ToolRuntime {
         }
 
         lines.append("")
-        lines.append("To use a tool, describe what you want to do. The runtime will resolve")
-        lines.append("the best tool and provide the required arguments.")
+        lines.append("To use a tool, call it by id (<provider>/<tool>), or describe what you want")
+        lines.append("to do: the runtime proposes a tool, and runs it only when the dispatch")
+        lines.append("policy allows (HIGH or EXACT confidence, or an LLM verifier's approval).")
         lines.append("Overloaded tools accept different argument types and counts.")
 
         return lines.joined(separator: "\n")
