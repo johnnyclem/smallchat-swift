@@ -1,4 +1,4 @@
-// MARK: - MCPServer — NIO-based HTTP server for MCP protocol
+// MARK: - MCPServer — NIO-based Streamable HTTP server for the MCP protocol
 
 import Foundation
 import NIOCore
@@ -11,65 +11,96 @@ import SmallChatRuntime
 
 /// Configuration for the MCP HTTP server.
 public struct MCPServerConfig: Sendable {
-    /// Port to listen on.
+    /// Port to listen on (0 picks a free port; see `MCPServer.boundPort`).
     public let port: Int
     /// Host to bind to.
     public let host: String
-    /// Source directory or compiled artifact path.
+    /// Toolkit to serve when `start()` is called and no artifact was set:
+    /// a directory of provider manifests, one manifest, or a compiled
+    /// artifact (see `MCPToolkit.load`). Empty: serve only what is set
+    /// programmatically.
     public let sourcePath: String
     /// SQLite database path for sessions.
     public let dbPath: String
-    /// Enable OAuth 2.1 authentication.
-    public let enableAuth: Bool
-    /// Enable rate limiting.
+    /// Bearer token every request except `GET /health` must carry
+    /// (`Authorization: Bearer <token>`). nil: no authentication.
+    public let authToken: String?
+    /// Enable rate limiting (per client address).
     public let enableRateLimit: Bool
-    /// Max requests per minute per client.
+    /// Max requests per minute per client address.
     public let rateLimitRPM: Int
     /// Enable audit logging.
     public let enableAudit: Bool
+    /// Key for the audit log's HMAC chain. nil: a random key per server.
+    public let auditKey: Data?
     /// Session TTL in milliseconds.
     public let sessionTTLMs: Int
-    /// Allowed CORS origin for Access-Control-Allow-Origin header.
+    /// Origin sent in `Access-Control-Allow-Origin`, and accepted as `Origin`.
     public let corsOrigin: String
-    /// Maximum concurrent client connections (v0.3.0). 0 = unlimited.
+    /// Further `Origin` values accepted. Requests without an `Origin` header
+    /// (non-browser clients) are always accepted; loopback origins are
+    /// accepted while the server is bound to a loopback address.
+    public let allowedOrigins: [String]
+    /// Maximum concurrent client connections; connections over the limit are
+    /// closed at once. 0 = unlimited.
     public let maxConnections: Int
-    /// Maximum request body size in bytes (v0.3.0). Prevents memory exhaustion.
+    /// Maximum request body size in bytes. Prevents memory exhaustion.
     public let maxRequestBodyBytes: Int
-    /// Graceful shutdown drain timeout in seconds (v0.3.0).
+    /// Graceful shutdown drain timeout in seconds.
     public let shutdownDrainSeconds: Int
+    /// How tools are named in `tools/list` and `tools/call`.
+    public let toolNaming: MCPToolNaming
+    /// List the `smallchat_dispatch` meta-tool (semantic dispatch through the
+    /// runtime) when a runtime is wired. Off by default: every other call
+    /// runs exactly the named tool.
+    public let semanticDispatch: Bool
 
     public init(
         port: Int = 3000,
         host: String = "127.0.0.1",
         sourcePath: String,
         dbPath: String = "smallchat.db",
-        enableAuth: Bool = false,
+        authToken: String? = nil,
         enableRateLimit: Bool = false,
         rateLimitRPM: Int = 600,
         enableAudit: Bool = false,
+        auditKey: Data? = nil,
         sessionTTLMs: Int = 86_400_000,
         corsOrigin: String = "http://127.0.0.1",
+        allowedOrigins: [String] = [],
         maxConnections: Int = 1000,
         maxRequestBodyBytes: Int = 1_048_576,
-        shutdownDrainSeconds: Int = 30
+        shutdownDrainSeconds: Int = 30,
+        toolNaming: MCPToolNaming = .aggregate,
+        semanticDispatch: Bool = false
     ) {
         self.port = port
         self.host = host
         self.sourcePath = sourcePath
         self.dbPath = dbPath
-        self.enableAuth = enableAuth
+        self.authToken = authToken
         self.enableRateLimit = enableRateLimit
         self.rateLimitRPM = rateLimitRPM
         self.enableAudit = enableAudit
+        self.auditKey = auditKey
         self.sessionTTLMs = sessionTTLMs
         self.corsOrigin = corsOrigin
+        self.allowedOrigins = allowedOrigins
         self.maxConnections = maxConnections
         self.maxRequestBodyBytes = maxRequestBodyBytes
         self.shutdownDrainSeconds = shutdownDrainSeconds
+        self.toolNaming = toolNaming
+        self.semanticDispatch = semanticDispatch
+    }
+
+    /// A fresh random bearer token (64 hex characters).
+    public static func generateAuthToken() -> String {
+        var rng = SystemRandomNumberGenerator()
+        return (0..<32).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max, using: &rng)) }.joined()
     }
 }
 
-// MARK: - Server Metrics (v0.3.0)
+// MARK: - Server Metrics
 
 /// Lightweight request metrics for observability.
 public actor ServerMetrics {
@@ -77,6 +108,7 @@ public actor ServerMetrics {
     private(set) var totalErrors: Int = 0
     private(set) var activeConnections: Int = 0
     private(set) var peakConnections: Int = 0
+    private(set) var rejectedConnections: Int = 0
     private let startTime: ContinuousClock.Instant
 
     public init() {
@@ -101,10 +133,9 @@ public actor ServerMetrics {
         activeConnections = max(0, activeConnections - 1)
     }
 
-    /// Whether a new connection should be accepted given the limit.
-    public func shouldAcceptConnection(limit: Int) -> Bool {
-        guard limit > 0 else { return true }
-        return activeConnections < limit
+    /// Count a connection closed because the server was at `maxConnections`.
+    public func connectionRejected() {
+        rejectedConnections += 1
     }
 
     /// Get a snapshot of current metrics.
@@ -117,56 +148,104 @@ public actor ServerMetrics {
             "total_errors": .int(totalErrors),
             "active_connections": .int(activeConnections),
             "peak_connections": .int(peakConnections),
+            "rejected_connections": .int(rejectedConnections),
             "error_rate": .double(totalRequests > 0 ? Double(totalErrors) / Double(totalRequests) : 0),
         ]
     }
 }
 
+// MARK: - HTTP request/response values
+
+/// One HTTP request, as the server's request logic sees it.
+struct MCPHTTPRequest: Sendable {
+    var method: HTTPMethod
+    var uri: String
+    var headers: HTTPHeaders
+    var body: [UInt8]
+    /// Client IP address (no port).
+    var remoteAddress: String?
+
+    var path: String {
+        String(uri.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+    }
+}
+
+/// One HTTP response.
+struct MCPHTTPResponse: Sendable {
+    var status: HTTPResponseStatus
+    var headers: HTTPHeaders = HTTPHeaders()
+    var body: [UInt8] = []
+
+    static func json<T: Encodable>(_ status: HTTPResponseStatus, _ value: T) -> MCPHTTPResponse {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        var response = MCPHTTPResponse(status: status)
+        response.headers.add(name: "Content-Type", value: "application/json")
+        response.body = Array((try? encoder.encode(value)) ?? Data("{}".utf8))
+        return response
+    }
+
+    /// A JSON-RPC error carried by an HTTP error status.
+    static func rpcError(_ status: HTTPResponseStatus, id: JSONRPCId = .null, code: MCPErrorCode, _ message: String) -> MCPHTTPResponse {
+        json(status, JSONRPCResponse.error(id, code: code.rawValue, message: message))
+    }
+}
+
 // MARK: - MCPServer Actor
 
-/// MCP 2024-11-05 protocol server over HTTP.
+/// MCP server over Streamable HTTP (protocol versions in
+/// `mcpSupportedProtocolVersions`).
 ///
-/// Composes extracted modules for session management, OAuth, resources,
-/// prompts, rate limiting, audit logging, and SSE streaming.
-/// Uses SwiftNIO for the HTTP server layer.
+/// One MCP endpoint, `/mcp`: `POST` carries one JSON-RPC message and is
+/// answered with `application/json` (`202 Accepted` for a notification);
+/// `DELETE` ends a session; `GET` is `405` (the server does not open
+/// server-to-client streams). `initialize` opens a session whose id comes
+/// back in `Mcp-Session-Id`; every other request must carry it (`400` when
+/// missing, `404` when unknown or expired). `GET /health` and `GET /metrics`
+/// report status.
 ///
-/// v0.3.0: Adds connection limits, max request body size, graceful shutdown,
-/// and server metrics endpoint.
+/// In front of MCP: Host and Origin checks (`403`), an optional bearer token
+/// (`401`), a body size cap (`413`), JSON-only bodies (`415`), per-address
+/// rate limiting (`429`), and a connection cap.
+///
+/// `tools/call` runs exactly the named tool through the wired runtime (see
+/// `setRuntime(_:semanticDispatch:)`). Built on SwiftNIO; request work runs
+/// in Swift tasks and every write hops back to the connection's event loop.
 public actor MCPServer {
 
     private let config: MCPServerConfig
     private let sessionStore: SessionStore
-    private let oauthManager: OAuthManager
     private let resourceRegistry: ResourceRegistry
     private let promptRegistry: PromptRegistry
     private let rateLimiter: RateLimiter
     private let auditLog: AuditLog
-    private let sseBroker: SSEBroker
     private let router: MCPRouter
     private let metrics: ServerMetrics
+    private let connections: ConnectionGate
     private var artifact: SerializedArtifact?
     private var eventLoopGroup: (any EventLoopGroup)?
     private var serverChannel: Channel?
+    /// Requests being answered right now (what `stop()` drains).
+    private var inFlightRequests = 0
 
     public init(config: MCPServerConfig) throws {
         self.config = config
         self.sessionStore = try SessionStore(dbPath: config.dbPath)
-        self.oauthManager = OAuthManager()
         self.resourceRegistry = ResourceRegistry()
         self.promptRegistry = PromptRegistry()
         self.rateLimiter = RateLimiter(maxRPM: config.rateLimitRPM)
-        self.auditLog = AuditLog()
-        self.sseBroker = SSEBroker()
+        self.auditLog = AuditLog(hmacKey: config.auditKey ?? AuditLog.generateKey())
         self.metrics = ServerMetrics()
+        self.connections = ConnectionGate(limit: config.maxConnections)
         self.router = MCPRouter(
             sessionStore: sessionStore,
             resourceRegistry: resourceRegistry,
             promptRegistry: promptRegistry,
-            sseBroker: sseBroker,
             options: RouterOptions(
                 serverName: mcpServerName,
                 serverVersion: mcpServerVersion,
-                sessionTTLMs: config.sessionTTLMs
+                sessionTTLMs: config.sessionTTLMs,
+                toolNaming: config.toolNaming
             )
         )
     }
@@ -179,42 +258,69 @@ public actor MCPServer {
     /// Access the prompt registry for registering handlers.
     public var prompts: PromptRegistry { promptRegistry }
 
-    /// Access the OAuth manager.
-    public var oauth: OAuthManager { oauthManager }
-
-    /// Wire a ToolRuntime so that tools/call requests dispatch through tieredDispatch.
-    ///
-    /// Call this after init and before start(). The runtime's DispatchContext is
-    /// captured by the closure; the runtime itself is held weakly inside the Task
-    /// isolation boundary via Swift actor semantics.
-    public func setRuntime(_ runtime: ToolRuntime) async {
-        await router.setRefinementHandler { [runtime] intent, args in
-            try await tieredDispatch(
-                context: runtime.context,
-                intent: intent,
-                args: args.mapValues { $0 as any Sendable }
-            )
-        }
-    }
-
-    /// Access the SSE broker.
-    public var sse: SSEBroker { sseBroker }
-
     /// Access the audit log.
     public var audit: AuditLog { auditLog }
 
-    /// Access server metrics (v0.3.0).
+    /// Access server metrics.
     public var serverMetrics: ServerMetrics { metrics }
+
+    /// The port the server listens on, once started.
+    public var boundPort: Int? { serverChannel?.localAddress?.port }
+
+    /// The tools `tools/list` serves (nil until an artifact is set or loaded).
+    public var toolCatalog: MCPToolCatalog? {
+        get async { await router.toolCatalog }
+    }
+
+    /// Serve the tools of `artifact`.
+    public func setArtifact(_ artifact: SerializedArtifact) async {
+        self.artifact = artifact
+        await router.setArtifact(artifact)
+    }
+
+    /// Run `tools/call` through `executor`.
+    public func setToolExecutor(_ executor: @escaping MCPToolExecutor) async {
+        await router.setToolExecutor(executor)
+    }
+
+    /// Wire a `ToolRuntime` so `tools/call` runs tools.
+    ///
+    /// A call runs exactly the listed tool: the runtime's class named after the
+    /// tool's provider, and that class's implementation with the tool's
+    /// upstream name. There is no semantic fallback on `tools/call`. With
+    /// `semanticDispatch`, the `smallchat_dispatch` meta-tool is listed and
+    /// resolves intents through `tieredDispatch`.
+    public func setRuntime(_ runtime: ToolRuntime, semanticDispatch: Bool = false) async {
+        await router.setToolExecutor { [runtime] tool, arguments in
+            let classes = await runtime.context.getClasses()
+            guard let toolClass = classes.first(where: { $0.name == tool.providerId }),
+                  let imp = toolClass.dispatchTable.values.first(where: { $0.toolName == tool.toolName }) else {
+                throw MCPToolUnavailableError(toolId: tool.toolId, reason: "the runtime has no implementation for it")
+            }
+            return try await imp.execute(args: arguments.mapValues { $0 as any Sendable })
+        }
+        if semanticDispatch {
+            await router.setSemanticDispatchHandler { [runtime] intent, arguments in
+                try await tieredDispatch(
+                    context: runtime.context,
+                    intent: intent,
+                    args: arguments.mapValues { $0 as any Sendable }
+                )
+            }
+        }
+    }
 
     // MARK: - Lifecycle
 
     /// Start the MCP server.
+    ///
+    /// When no artifact was set and `sourcePath` is not empty, the toolkit is
+    /// loaded from it (`MCPToolkit.load`) and its runtime wired.
     public func start() async throws {
-        // Load artifact if path is provided
-        if config.sourcePath.hasSuffix(".json") {
-            let loadedArtifact = try ArtifactIO.load(from: config.sourcePath)
-            self.artifact = loadedArtifact
-            await router.setArtifact(loadedArtifact)
+        if artifact == nil, !config.sourcePath.isEmpty {
+            let toolkit = try await MCPToolkit.load(source: config.sourcePath)
+            await setArtifact(toolkit.artifact)
+            await setRuntime(toolkit.runtime, semanticDispatch: config.semanticDispatch)
         }
 
         // Prune expired sessions
@@ -223,496 +329,398 @@ public actor MCPServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
         self.eventLoopGroup = group
 
-        let reuseAddrOpt = ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR)
-
+        let maxBodyBytes = config.maxRequestBodyBytes
+        let connections = self.connections
+        let metrics = self.metrics
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
-            .serverChannelOption(reuseAddrOpt, value: 1)
-            .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(MCPHTTPHandler(
-                        server: self,
-                        corsOrigin: self.config.corsOrigin,
-                        maxBodyBytes: self.config.maxRequestBodyBytes
-                    ))
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { [self] channel in
+                // Over the connection limit: close at once.
+                guard connections.acquire() else {
+                    Task { await metrics.connectionRejected() }
+                    return channel.close()
+                }
+                Task { await metrics.connectionOpened() }
+                channel.closeFuture.whenComplete { _ in
+                    connections.release()
+                    Task { await metrics.connectionClosed() }
+                }
+                return channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.configureHTTPServerPipeline()
+                    try channel.pipeline.syncOperations.addHandler(
+                        MCPHTTPHandler(server: self, maxBodyBytes: maxBodyBytes)
+                    )
                 }
             }
-            .childChannelOption(reuseAddrOpt, value: 1)
+            .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 16)
 
-        let channel = try await bootstrap.bind(host: config.host, port: config.port).get()
-        self.serverChannel = channel
+        do {
+            self.serverChannel = try await bootstrap.bind(host: config.host, port: config.port).get()
+        } catch {
+            try? await group.shutdownGracefully()
+            self.eventLoopGroup = nil
+            throw error
+        }
     }
 
-    /// Stop the MCP server with graceful drain (v0.3.0).
+    /// Stop the MCP server with graceful drain.
     ///
-    /// Waits up to `shutdownDrainSeconds` for in-flight requests to complete,
-    /// then forcefully closes remaining connections.
+    /// Stops accepting connections, waits up to `shutdownDrainSeconds` for
+    /// in-flight requests to be answered, then closes every connection.
     public func stop() async throws {
-        // Disconnect all SSE clients
-        await sseBroker.disconnectSession("*")
+        try? await serverChannel?.close()
+        serverChannel = nil
 
-        // Graceful drain: give in-flight requests time to complete
         let drainDeadline = ContinuousClock.now + .seconds(config.shutdownDrainSeconds)
-        while await metrics.snapshot()["active_connections"] != .int(0),
-              ContinuousClock.now < drainDeadline {
-            try await Task.sleep(for: .milliseconds(100))
+        while inFlightRequests > 0, ContinuousClock.now < drainDeadline {
+            try await Task.sleep(for: .milliseconds(50))
         }
 
-        try await serverChannel?.close()
         try await eventLoopGroup?.shutdownGracefully()
-        serverChannel = nil
         eventLoopGroup = nil
     }
 
-    // MARK: - Request Processing
+    // MARK: - HTTP
 
-    /// Process a JSON-RPC request body and return a response.
-    func processJSONRPC(
-        body: String,
-        sessionId: String?,
-        clientAddress: String?,
-        authHeader: String?,
-        acceptsSSE: Bool
-    ) async -> (response: JSONRPCResponse?, headers: [String: String]) {
+    /// The MCP endpoint path.
+    public static let endpointPath = "/mcp"
+
+    /// Answer one HTTP request.
+    func handleHTTP(_ request: MCPHTTPRequest) async -> MCPHTTPResponse {
+        inFlightRequests += 1
+        defer { inFlightRequests -= 1 }
+        var response = await route(request)
+        response.headers.replaceOrAdd(name: "Access-Control-Allow-Origin", value: config.corsOrigin)
+        response.headers.replaceOrAdd(name: "Access-Control-Allow-Methods", value: "POST, GET, DELETE, OPTIONS")
+        response.headers.replaceOrAdd(
+            name: "Access-Control-Allow-Headers",
+            value: "Content-Type, Accept, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID"
+        )
+        response.headers.replaceOrAdd(name: "Access-Control-Expose-Headers", value: "Mcp-Session-Id")
+        response.headers.replaceOrAdd(name: "Content-Length", value: String(response.body.count))
+        return response
+    }
+
+    private func route(_ request: MCPHTTPRequest) async -> MCPHTTPResponse {
+        // DNS rebinding: a loopback server only answers loopback Host names,
+        // and browsers' requests only from accepted origins.
+        if let host = request.headers.first(name: "Host"), !hostAllowed(host) {
+            return .json(.forbidden, ["error": "Forbidden host"])
+        }
+        if let origin = request.headers.first(name: "Origin"), !originAllowed(origin) {
+            return .json(.forbidden, ["error": "Forbidden origin"])
+        }
+
+        if request.method == .OPTIONS {
+            return MCPHTTPResponse(status: .noContent)
+        }
+
+        if request.method == .GET && request.path == "/health" {
+            return .json(.ok, await healthResponse())
+        }
+
+        if let token = config.authToken {
+            let header = request.headers.first(name: "Authorization") ?? ""
+            let provided = header.range(of: "Bearer ", options: [.caseInsensitive, .anchored])
+                .map { String(header[$0.upperBound...]) }
+            guard let provided, constantTimeEquals(provided, token) else {
+                var unauthorized = MCPHTTPResponse.json(.unauthorized, ["error": "Unauthorized"])
+                unauthorized.headers.add(name: "WWW-Authenticate", value: "Bearer")
+                return unauthorized
+            }
+        }
+
+        if request.method == .GET && request.path == "/metrics" {
+            return .json(.ok, await metrics.snapshot())
+        }
+
+        guard request.path == Self.endpointPath else {
+            return .json(.notFound, ["error": "Not found"])
+        }
+
+        switch request.method {
+        case .POST:
+            return await handlePost(request)
+        case .DELETE:
+            return await handleDelete(request)
+        default:
+            var notAllowed = MCPHTTPResponse.json(.methodNotAllowed, ["error": "Method not allowed"])
+            notAllowed.headers.add(name: "Allow", value: "POST, DELETE")
+            return notAllowed
+        }
+    }
+
+    private func handleDelete(_ request: MCPHTTPRequest) async -> MCPHTTPResponse {
+        guard let sessionId = request.headers.first(name: "Mcp-Session-Id"), !sessionId.isEmpty else {
+            return .rpcError(.badRequest, code: .invalidRequest, "Missing Mcp-Session-Id header")
+        }
+        let deleted = (try? await sessionStore.delete(sessionId)) ?? false
+        return deleted
+            ? MCPHTTPResponse(status: .noContent)
+            : .rpcError(.notFound, code: .sessionExpired, "Session not found")
+    }
+
+    private func handlePost(_ request: MCPHTTPRequest) async -> MCPHTTPResponse {
         let startTime = ContinuousClock.now
-        var extraHeaders: [String: String] = [:]
 
-        // Parse request
-        let request: JSONRPCRequest
-        do {
-            guard let data = body.data(using: .utf8) else {
-                let resp = JSONRPCResponse.error(.null, code: MCPErrorCode.parseError.rawValue, message: "Parse error")
-                return (resp, extraHeaders)
-            }
-            let dict = try JSONDecoder().decode([String: AnyCodableValue].self, from: data)
-            switch validateRPCEnvelope(dict) {
-            case .success(let req):
-                request = req
-            case .failure(let err):
-                let resp = JSONRPCResponse(id: .null, error: err)
-                return (resp, extraHeaders)
-            }
-        } catch {
-            let resp = JSONRPCResponse.error(.null, code: MCPErrorCode.parseError.rawValue, message: "Parse error")
-            return (resp, extraHeaders)
+        let contentType = request.headers.first(name: "Content-Type") ?? ""
+        guard contentType.lowercased().contains("application/json") else {
+            return .rpcError(.unsupportedMediaType, code: .invalidRequest, "Content-Type must be application/json")
+        }
+        if let version = request.headers.first(name: "MCP-Protocol-Version"),
+           !mcpSupportedProtocolVersions.contains(version) {
+            return .rpcError(.badRequest, code: .invalidRequest, "Unsupported MCP-Protocol-Version: \(version)")
         }
 
-        let id = request.id ?? .null
-
-        // Auth guard
-        if config.enableAuth {
-            let auth = await oauthManager.extractBearerToken(authHeader)
-            if !auth.active && request.method != MCPMethod.initialize.rawValue {
-                let resp = JSONRPCResponse.error(id, code: MCPErrorCode.unsupportedVersion.rawValue, message: "Authentication required")
-                return (resp, extraHeaders)
-            }
-        }
-
-        // Rate limit guard
+        // Rate limit by client address: session ids are chosen by clients.
         if config.enableRateLimit {
-            let clientKey = sessionId ?? clientAddress ?? "unknown"
-            let allowed = await rateLimiter.check(clientId: clientKey)
+            let allowed = await rateLimiter.check(clientId: request.remoteAddress ?? "unknown")
             if !allowed {
-                let resp = JSONRPCResponse.error(id, code: MCPErrorCode.unsupportedVersion.rawValue, message: "Rate limit exceeded")
-                return (resp, extraHeaders)
+                await metrics.recordRequest(success: false)
+                return .rpcError(.tooManyRequests, code: .unsupportedVersion, "Rate limit exceeded")
             }
         }
 
-        // Touch session
-        if let sessionId {
-            try? await sessionStore.touch(sessionId)
+        // Parse one JSON-RPC message.
+        let json = try? JSONSerialization.jsonObject(with: Data(request.body), options: [.fragmentsAllowed])
+        if json is [Any] {
+            return .rpcError(.badRequest, code: .invalidRequest, "JSON-RPC batches are not supported")
+        }
+        guard json is [String: Any],
+              let dict = try? JSONDecoder().decode([String: AnyCodableValue].self, from: Data(request.body)) else {
+            return .rpcError(.badRequest, code: .parseError, "Parse error")
+        }
+        // A client's response to a server request (the server sends none).
+        if dict["method"] == nil, dict["result"] != nil || dict["error"] != nil {
+            return MCPHTTPResponse(status: .accepted)
+        }
+        let rpc: JSONRPCRequest
+        switch validateRPCEnvelope(dict) {
+        case .success(let valid):
+            rpc = valid
+        case .failure(let error):
+            return .json(.badRequest, JSONRPCResponse(id: .null, error: error))
         }
 
-        // Route request
-        let response = await router.handle(request: request, sessionId: sessionId)
-
-        // If the response contains a sessionId, propagate as header
-        if let response,
-           case .dict(let resultDict) = response.result,
-           case .string(let newSessionId) = resultDict["sessionId"] {
-            extraHeaders["Mcp-Session-Id"] = newSessionId
+        // initialize opens a session; everything else needs a live one.
+        let rpcResponse: JSONRPCResponse?
+        let sessionId: String?
+        var extraHeaders = HTTPHeaders()
+        if rpc.method == MCPMethod.initialize.rawValue {
+            let (response, session) = await router.initialize(request: rpc)
+            if let session { extraHeaders.add(name: "Mcp-Session-Id", value: session.id) }
+            sessionId = session?.id
+            rpcResponse = rpc.isNotification ? nil : response
+        } else {
+            guard let provided = request.headers.first(name: "Mcp-Session-Id"), !provided.isEmpty else {
+                return .rpcError(.badRequest, id: rpc.id ?? .null, code: .invalidRequest, "Missing Mcp-Session-Id header")
+            }
+            guard (try? await sessionStore.activeSession(provided, ttlMs: config.sessionTTLMs)) != nil else {
+                return .rpcError(.notFound, id: rpc.id ?? .null, code: .sessionExpired, "Session not found or expired")
+            }
+            sessionId = provided
+            rpcResponse = await router.handle(request: rpc, sessionId: provided)
         }
 
-        let success = response?.error == nil
-
-        // Record metrics (v0.3.0)
+        let isToolError: Bool = {
+            if case .dict(let result)? = rpcResponse?.result, case .bool(true)? = result["isError"] { return true }
+            return false
+        }()
+        let success = rpcResponse?.error == nil && !isToolError
         await metrics.recordRequest(success: success)
 
-        // Audit trail
         if config.enableAudit {
             let elapsed = ContinuousClock.now - startTime
             let durationMs = Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
             await auditLog.log(AuditEntry(
-                method: request.method,
+                method: rpc.method,
                 sessionId: sessionId,
+                clientId: request.remoteAddress,
                 success: success,
                 durationMs: durationMs,
-                error: response?.error?.message
+                error: rpcResponse?.error?.message ?? (isToolError ? "tool returned isError" : nil)
             ))
         }
 
-        return (response, extraHeaders)
-    }
-
-    /// Build the MCP discovery document.
-    func discoveryDocument() -> [String: AnyCodableValue] {
-        [
-            "mcpVersion": .string(mcpProtocolVersion),
-            "serverInfo": .dict([
-                "name": .string(mcpServerName),
-                "version": .string(mcpServerVersion),
-            ]),
-            "capabilities": .dict([
-                "tools": .dict(["listChanged": .bool(true)]),
-                "resources": .dict(["subscribe": .bool(true), "listChanged": .bool(true)]),
-                "prompts": .dict(["listChanged": .bool(true)]),
-                "logging": .dict([:]),
-            ]),
-            "endpoints": .dict([
-                "jsonrpc": .string("/"),
-                "sse": .string("/sse"),
-                "health": .string("/health"),
-                "oauth": .string("/oauth/token"),
-            ]),
-        ]
+        guard let rpcResponse else {
+            // A notification: accepted, no body.
+            var accepted = MCPHTTPResponse(status: .accepted)
+            accepted.headers.add(contentsOf: extraHeaders)
+            return accepted
+        }
+        var response = MCPHTTPResponse.json(.ok, rpcResponse)
+        response.headers.add(contentsOf: extraHeaders)
+        return response
     }
 
     /// Build the health check response.
     func healthResponse() async -> [String: AnyCodableValue] {
         let sessionCount = (try? await sessionStore.count()) ?? 0
-        let sseCount = await sseBroker.totalConnectionCount()
-        let metricsSnapshot = await metrics.snapshot()
         return [
             "status": .string("ok"),
             "version": .string(mcpServerVersion),
-            "protocolVersion": .string(mcpProtocolVersion),
+            "protocolVersions": .array(mcpSupportedProtocolVersions.map { .string($0) }),
             "tools": .int(artifact?.stats.toolCount ?? 0),
             "providers": .int(artifact?.stats.providerCount ?? 0),
             "sessions": .int(sessionCount),
-            "sseClients": .int(sseCount),
-            "metrics": .dict(metricsSnapshot),
         ]
     }
 
-    /// Build the metrics response (v0.3.0).
-    func metricsResponse() async -> [String: AnyCodableValue] {
-        await metrics.snapshot()
+    // MARK: - Perimeter checks
+
+    private var boundToLoopback: Bool { Self.isLoopbackHost(config.host) }
+
+    private func hostAllowed(_ hostHeader: String) -> Bool {
+        guard boundToLoopback else { return true }
+        return Self.isLoopbackHost(Self.hostName(fromAuthority: hostHeader))
     }
 
-    /// Broadcast a list-changed notification to all SSE clients.
-    public func broadcastListChanged(type: String) async {
-        // In full implementation, would iterate all sessions and notify via SSE
+    private func originAllowed(_ origin: String) -> Bool {
+        if origin == config.corsOrigin || config.allowedOrigins.contains(origin) { return true }
+        guard boundToLoopback, let url = URL(string: origin), let host = url.host else { return false }
+        return Self.isLoopbackHost(host)
     }
+
+    /// Whether `host` names the loopback interface.
+    public static func isLoopbackHost(_ host: String) -> Bool {
+        let host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return host == "localhost" || host == "::1" || host == "127.0.0.1" || host.hasPrefix("127.")
+    }
+
+    /// `example.com:3001` → `example.com`; `[::1]:3001` → `::1`.
+    static func hostName(fromAuthority authority: String) -> String {
+        if authority.hasPrefix("[") {
+            return String(authority.dropFirst().prefix { $0 != "]" })
+        }
+        return String(authority.prefix { $0 != ":" })
+    }
+}
+
+// MARK: - Helpers
+
+/// Constant-time comparison: the time taken does not depend on where the
+/// strings differ (only on whether their lengths do).
+func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+    let x = Array(a.utf8), y = Array(b.utf8)
+    guard x.count == y.count else { return false }
+    var diff: UInt8 = 0
+    for i in 0..<x.count {
+        diff |= x[i] ^ y[i]
+    }
+    return diff == 0
+}
+
+/// Counts open connections against a limit (0 = unlimited).
+final class ConnectionGate: Sendable {
+    private let limit: Int
+    private let count = PlatformLock(initialState: 0)
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    /// Take a slot; false when the limit is reached.
+    func acquire() -> Bool {
+        count.withLock { open in
+            if limit > 0 && open >= limit { return false }
+            open += 1
+            return true
+        }
+    }
+
+    func release() {
+        count.withLock { $0 = max(0, $0 - 1) }
+    }
+
+    var active: Int { count.withLock { $0 } }
 }
 
 // MARK: - NIO HTTP Handler
 
 /// SwiftNIO channel handler for MCP HTTP requests.
 ///
-/// v0.3.0: Enforces max request body size and tracks connection metrics.
-private struct UncheckedContext: @unchecked Sendable {
-    let context: ChannelHandlerContext
-}
-
-private final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
+/// Collects a request on the event loop, answers it in a Swift task, and
+/// hops back to the event loop to write: `ChannelHandlerContext` is only
+/// ever touched on its event loop.
+private final class MCPHTTPHandler: ChannelInboundHandler {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
     private let server: MCPServer
-    private let corsOrigin: String
     private let maxBodyBytes: Int
-    private var requestMethod: HTTPMethod = .GET
-    private var requestURI: String = "/"
-    private var requestHeaders: HTTPHeaders = HTTPHeaders()
+    private var head: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer = ByteBuffer()
     private var bodyTooLarge: Bool = false
 
-    init(server: MCPServer, corsOrigin: String, maxBodyBytes: Int = 1_048_576) {
+    init(server: MCPServer, maxBodyBytes: Int) {
         self.server = server
-        self.corsOrigin = corsOrigin
         self.maxBodyBytes = maxBodyBytes
     }
 
-    func channelActive(context: ChannelHandlerContext) {
-        Task { await server.serverMetrics.connectionOpened() }
-        context.fireChannelActive()
-    }
-
-    func channelInactive(context: ChannelHandlerContext) {
-        Task { await server.serverMetrics.connectionClosed() }
-        context.fireChannelInactive()
-    }
-
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let part = unwrapInboundIn(data)
-
-        switch part {
+        switch unwrapInboundIn(data) {
         case .head(let head):
-            requestMethod = head.method
-            requestURI = head.uri
-            requestHeaders = head.headers
+            self.head = head
             bodyBuffer.clear()
             bodyTooLarge = false
         case .body(var body):
-            // Enforce max body size (v0.3.0)
             if bodyBuffer.readableBytes + body.readableBytes > maxBodyBytes {
                 bodyTooLarge = true
             } else {
                 bodyBuffer.writeBuffer(&body)
             }
         case .end:
+            guard let head else { return }
+            self.head = nil
+            let keepAlive = head.isKeepAlive
+
             if bodyTooLarge {
-                var headers = HTTPHeaders()
-                headers.add(name: "Content-Type", value: "application/json")
-                sendResponse(context: context, status: .payloadTooLarge, headers: headers,
-                             body: "{\"error\":\"Request body too large\",\"limit\":\(maxBodyBytes)}")
-            } else {
-                handleRequest(context: context)
+                write(.json(.payloadTooLarge, ["error": "Request body too large", "limit": String(maxBodyBytes)]),
+                      keepAlive: false, context: context)
+                return
             }
-        }
-    }
 
-    private func handleRequest(context: ChannelHandlerContext) {
-        let method = requestMethod
-        let uri = requestURI
-        let headers = requestHeaders
-        let body = bodyBuffer.readString(length: bodyBuffer.readableBytes) ?? ""
-
-        // ChannelHandlerContext isn't Sendable; the handler already opts out
-        // of checking (@unchecked Sendable), so carry the context the same way.
-        let ctx = UncheckedContext(context: context)
-        Task { [server] in
-            await self.processRequest(
-                context: ctx.context,
-                method: method,
-                uri: uri,
-                headers: headers,
-                body: body,
-                server: server
+            let request = MCPHTTPRequest(
+                method: head.method,
+                uri: head.uri,
+                headers: head.headers,
+                body: bodyBuffer.readBytes(length: bodyBuffer.readableBytes) ?? [],
+                remoteAddress: context.channel.remoteAddress?.ipAddress
             )
-        }
-    }
-
-    private func processRequest(
-        context: ChannelHandlerContext,
-        method: HTTPMethod,
-        uri: String,
-        headers: HTTPHeaders,
-        body: String,
-        server: MCPServer
-    ) async {
-        // CORS headers
-        var responseHeaders = HTTPHeaders()
-        responseHeaders.add(name: "Access-Control-Allow-Origin", value: corsOrigin)
-        responseHeaders.add(name: "Access-Control-Allow-Methods", value: "POST, GET, OPTIONS")
-        responseHeaders.add(name: "Access-Control-Allow-Headers", value: "Content-Type, Accept, Authorization, Mcp-Session-Id")
-        responseHeaders.add(name: "Access-Control-Expose-Headers", value: "Mcp-Session-Id")
-
-        // OPTIONS
-        if method == .OPTIONS {
-            sendResponse(context: context, status: .noContent, headers: responseHeaders, body: nil)
-            return
-        }
-
-        // GET routes
-        if method == .GET {
-            switch uri {
-            case "/.well-known/mcp.json":
-                let discovery = await server.discoveryDocument()
-                sendJSON(context: context, status: .ok, headers: responseHeaders, value: discovery)
-                return
-            case "/health":
-                let health = await server.healthResponse()
-                sendJSON(context: context, status: .ok, headers: responseHeaders, value: health)
-                return
-            case "/metrics":
-                let metricsData = await server.metricsResponse()
-                sendJSON(context: context, status: .ok, headers: responseHeaders, value: metricsData)
-                return
-            case "/sse":
-                // SSE endpoint -- send initial connection event
-                responseHeaders.add(name: "Content-Type", value: "text/event-stream")
-                responseHeaders.add(name: "Cache-Control", value: "no-cache")
-                responseHeaders.add(name: "Connection", value: "keep-alive")
-                let sseData = "{\"connected\":true,\"timestamp\":\(Int(Date().timeIntervalSince1970 * 1000))}"
-                let sseBody = "event: connected\ndata: \(sseData)\n\n"
-                sendResponse(context: context, status: .ok, headers: responseHeaders, body: sseBody)
-                return
-            default:
-                break
-            }
-        }
-
-        // POST /oauth/token
-        if method == .POST && uri == "/oauth/token" {
-            await handleOAuthToken(context: context, headers: headers, body: body, responseHeaders: &responseHeaders, server: server)
-            return
-        }
-
-        // POST / or /rpc -- JSON-RPC
-        if method == .POST && (uri == "/" || uri == "/rpc") {
-            let sessionId = headers.first(name: "Mcp-Session-Id")
-            let clientAddress = context.remoteAddress?.description
-            let authHeader = headers.first(name: "Authorization")
-            let acceptsSSE = headers.first(name: "Accept")?.contains("text/event-stream") ?? false
-
-            let result = await server.processJSONRPC(
-                body: body,
-                sessionId: sessionId,
-                clientAddress: clientAddress,
-                authHeader: authHeader,
-                acceptsSSE: acceptsSSE
-            )
-
-            for (key, value) in result.headers {
-                responseHeaders.add(name: key, value: value)
-            }
-
-            if let response = result.response {
-                sendJSON(context: context, status: .ok, headers: responseHeaders, value: response)
-            } else {
-                // Notification -- no response body
-                sendResponse(context: context, status: .noContent, headers: responseHeaders, body: nil)
-            }
-            return
-        }
-
-        // 404
-        responseHeaders.add(name: "Content-Type", value: "application/json")
-        sendResponse(context: context, status: .notFound, headers: responseHeaders, body: "{\"error\":\"Not found\"}")
-    }
-
-    private func handleOAuthToken(
-        context: ChannelHandlerContext,
-        headers: HTTPHeaders,
-        body: String,
-        responseHeaders: inout HTTPHeaders,
-        server: MCPServer
-    ) async {
-        // Parse form or JSON body
-        let params: [String: String]
-        let contentType = headers.first(name: "Content-Type") ?? ""
-        if contentType.contains("application/json") {
-            guard let data = body.data(using: .utf8),
-                  let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
-                sendJSON(context: context, status: .badRequest, headers: responseHeaders, value: ["error": AnyCodableValue.string("invalid_request")])
-                return
-            }
-            params = decoded
-        } else {
-            // URL-encoded form
-            var decoded: [String: String] = [:]
-            for pair in body.split(separator: "&") {
-                let parts = pair.split(separator: "=", maxSplits: 1)
-                if parts.count == 2 {
-                    let key = String(parts[0]).removingPercentEncoding ?? String(parts[0])
-                    let value = String(parts[1]).removingPercentEncoding ?? String(parts[1])
-                    decoded[key] = value
+            let loop = context.eventLoop
+            let bound = NIOLoopBound((handler: self, context: context), eventLoop: loop)
+            let server = self.server
+            Task {
+                let response = await server.handleHTTP(request)
+                loop.execute {
+                    let (handler, context) = bound.value
+                    handler.write(response, keepAlive: keepAlive, context: context)
                 }
             }
-            params = decoded
-        }
-
-        let grantType = params["grant_type"] ?? ""
-
-        if grantType == "client_credentials" {
-            let clientId = params["client_id"] ?? ""
-            let clientSecret = params["client_secret"] ?? ""
-            let scopes = params["scope"]?.split(separator: " ").map(String.init)
-
-            let token = await server.oauth.issueToken(
-                clientId: clientId,
-                clientSecret: clientSecret,
-                requestedScopes: scopes
-            )
-
-            guard let token else {
-                sendJSON(context: context, status: .unauthorized, headers: responseHeaders, value: ["error": AnyCodableValue.string("invalid_client")])
-                return
-            }
-
-            let response: [String: AnyCodableValue] = [
-                "access_token": .string(token.accessToken),
-                "token_type": .string(token.tokenType),
-                "expires_in": .int(token.expiresIn),
-                "scope": .string(token.scope),
-                "refresh_token": token.refreshToken.map { .string($0) } ?? .null,
-            ]
-            sendJSON(context: context, status: .ok, headers: responseHeaders, value: response)
-            return
-        }
-
-        if grantType == "refresh_token" {
-            let refreshToken = params["refresh_token"] ?? ""
-            let token = await server.oauth.refreshAccessToken(refreshToken)
-
-            guard let token else {
-                sendJSON(context: context, status: .unauthorized, headers: responseHeaders, value: ["error": AnyCodableValue.string("invalid_grant")])
-                return
-            }
-
-            let response: [String: AnyCodableValue] = [
-                "access_token": .string(token.accessToken),
-                "token_type": .string(token.tokenType),
-                "expires_in": .int(token.expiresIn),
-                "scope": .string(token.scope),
-                "refresh_token": token.refreshToken.map { .string($0) } ?? .null,
-            ]
-            sendJSON(context: context, status: .ok, headers: responseHeaders, value: response)
-            return
-        }
-
-        sendJSON(context: context, status: .badRequest, headers: responseHeaders, value: ["error": AnyCodableValue.string("unsupported_grant_type")])
-    }
-
-    // MARK: - Response Helpers
-
-    private func sendJSON<T: Encodable>(
-        context: ChannelHandlerContext,
-        status: HTTPResponseStatus,
-        headers: HTTPHeaders,
-        value: T
-    ) {
-        var headers = headers
-        headers.replaceOrAdd(name: "Content-Type", value: "application/json")
-
-        do {
-            let encoder = JSONEncoder()
-            if status == .ok {
-                encoder.outputFormatting = [.prettyPrinted]
-            }
-            let data = try encoder.encode(value)
-            let bodyString = String(data: data, encoding: .utf8) ?? "{}"
-            sendResponse(context: context, status: status, headers: headers, body: bodyString)
-        } catch {
-            sendResponse(context: context, status: .internalServerError, headers: headers, body: "{\"error\":\"Encoding error\"}")
         }
     }
 
-    private func sendResponse(
-        context: ChannelHandlerContext,
-        status: HTTPResponseStatus,
-        headers: HTTPHeaders,
-        body: String?
-    ) {
-        var headers = headers
-        let bodyData: ByteBuffer?
-        if let body {
-            var buffer = context.channel.allocator.buffer(capacity: body.utf8.count)
-            buffer.writeString(body)
-            headers.replaceOrAdd(name: "Content-Length", value: "\(body.utf8.count)")
-            bodyData = buffer
-        } else {
-            headers.replaceOrAdd(name: "Content-Length", value: "0")
-            bodyData = nil
-        }
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        context.close(promise: nil)
+    }
 
-        let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
+    private func write(_ response: MCPHTTPResponse, keepAlive: Bool, context: ChannelHandlerContext) {
+        var headers = response.headers
+        headers.replaceOrAdd(name: "Content-Length", value: String(response.body.count))
+        if !keepAlive { headers.replaceOrAdd(name: "Connection", value: "close") }
+        let head = HTTPResponseHead(version: .http1_1, status: response.status, headers: headers)
         context.write(wrapOutboundOut(.head(head)), promise: nil)
-        if let bodyData {
-            context.write(wrapOutboundOut(.body(.byteBuffer(bodyData))), promise: nil)
+        if !response.body.isEmpty {
+            var buffer = context.channel.allocator.buffer(capacity: response.body.count)
+            buffer.writeBytes(response.body)
+            context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
         }
-        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        let done = context.writeAndFlush(wrapOutboundOut(.end(nil)))
+        if !keepAlive {
+            let channel = context.channel
+            done.whenComplete { _ in channel.close(promise: nil) }
+        }
     }
 }

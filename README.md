@@ -8,7 +8,7 @@
 [![macOS 14+](https://img.shields.io/badge/macOS-14+-000000?logo=apple&logoColor=white)](https://developer.apple.com/macos/)
 [![iOS 17+ (libraries)](https://img.shields.io/badge/iOS-17+_(libraries)-000000?logo=apple&logoColor=white)](#platforms)
 [![Linux](https://img.shields.io/badge/Linux-Swift_6.1+-FCC624?logo=linux&logoColor=black)](#platforms)
-[![MCP 2024-11-05](https://img.shields.io/badge/MCP-2024--11--05-6B4FBB)](https://modelcontextprotocol.io)
+[![MCP 2025-11-25](https://img.shields.io/badge/MCP-2025--11--25-6B4FBB)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 [Website](https://smallchat.dev) | [Documentation](https://smallchat.dev/docs) | [API Reference](https://smallchat.dev/api)
@@ -243,7 +243,7 @@ swift run smallchat <command> [options]
 | `setup` | Interactive wizard — auto-detect MCP servers and compile a toolkit | `smallchat setup` |
 | `compile` | Compile manifests into a dispatch artifact (`--strict` treats collisions as errors) | `smallchat compile --source ~/.mcp.json` |
 | `resolve` | Test intent-to-tool resolution | `smallchat resolve tools.toolkit.json "search for code"` |
-| `serve` | Start an MCP-compatible HTTP server | `smallchat serve --source ./manifests --port 3001` |
+| `serve` | Serve a toolkit as an MCP server over Streamable HTTP | `smallchat serve --source ./manifests --port 3001` |
 | `channel` | Start a Claude Code channel server | `smallchat channel --port 3002` |
 | `install` | Render an install plan for a registry entry or bundle | `smallchat install examples/registry/github.json` |
 | `init` | Scaffold a new project from a template | `smallchat init my-app --template agent` |
@@ -268,7 +268,7 @@ SmallChatRuntime       Dispatch engine, fluent API, streaming, swizzling, AppRun
 Compiler  Embedding  Transport      MCP         Channel      Dream
    │       │         │              │              │           │
    │   FNV-1a hash   HTTP/SSE/     MCP Server    Claude Code  Memory-driven
-   │   vector index  stdio NIO,    OAuth/SQLite   JSON-RPC     recompilation
+   │   vector index  stdio NIO,    sessions/SQLite JSON-RPC    recompilation
    │                 rtk filter,   App resources
    │                 loom client
    │
@@ -295,7 +295,7 @@ SmallChatAgents ─── Agent messenger core: session discovery, handles, @men
 | **SmallChatCompiler** | 4-phase compilation pipeline: parse → embed → link → output, plus `AppCompiler` for the App/UI layer |
 | **SmallChatEmbedding** | `LocalEmbedder` (FNV-1a hash, 384 dims, TS-parity), `MemoryVectorIndex` for dev/test |
 | **SmallChatTransport** | Protocol-agnostic transport layer — HTTP, MCP stdio, MCP SSE, local — with auth, retry, timeout, and circuit breaker middleware; `LoomMCPClient` for loom-mcp; `RtkTransport` for `rtk`-based prefixing/filtering |
-| **SmallChatMCP** | Full MCP 2024-11-05 server: routing, sessions (SQLite), OAuth 2.1, rate limiting, audit logging, SSE broker, `AppResourceHandler` for `ui://` resources |
+| **SmallChatMCP** | MCP server over Streamable HTTP (protocol 2025-11-25 and 2025-06-18): exact tool calls through a runtime whose tools run at their providers' endpoints (`MCPToolkit`), sessions (SQLite), bearer-token auth, Host/Origin checks, rate limiting, connection cap, HMAC-chained audit log, `AppResourceHandler` for `ui://` resources; `MCPClientTransport` (Streamable HTTP client) |
 | **SmallChatChannel** | Claude Code integration: JSON-RPC 2.0 over stdio, sender gating, permission relay |
 | **SmallChatDream** | Memory-driven tool re-compilation: reads Claude session/memory logs to discover tool usage and recompile toolkits |
 | **SmallChatShorthand** | Text primitives shared by the modules below — tokenization, Jaccard/cosine similarity, FNV-1a content hashing |
@@ -322,39 +322,51 @@ smallchat is designed to run in adversarial environments where untrusted inputs 
 | **Semantic Rate Limiting** | Prevents vector flooding DoS by tracking embedding requests per time window. |
 | **Bounded Selector Cache** | Runtime intents resolved by `SelectorTable` are kept in an LRU-evicted side table, not the shared tool-selector index — long-running processes can't accumulate unbounded state or dilute real tool candidates. |
 | **Selector Namespacing** | Core system selectors are protected and cannot be shadowed by user-registered tools. |
-| **OAuth 2.1 Token Security** | Tokens hashed with PBKDF2 — never stored in plain text. |
+| **Bearer Token** | With `serve --auth`, every MCP request (all but `GET /health`) needs `Authorization: Bearer <token>`, compared in constant time. The token comes from `SMALLCHAT_MCP_TOKEN` or a file created with mode 0600. OAuth is not implemented. |
 | **Schema Fingerprinting** | Detects tool schema changes on hot-reload; invalidates stale cache entries automatically. |
 | **Structured Concurrency** | Actor-based isolation and `Sendable` conformance enforced at compile time. No raw threads. |
-| **Audit Log Integrity** | HMAC-SHA256 hash chain on audit entries for tamper detection (v0.3.0). |
-| **Connection Limits** | Configurable max concurrent connections and request body size limits on MCP server (v0.3.0). |
+| **Audit Log Integrity** | HMAC-SHA256 chain over every field of each entry, under a secret key (random per server unless you pass one; there is no built-in key). It detects edits to retained entries by anyone without the key, and still verifies after old entries are evicted. In memory only: it does not survive a restart. |
+| **Connection Limits** | The MCP server closes connections beyond `maxConnections` and rejects bodies over `maxRequestBodyBytes` (413). |
+| **DNS-Rebinding Protection** | A loopback-bound MCP server rejects non-loopback `Host` names and foreign `Origin`s (403). |
 
 ## MCP Server
 
-smallchat includes a production-grade **Model Context Protocol** server (spec version 2024-11-05):
+`smallchat serve` serves a toolkit as an MCP server over Streamable HTTP (protocol
+versions 2025-11-25 and 2025-06-18, negotiated in `initialize`):
 
 ```bash
 swift run smallchat serve --source ./manifests --port 3001
 ```
 
-**Capabilities:**
-- Tool invocation with dispatch-table resolution
-- Resource and prompt registries
-- SSE streaming for real-time events
-- Session management with SQLite persistence
-- OAuth 2.1 authentication with secure token hashing
-- Per-client rate limiting with automatic stale-entry eviction
-- Full audit logging (timestamp, sender, tool, args, result)
-- Configurable CORS origins
+- **Exact tool calls.** Tools are listed as `<provider>__<tool>` (with `--provider <id>`,
+  one provider's tools under their upstream names), and `tools/call` runs exactly the
+  named tool. An unknown name is a JSON-RPC error; nothing is resolved fuzzily. Results
+  are MCP `CallToolResult`s (`content`, `structuredContent` for JSON objects, `isError`).
+- **Where tools run.** A tool runs at its provider manifest's `endpoint`: MCP servers over
+  Streamable HTTP (the upstream result is passed through), REST APIs as
+  `POST <endpoint>/<tool>`. Tools whose provider has no such endpoint are listed but return
+  `isError` when called. Artifacts compiled before 1.0 carry no endpoints.
+- **Semantic dispatch is opt-in.** `--semantic-dispatch` adds the `smallchat_dispatch`
+  meta-tool, which resolves an intent through the tiered dispatch pipeline.
+- **Sessions** in SQLite (`--db-path`), expiring after `--session-ttl` hours.
+- **Perimeter:** Host/Origin checks, optional bearer token (`--auth`), body size cap,
+  per-address rate limiting (`--rate-limit`), connection cap (`--max-connections`), and an
+  in-memory HMAC-chained audit log (`--audit`).
 
 **Endpoints:**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/mcp/initialize` | Initialize a session |
-| `GET` | `/mcp/resources` | List available resources |
-| `GET` | `/mcp/prompts` | List available prompts |
-| `POST` | `/mcp/invoke` | Invoke a tool |
-| `GET` | `/mcp/events` | SSE event stream |
+| `POST` | `/mcp` | One JSON-RPC message (`initialize` opens a session; send its `Mcp-Session-Id` afterwards). Notifications get `202`. Batches are rejected. |
+| `DELETE` | `/mcp` | End the session named by `Mcp-Session-Id` |
+| `GET` | `/mcp` | `405`: the server opens no server-to-client stream |
+| `GET` | `/health` | Status, tool counts, protocol versions (no auth) |
+| `GET` | `/metrics` | Request and connection counters |
+
+Not implemented: server-to-client SSE streams (so no `list_changed` or resource
+subscription notifications), JSON-RPC batches, MCP logging, and OAuth. Adopting the
+official [MCP Swift SDK](https://github.com/modelcontextprotocol/swift-sdk) is planned
+for a 1.x release.
 
 ## The smallchat App: Agent Messenger
 

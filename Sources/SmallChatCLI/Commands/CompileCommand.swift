@@ -143,18 +143,11 @@ struct CompileCommand: AsyncParsableCommand {
             ] as [String: Any]
         }
 
-        var dispatchTables: [String: Any] = [:]
-        for (providerId, table) in result.dispatchTables {
-            var methods: [String: Any] = [:]
-            for (canonical, imp) in table {
-                methods[canonical] = [
-                    "providerId": imp.providerId,
-                    "toolName": imp.toolName,
-                    "transportType": imp.transportType.rawValue,
-                ] as [String: Any]
-            }
-            dispatchTables[providerId] = methods
-        }
+        // Dispatch entries carry what `smallchat serve` needs to list and run
+        // each tool: its schema, description, and the provider's endpoint.
+        let entries = buildArtifact(result: result, manifests: manifests).dispatchTables
+        let dispatchTables: Any = (try? JSONEncoder().encode(entries))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? [String: Any]()
 
         return [
             "version": SmallChatVersion.current,

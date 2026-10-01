@@ -11,15 +11,23 @@ public struct RouterOptions: Sendable {
     public let serverName: String
     public let serverVersion: String
     public let sessionTTLMs: Int
+    /// How tools are named in `tools/list` and `tools/call`.
+    public let toolNaming: MCPToolNaming
+    /// Optional `instructions` returned from `initialize`.
+    public let instructions: String?
 
     public init(
         serverName: String = "smallchat",
         serverVersion: String = SmallChatVersion.current,
-        sessionTTLMs: Int = 86_400_000 // 24 hours
+        sessionTTLMs: Int = 86_400_000, // 24 hours
+        toolNaming: MCPToolNaming = .aggregate,
+        instructions: String? = nil
     ) {
         self.serverName = serverName
         self.serverVersion = serverVersion
         self.sessionTTLMs = sessionTTLMs
+        self.toolNaming = toolNaming
+        self.instructions = instructions
     }
 }
 
@@ -27,48 +35,59 @@ public struct RouterOptions: Sendable {
 
 /// Routes JSON-RPC 2.0 requests to appropriate MCP handlers.
 ///
-/// Maps method strings to handler functions for initialize, tools/list,
-/// tools/call, resources/list, resources/read, prompts/list, prompts/get, etc.
-/// Returns nil for notifications (requests without an id).
+/// Maps method strings to handler functions for initialize, ping, tools/list,
+/// tools/call, resources/list, resources/read, resources/templates/list,
+/// prompts/list and prompts/get. Returns nil for notifications (requests
+/// without an id).
+///
+/// `tools/call` runs exactly the named tool through the wired
+/// `MCPToolExecutor`; nothing is resolved fuzzily. Without an executor the
+/// call is a JSON-RPC error, never a placeholder success. Semantic dispatch
+/// is only available through the explicit `smallchat_dispatch` meta-tool,
+/// and only when a `MCPSemanticDispatchHandler` is wired.
 public actor MCPRouter {
 
     private let sessionStore: SessionStore
     private let resourceRegistry: ResourceRegistry
     private let promptRegistry: PromptRegistry
-    private let sseBroker: SSEBroker
     private let opts: RouterOptions
-    private var artifact: SerializedArtifact?
-    private var refinementHandler: (@Sendable (_ intent: String, _ args: [String: AnyCodableValue]) async throws -> TieredDispatchResult)?
+    private var catalog: MCPToolCatalog?
+    private var toolExecutor: MCPToolExecutor?
+    private var semanticDispatch: MCPSemanticDispatchHandler?
 
     public init(
         sessionStore: SessionStore,
         resourceRegistry: ResourceRegistry,
         promptRegistry: PromptRegistry,
-        sseBroker: SSEBroker,
         options: RouterOptions = RouterOptions()
     ) {
         self.sessionStore = sessionStore
         self.resourceRegistry = resourceRegistry
         self.promptRegistry = promptRegistry
-        self.sseBroker = sseBroker
         self.opts = options
     }
 
-    /// Set the artifact for tools/list.
+    /// Set the artifact whose tools `tools/list` serves.
     public func setArtifact(_ artifact: SerializedArtifact) {
-        self.artifact = artifact
+        self.catalog = MCPToolCatalog(artifact: artifact, naming: opts.toolNaming)
     }
 
-    /// Wire the ToolRuntime dispatch bridge used by `tools/call`.
+    /// The tools currently served (nil before `setArtifact`).
+    public var toolCatalog: MCPToolCatalog? { catalog }
+
+    /// Wire the executor that runs a listed tool for `tools/call`.
+    public func setToolExecutor(_ executor: @escaping MCPToolExecutor) {
+        self.toolExecutor = executor
+    }
+
+    /// Wire semantic dispatch and list the `smallchat_dispatch` meta-tool.
     ///
-    /// The handler is called for every tool invocation and must return a
-    /// `TieredDispatchResult`. All four outcome cases are mapped to MCP
-    /// responses: `.dispatched` → ok with content, `.decomposed` → decomposed,
-    /// `.refinement` → tool_refinement_needed, `.strictAmbiguityError` → error.
-    public func setRefinementHandler(
-        _ handler: @escaping @Sendable (_ intent: String, _ args: [String: AnyCodableValue]) async throws -> TieredDispatchResult
-    ) {
-        self.refinementHandler = handler
+    /// The handler's `TieredDispatchResult` maps to a `CallToolResult`:
+    /// `.dispatched` carries the tool's result, `.decomposed` lists sub-intents,
+    /// `.refinement` asks for a clearer intent (nothing ran), and
+    /// `.strictAmbiguityError` is `isError: true`.
+    public func setSemanticDispatchHandler(_ handler: @escaping MCPSemanticDispatchHandler) {
+        self.semanticDispatch = handler
     }
 
     // MARK: - Main Dispatch
@@ -85,242 +104,208 @@ public actor MCPRouter {
 
         let params = request.params ?? [:]
 
-        do {
-            switch request.method {
-            case MCPMethod.initialize.rawValue:
-                return await handleInitialize(id: id, params: params, sessionId: sessionId)
-            case MCPMethod.ping.rawValue:
-                return await handlePing(id: id, sessionId: sessionId)
-            case MCPMethod.shutdown.rawValue:
-                return await handleShutdown(id: id, sessionId: sessionId)
-            case MCPMethod.notificationsInitialized.rawValue:
-                return .ok(id, .dict([:]))
-            case MCPMethod.toolsList.rawValue:
-                return handleToolsList(id: id, params: params)
-            case MCPMethod.toolsCall.rawValue:
-                return await handleToolsCall(id: id, params: params)
-            case MCPMethod.resourcesList.rawValue:
-                return await handleResourcesList(id: id, params: params, sessionId: sessionId)
-            case MCPMethod.resourcesRead.rawValue:
-                return await handleResourcesRead(id: id, params: params, sessionId: sessionId)
-            case MCPMethod.resourcesTemplatesList.rawValue:
-                return await handleResourcesTemplatesList(id: id, sessionId: sessionId)
-            case MCPMethod.resourcesSubscribe.rawValue:
-                return await handleResourcesSubscribe(id: id, params: params, sessionId: sessionId)
-            case MCPMethod.promptsList.rawValue:
-                return await handlePromptsList(id: id, params: params, sessionId: sessionId)
-            case MCPMethod.promptsGet.rawValue:
-                return await handlePromptsGet(id: id, params: params, sessionId: sessionId)
-            default:
-                return .error(id, code: MCPErrorCode.methodNotFound.rawValue,
-                              message: "Method not found: \(request.method)")
-            }
-        } catch {
-            return .error(id, code: MCPErrorCode.internalError.rawValue,
-                          message: error.localizedDescription)
+        switch request.method {
+        case MCPMethod.initialize.rawValue:
+            return await initialize(request: request).response
+        case MCPMethod.ping.rawValue:
+            return .ok(id, .dict([:]))
+        case MCPMethod.notificationsInitialized.rawValue:
+            return .ok(id, .dict([:]))
+        case MCPMethod.toolsList.rawValue:
+            return handleToolsList(id: id, params: params)
+        case MCPMethod.toolsCall.rawValue:
+            return await handleToolsCall(id: id, params: params)
+        case MCPMethod.resourcesList.rawValue:
+            return await handleResourcesList(id: id, params: params, sessionId: sessionId)
+        case MCPMethod.resourcesRead.rawValue:
+            return await handleResourcesRead(id: id, params: params, sessionId: sessionId)
+        case MCPMethod.resourcesTemplatesList.rawValue:
+            return await handleResourcesTemplatesList(id: id, sessionId: sessionId)
+        case MCPMethod.promptsList.rawValue:
+            return await handlePromptsList(id: id, params: params, sessionId: sessionId)
+        case MCPMethod.promptsGet.rawValue:
+            return await handlePromptsGet(id: id, params: params, sessionId: sessionId)
+        default:
+            return .error(id, code: MCPErrorCode.methodNotFound.rawValue,
+                          message: "Method not found: \(request.method)")
         }
     }
 
     // MARK: - Initialize
 
-    private func handleInitialize(
-        id: JSONRPCId,
-        params: [String: AnyCodableValue],
-        sessionId: String?
-    ) async -> JSONRPCResponse {
+    /// Handle `initialize`: negotiate the protocol version and open a session.
+    /// Returns the response and the new session (nil on failure); the HTTP
+    /// layer sends the session id as the `Mcp-Session-Id` header.
+    public func initialize(request: JSONRPCRequest) async -> (response: JSONRPCResponse, session: MCPSession?) {
+        let id = request.id ?? .null
+        let params = request.params ?? [:]
+
         // Extract client info
-        let clientName: String
-        let clientVersion: String
-        if case .dict(let clientInfo) = params["clientInfo"],
-           case .string(let name) = clientInfo["name"],
-           case .string(let version) = clientInfo["version"] {
-            clientName = name
-            clientVersion = version
-        } else {
-            clientName = "unknown"
-            clientVersion = "unknown"
+        var clientInfo: [String: String] = [:]
+        if case .dict(let info) = params["clientInfo"] {
+            for key in ["name", "version"] {
+                if case .string(let value) = info[key] { clientInfo[key] = value }
+            }
         }
 
-        // Extract requested protocol version
-        let requestedVersion: String
-        if case .string(let v) = params["protocolVersion"] {
-            requestedVersion = v
-        } else {
-            requestedVersion = mcpProtocolVersion
-        }
+        var requested: String?
+        if case .string(let v) = params["protocolVersion"] { requested = v }
+        let version = negotiateMCPProtocolVersion(requested)
 
         do {
-            let session = try await sessionStore.create(
-                protocolVersion: requestedVersion,
-                clientInfo: ["name": clientName, "version": clientVersion]
-            )
+            let session = try await sessionStore.create(protocolVersion: version, clientInfo: clientInfo)
 
-            let result: AnyCodableValue = .dict([
-                "protocolVersion": .string(mcpProtocolVersion),
+            // Only what the server implements: no list-changed notifications,
+            // no resource subscriptions, no logging.
+            var result: [String: AnyCodableValue] = [
+                "protocolVersion": .string(version),
                 "capabilities": .dict([
-                    "tools": .dict(["listChanged": .bool(true)]),
-                    "resources": .dict(["subscribe": .bool(true), "listChanged": .bool(true)]),
-                    "prompts": .dict(["listChanged": .bool(true)]),
-                    "logging": .dict([:]),
+                    "tools": .dict([:]),
+                    "resources": .dict([:]),
+                    "prompts": .dict([:]),
                 ]),
                 "serverInfo": .dict([
                     "name": .string(opts.serverName),
                     "version": .string(opts.serverVersion),
                 ]),
-                "sessionId": .string(session.id),
-            ])
-
-            return .ok(id, result)
+            ]
+            if let instructions = opts.instructions {
+                result["instructions"] = .string(instructions)
+            }
+            return (.ok(id, .dict(result)), session)
         } catch {
-            return .error(id, code: MCPErrorCode.internalError.rawValue,
-                          message: "Failed to create session: \(error.localizedDescription)")
+            return (.error(id, code: MCPErrorCode.internalError.rawValue,
+                           message: "Failed to create session: \(error.localizedDescription)"), nil)
         }
-    }
-
-    // MARK: - Ping
-
-    private func handlePing(id: JSONRPCId, sessionId: String?) async -> JSONRPCResponse {
-        if let sessionId {
-            try? await sessionStore.touch(sessionId)
-        }
-        return .ok(id, .dict(["ok": .bool(true)]))
-    }
-
-    // MARK: - Shutdown
-
-    private func handleShutdown(id: JSONRPCId, sessionId: String?) async -> JSONRPCResponse {
-        if let sessionId {
-            try? await sessionStore.delete(sessionId)
-            await sseBroker.disconnectSession(sessionId)
-        }
-        return .ok(id, .dict(["status": .string("shutdown")]))
     }
 
     // MARK: - Tools
 
     private func handleToolsList(id: JSONRPCId, params: [String: AnyCodableValue]) -> JSONRPCResponse {
-        guard let artifact else {
-            return .ok(id, .dict(["tools": .array([])]))
+        var allTools = (catalog?.tools ?? []).map { $0.listEntry }
+        if semanticDispatch != nil, catalog?.tool(named: MCPSemanticDispatchTool.name) == nil {
+            allTools.append(MCPSemanticDispatchTool.listEntry)
         }
 
-        let allTools = buildToolList(artifact)
         let cursor: Int
-        if case .string(let c) = params["cursor"], let parsed = Int(c) {
-            cursor = parsed
-        } else {
+        switch params["cursor"] {
+        case nil, .null?:
             cursor = 0
+        case .string(let c)?:
+            guard let parsed = Int(c), parsed >= 0, parsed <= allTools.count else {
+                return .error(id, code: MCPErrorCode.invalidParams.rawValue, message: "Invalid cursor")
+            }
+            cursor = parsed
+        default:
+            return .error(id, code: MCPErrorCode.invalidParams.rawValue, message: "Invalid cursor")
         }
 
         let pageSize = 100
         let page = Array(allTools.dropFirst(cursor).prefix(pageSize))
-        let nextCursor = cursor + pageSize < allTools.count ? AnyCodableValue.string(String(cursor + pageSize)) : AnyCodableValue.null
-
-        let toolValues: [AnyCodableValue] = page.map { .dict($0) }
-
-        var resultDict: [String: AnyCodableValue] = ["tools": .array(toolValues)]
-        if case .string = nextCursor {
-            resultDict["nextCursor"] = nextCursor
+        var resultDict: [String: AnyCodableValue] = ["tools": .array(page.map { .dict($0) })]
+        if cursor + pageSize < allTools.count {
+            resultDict["nextCursor"] = .string(String(cursor + pageSize))
         }
-
         return .ok(id, .dict(resultDict))
     }
 
     private func handleToolsCall(id: JSONRPCId, params: [String: AnyCodableValue]) async -> JSONRPCResponse {
-        guard case .string(let toolName) = params["name"] else {
+        guard case .string(let name) = params["name"], !name.isEmpty else {
             return .error(id, code: MCPErrorCode.invalidParams.rawValue, message: "Missing tool name")
         }
 
-        let invocationId = UUID().uuidString.lowercased()
         let arguments: [String: AnyCodableValue]
-        if case .dict(let argsDict) = params["arguments"] {
-            arguments = argsDict
-        } else {
+        switch params["arguments"] {
+        case nil, .null?:
             arguments = [:]
+        case .dict(let argsDict)?:
+            arguments = argsDict
+        default:
+            return .error(id, code: MCPErrorCode.invalidParams.rawValue, message: "arguments must be an object")
         }
 
-        guard let bridge = refinementHandler else {
-            return .ok(id, .dict([
-                "invocationId": .string(invocationId),
-                "status": .string("ok"),
-                "result": .dict(["note": .string("Tool execution for '\(toolName)' -- runtime dispatch pending")]),
-            ]))
+        // The explicit semantic meta-tool (a real tool of the same name wins).
+        if name == MCPSemanticDispatchTool.name,
+           let semanticDispatch,
+           catalog?.tool(named: name) == nil {
+            return .ok(id, await runSemanticDispatch(semanticDispatch, arguments: arguments))
         }
+
+        // Exactly the named tool, or an error. Never a near match.
+        guard let tool = catalog?.tool(named: name) else {
+            return .error(id, code: MCPErrorCode.invalidParams.rawValue, message: "Unknown tool: \(name)")
+        }
+        guard let toolExecutor else {
+            return .error(id, code: MCPErrorCode.internalError.rawValue,
+                          message: "Tool \(name) cannot run: no runtime is wired to this server")
+        }
+
+        let meta: [String: AnyCodableValue] = ["dev.smallchat/toolId": .string(tool.toolId)]
+        do {
+            let result = try await toolExecutor(tool, arguments)
+            return .ok(id, mcpCallToolResult(result, meta: meta))
+        } catch {
+            // A failed tool is a tool result the model can see, not a protocol error.
+            return .ok(id, mcpErrorResult("Tool \(name) failed: \(describeError(error))", meta: meta))
+        }
+    }
+
+    private func runSemanticDispatch(
+        _ handler: MCPSemanticDispatchHandler,
+        arguments: [String: AnyCodableValue]
+    ) async -> AnyCodableValue {
+        guard case .string(let intent)? = arguments["intent"], !intent.isEmpty else {
+            return mcpErrorResult("\(MCPSemanticDispatchTool.name) needs an \"intent\" string")
+        }
+        var toolArguments: [String: AnyCodableValue] = [:]
+        if case .dict(let args)? = arguments["arguments"] { toolArguments = args }
 
         let outcome: TieredDispatchResult
         do {
-            outcome = try await bridge(toolName, arguments)
+            outcome = try await handler(intent, toolArguments)
         } catch {
-            return .error(id, code: MCPErrorCode.internalError.rawValue, message: error.localizedDescription)
+            return mcpErrorResult("Semantic dispatch failed: \(describeError(error))")
         }
 
         switch outcome {
         case .dispatched(let result, let tier, let proof):
-            let content = formatContent(result)
-            return .ok(id, .dict([
-                "invocationId": .string(invocationId),
-                "status": .string("ok"),
-                "isError": .bool(result.isError),
-                "content": .array(content.map { .dict($0) }),
-                "meta": .dict(["tier": .string(tier.rawValue), "proof": encodeProof(proof)]),
-            ]))
+            return mcpCallToolResult(result, meta: [
+                "dev.smallchat/resolution": .dict([
+                    "status": .string("dispatched"),
+                    "tier": .string(tier.rawValue),
+                    "proof": encodeAsValue(proof),
+                ]),
+            ])
 
         case .decomposed(let subIntents, let proof):
-            return .ok(id, .dict([
-                "invocationId": .string(invocationId),
-                "status": .string("decomposed"),
-                "subIntents": .array(subIntents.map { .string($0) }),
-                "meta": .dict(["proof": encodeProof(proof)]),
-            ]))
+            let text = "No tool was run. The intent decomposes into: " + subIntents.joined(separator: "; ")
+            return .dict([
+                "content": .array([.dict(["type": .string("text"), "text": .string(text)])]),
+                "structuredContent": .dict([
+                    "status": .string("decomposed"),
+                    "subIntents": .array(subIntents.map { .string($0) }),
+                ]),
+                "isError": .bool(false),
+                "_meta": .dict(["dev.smallchat/resolution": .dict(["status": .string("decomposed"), "proof": encodeAsValue(proof)])]),
+            ])
 
         case .refinement(let refinement):
-            return .ok(id, .dict([
-                "invocationId": .string(invocationId),
-                "status": .string(ToolRefinement.mcpResultType),
-                "result": encodeRefinement(refinement),
-            ]))
+            var text = "No tool was run: \(refinement.reason)"
+            if !refinement.clarifyingQuestions.isEmpty {
+                text += "\n" + refinement.clarifyingQuestions.map { "- \($0)" }.joined(separator: "\n")
+            }
+            return .dict([
+                "content": .array([.dict(["type": .string("text"), "text": .string(text)])]),
+                "structuredContent": encodeAsValue(refinement),
+                "isError": .bool(false),
+                "_meta": .dict(["dev.smallchat/resolution": .dict(["status": .string(ToolRefinement.mcpResultType)])]),
+            ])
 
-        case .strictAmbiguityError(let reason, _):
-            return .ok(id, .dict([
-                "invocationId": .string(invocationId),
-                "status": .string("error"),
-                "isError": .bool(true),
-                "content": .array([.dict(["type": .string("text"), "text": .string(reason)])]),
-            ]))
-        }
-    }
-
-    private func encodeProof(_ proof: ResolutionProof) -> AnyCodableValue {
-        let steps: [AnyCodableValue] = proof.steps.map { step in
-            .dict([
-                "stage": .string(step.stage),
-                "detail": .string(step.detail),
-                "outcome": .string(step.outcome.rawValue),
-                "elapsedMicroseconds": .int(step.elapsedMicroseconds),
+        case .strictAmbiguityError(let reason, let proof):
+            return mcpErrorResult("No tool was run: \(reason)", meta: [
+                "dev.smallchat/resolution": .dict(["status": .string("ambiguous"), "proof": encodeAsValue(proof)]),
             ])
         }
-        return .dict([
-            "finalTier": .string(proof.finalTier.rawValue),
-            "totalElapsedMicroseconds": .int(proof.totalElapsedMicroseconds),
-            "steps": .array(steps),
-        ])
-    }
-
-    private func encodeRefinement(_ refinement: ToolRefinement) -> AnyCodableValue {
-        return .dict([
-            "type": .string(ToolRefinement.mcpResultType),
-            "originalIntent": .string(refinement.originalIntent),
-            "reason": .string(refinement.reason),
-            "clarifyingQuestions": .array(refinement.clarifyingQuestions.map { .string($0) }),
-            "nearMatches": .array(refinement.nearMatches.map { match in
-                .dict([
-                    "toolName": .string(match.toolName),
-                    "providerId": .string(match.providerId),
-                    "canonicalSelector": .string(match.canonicalSelector),
-                    "confidence": .double(match.confidence),
-                ])
-            }),
-            "proof": encodeProof(refinement.proof),
-        ])
     }
 
     // MARK: - Resources
@@ -401,22 +386,6 @@ public actor MCPRouter {
         }
 
         return .ok(id, .dict(["resourceTemplates": .array(templateValues)]))
-    }
-
-    private func handleResourcesSubscribe(
-        id: JSONRPCId,
-        params: [String: AnyCodableValue],
-        sessionId: String?
-    ) async -> JSONRPCResponse {
-        guard case .string(let uri) = params["uri"] else {
-            return .error(id, code: MCPErrorCode.invalidParams.rawValue, message: "Missing resource URI")
-        }
-
-        let subId = await resourceRegistry.subscribe(uri: uri) { _ in
-            // Subscription callback -- in practice, would notify via SSE
-        }
-
-        return .ok(id, .dict(["subscriptionId": .string(subId)]))
     }
 
     // MARK: - Prompts

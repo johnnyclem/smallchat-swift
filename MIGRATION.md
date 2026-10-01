@@ -103,6 +103,76 @@ The client now asks for MCP `2025-11-25` and accepts `2025-11-25`, `2025-06-18`,
 fails `connect()` with `TransportError.connectionFailed`. Servers built on an
 official MCP SDK negotiate one of these.
 
+## MCP server
+
+### One endpoint: `/mcp`
+
+The server is a Streamable HTTP MCP server. Point clients at
+`http://<host>:<port>/mcp` (it was `/` or `/rpc`). For Claude Code:
+
+```bash
+claude mcp add --transport http smallchat http://127.0.0.1:3001/mcp
+```
+
+- Read the session id from the `Mcp-Session-Id` response header of `initialize`
+  (it is no longer in the result) and send it on every later request; send
+  `DELETE /mcp` to end the session instead of calling `shutdown`.
+- `GET /sse`, `GET /.well-known/mcp.json` and `POST /oauth/token` are gone. Use
+  `GET /health` for liveness.
+- The server negotiates `2025-11-25` or `2025-06-18`. Clients that only speak
+  2024-11-05 (HTTP+SSE) cannot connect; every current official SDK can.
+
+### Tool names and results
+
+`tools/list` names tools `<providerId>__<toolName>`, and `tools/call` accepts only
+those names. To keep upstream names (for example for policies keyed on them), serve
+one provider: `smallchat serve --provider github` or
+`MCPServerConfig(toolNaming: .provider("github"))`.
+
+`tools/call` results are MCP `CallToolResult`s:
+
+```json
+{"content": [{"type": "text", "text": "{\"id\":7}"}], "structuredContent": {"id": 7},
+ "isError": false, "_meta": {"dev.smallchat/toolId": "github/create_issue"}}
+```
+
+Read `isError` instead of `status`, and `structuredContent` (or the text) instead of
+`result`. Semantic intent dispatch is no longer reachable through tool names; enable
+the `smallchat_dispatch` meta-tool with `--semantic-dispatch` and call it with
+`{"intent": "...", "arguments": {...}}`.
+
+### Running tools
+
+`serve` executes tools at their provider manifest's `endpoint`. Give each provider
+manifest an `endpoint` (an MCP Streamable HTTP URL for `transportType: "mcp"`, a base
+URL for `"rest"`), and recompile artifacts with 1.0 (`smallchat compile`) or serve the
+manifest directory directly. Tools without an endpoint are listed but fail when called.
+
+In code, replace `MCPRouter.setRefinementHandler` with `setToolExecutor(_:)` (exact
+calls) and, if you want the meta-tool, `setSemanticDispatchHandler(_:)`; or call
+`MCPServer.setRuntime(_:semanticDispatch:)`. Drop the `sseBroker:` argument from
+`MCPRouter.init`.
+
+`ToolProxy.execute` now throws `ToolNotExecutableError` unless you pass an
+`executor:` when creating the proxy.
+
+### Authentication
+
+`MCPServerConfig.enableAuth` and the OAuth types are removed. Pass
+`authToken: "<secret>"` (or `serve --auth`, which reads `SMALLCHAT_MCP_TOKEN` or a
+0600 token file) and configure clients to send `Authorization: Bearer <secret>`:
+
+```bash
+claude mcp add --transport http smallchat http://127.0.0.1:3001/mcp \
+  --header "Authorization: Bearer $(cat ~/.smallchat/serve-token)"
+```
+
+### Audit log
+
+`AuditLog()` no longer compiles: pass a key, `AuditLog(hmacKey: key)` (for example
+`AuditLog.generateKey()`, or a key from your keychain). `MCPServerConfig.auditKey`
+sets the server's key; without one each server process uses a random key.
+
 ## Linux hashes
 
 On Linux, audit-log HMACs (`AuditLog`) and Dream artifact hashes

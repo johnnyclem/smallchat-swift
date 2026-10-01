@@ -58,6 +58,57 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   `2025-11-25` (it sent `2024-11-05`) and accepts a server that answers
   `2025-11-25`, `2025-06-18`, `2025-03-26` or `2024-11-05`; any other answer
   fails `connect()`. The agreed version is `negotiatedProtocolVersion`.
+- **The MCP server speaks Streamable HTTP on one endpoint, `/mcp`.** `POST /`,
+  `POST /rpc`, `GET /sse`, `GET /.well-known/mcp.json` and `POST /oauth/token`
+  are gone (`/sse` sent one event and closed; the discovery document advertised
+  capabilities the server did not have). `initialize` returns the session id in
+  the `Mcp-Session-Id` header only (no longer in the result); every other request
+  must send it (`400` without, `404` for an unknown or expired session), and
+  `DELETE /mcp` ends a session. Notifications get `202 Accepted`. Batches,
+  non-JSON bodies, unsupported `MCP-Protocol-Version` headers, non-loopback
+  `Host` names (on a loopback server) and foreign `Origin`s are refused.
+- **Protocol versions are negotiated honestly.** The server offers `2025-11-25`
+  and `2025-06-18` (`mcpSupportedProtocolVersions`), echoes a supported requested
+  version and otherwise answers with the newest. It no longer claims 2024-11-05,
+  whose HTTP+SSE transport it never implemented. `mcpProtocolVersion` is now
+  `2025-11-25`. `initialize` advertises only `tools`, `resources` and `prompts`
+  (no `listChanged`, `subscribe` or `logging`); `resources/subscribe` and the
+  non-standard `shutdown` method (`MCPMethod.shutdown`) are removed; `ping`
+  returns `{}`.
+- **`tools/call` runs exactly the named tool, or fails.** Tools are listed as
+  `<providerId>__<toolName>` (`MCPToolNaming.aggregate`) or, with
+  `MCPServerConfig.toolNaming = .provider(id)` / `serve --provider`, one provider's
+  tools under their upstream names. An unlisted name is a JSON-RPC `-32602` error;
+  without a wired runtime a call is a JSON-RPC error (it used to answer
+  `status: ok` with a "runtime dispatch pending" note); a tool that throws is an
+  `isError` result. Results are MCP `CallToolResult`s (`content`,
+  `structuredContent` for JSON objects, `isError`, `_meta["dev.smallchat/toolId"]`)
+  instead of `{invocationId, status, result}`. Tool names no longer go through
+  semantic resolution: that is the opt-in `smallchat_dispatch` meta-tool
+  (`MCPServerConfig.semanticDispatch`, `serve --semantic-dispatch`).
+  `MCPRouter.setRefinementHandler` is replaced by `setToolExecutor(_:)` and
+  `setSemanticDispatchHandler(_:)`; `MCPRouter.init` no longer takes an
+  `SSEBroker`.
+- **OAuth is removed; `--auth` means a bearer token.** `OAuthManager`, `OAuthToken`,
+  `OAuthClient`, `MCPScope`, `PermissionsConfig` and `MCPServerConfig.enableAuth`
+  are gone. Nothing could register a client from the CLI, so `serve --auth`
+  rejected every request; scopes were never enforced; client secrets were stored
+  as unsalted SHA-256 (the README said PBKDF2). `MCPServerConfig.authToken`
+  requires `Authorization: Bearer <token>` on every request except `GET /health`.
+  `serve --auth` reads the token from `SMALLCHAT_MCP_TOKEN` or `--auth-token-file`
+  (default `~/.smallchat/serve-token`, created with a random token, mode 0600).
+- **`AuditLog` requires a key and hashes every field.** `AuditLog(hmacKey:)` takes
+  a non-empty key (the built-in default key was public, so anyone could forge a
+  valid chain); `MCPServer` uses `MCPServerConfig.auditKey` or a random key. The
+  chain now covers `clientId` and `error` too, so chain heads differ from 0.6.x.
+- **`ToolProxy.execute` throws `ToolNotExecutableError`** unless the proxy was
+  created with an `executor`. It used to return `{"status": "executed"}` without
+  running anything. Compiler-built proxies have no executor.
+- **`MCPClientTransport.execute` returns the upstream `CallToolResult`** for MCP
+  tools (content is the whole result object, flagged with
+  `mcpCallToolResultMetadataKey`), not just its `content` array.
+- **`SmallChatMCP` depends on `SmallChatCompiler` and `SmallChatEmbedding`**, so it
+  can compile manifests into a runnable toolkit (`MCPToolkit`).
 
 ### Fixed
 
@@ -98,12 +149,43 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   Writes no longer crash the process on a broken pipe (Linux `FileHandle.write`
   traps on `EPIPE`, and SIGPIPE killed the process); concurrent first calls
   start one server, not two; the server's `ping` requests are answered.
+- **The MCP server no longer crashes on every request.** Request handling ran in a
+  Swift task and wrote to `ChannelHandlerContext` from there, off its event loop:
+  NIO's precondition killed debug builds (`smallchat serve`, the app's Server
+  panel) on the first request, and release builds raced on the pipeline. Work
+  still runs in tasks; every write hops back to the connection's event loop.
+  Tests now send real HTTP requests.
+- **`smallchat serve` runs tools.** It never wired a runtime, and the compiler's
+  `ToolProxy` faked execution anyway. `serve` (and `MCPServer.start()` with a
+  `sourcePath`) now loads manifests or an artifact with `MCPToolkit`, whose
+  `EndpointToolIMP`s call each provider's manifest `endpoint`: MCP servers over
+  Streamable HTTP, REST APIs as `POST <endpoint>/<tool>`. `compile` and
+  `buildArtifact` record each tool's description, input schema and provider
+  endpoint (schemas used to be looked up by tool name alone, so two providers
+  sharing a tool name got the same schema).
+- **The MCP perimeter matches TypeScript #85.** Rate limiting is keyed by the
+  client's address (it used the client-chosen `Mcp-Session-Id`, so a fresh id per
+  request was never throttled); sessions are validated; `maxConnections` is
+  enforced (it was never read).
+- **The audit log verifies after eviction.** `verifyChain()` started from the zero
+  hash, so it reported tampering on every log that had evicted an entry.
+- **`MCPClientTransport` works with Streamable HTTP servers**: it initializes
+  lazily, sends `Accept`, `Mcp-Session-Id` and `MCP-Protocol-Version`, reads
+  responses sent as SSE, re-initializes once when the server drops the session,
+  and ends sessions with `terminateSession()`.
+- Tool content that is not a string is rendered as JSON (`formatContent` used
+  Swift's `String(describing:)`).
 - **The rtk filter no longer deadlocks on large output.** It wrote the whole body
   to stdin before reading stdout, so a filter whose output filled the pipe
   buffer (about 64 KB) blocked forever. stdin is now written while stdout and
   stderr are read, and on `timeoutMs` the process is stopped.
 
 ### Added
+
+- **`MCPToolkit`, `EndpointToolIMP`, `MCPToolCatalog`** and `MCPServer.setRuntime(_:semanticDispatch:)`,
+  `setToolExecutor(_:)`, `setArtifact(_:)` and `boundPort` (start on port 0 and read
+  the port). `serve` gains `--provider`, `--semantic-dispatch`, `--auth-token-file`
+  and `--max-connections`.
 
 - **CI on every supported platform.** Besides macOS 15 (Xcode 16.4, Swift
   6.1), CI now builds and tests on the newest Xcode (`macos-26`), builds the

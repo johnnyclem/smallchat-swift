@@ -30,17 +30,28 @@ public struct MCPTransportOptions: Sendable {
 /// Client-side transport for connecting to MCP servers.
 ///
 /// Supports multiple transport types:
-/// - MCP: JSON-RPC 2.0 over HTTP with optional SSE streaming
+/// - MCP: Streamable HTTP. Requests are POSTed to the endpoint with
+///   `Accept: application/json, text/event-stream`; a response is read from
+///   either a JSON body or an SSE stream. The session id from `initialize`'s
+///   `Mcp-Session-Id` header and the negotiated `MCP-Protocol-Version` are
+///   sent on later requests, and a session the server dropped (404) is
+///   re-established once.
 /// - REST: Standard HTTP API calls
-/// - Local: In-process tool execution
-/// - gRPC: Stub for future implementation
+/// - Local / gRPC: not supported; calls fail
 public actor MCPClientTransport {
+
+    /// Versions this client accepts in `initialize`'s answer.
+    public static let acceptedProtocolVersions: Set<String> = [
+        "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05",
+    ]
 
     private let endpoint: String?
     private let transportType: TransportType
     private let headers: [String: String]
     private var requestCounter: Int = 0
     private var sessionId: String?
+    private var protocolVersion: String?
+    private var initialized = false
 
     public init(options: MCPTransportOptions) {
         self.endpoint = options.endpoint
@@ -52,6 +63,9 @@ public actor MCPClientTransport {
 
     /// The current session ID (set after initialize).
     public var currentSessionId: String? { sessionId }
+
+    /// The protocol version the server agreed to (set after initialize).
+    public var negotiatedProtocolVersion: String? { protocolVersion }
 
     /// Set the session ID (typically from an initialize response).
     public func setSessionId(_ id: String) {
@@ -83,11 +97,15 @@ public actor MCPClientTransport {
 
     // MARK: - MCP Protocol Operations
 
-    /// Initialize the connection to an MCP server.
+    /// Initialize the connection to an MCP server: negotiate the protocol
+    /// version, keep the session id, and send `notifications/initialized`.
     public func initialize(
         clientName: String = "smallchat",
         clientVersion: String = SmallChatVersion.current
     ) async throws -> JSONRPCResponse {
+        sessionId = nil
+        protocolVersion = nil
+        initialized = false
         let response = try await sendRequest(method: MCPMethod.initialize.rawValue, params: [
             "protocolVersion": .string(mcpProtocolVersion),
             "capabilities": .dict([:]),
@@ -96,17 +114,34 @@ public actor MCPClientTransport {
                 "version": .string(clientVersion),
             ]),
         ])
+        if let error = response.error {
+            throw MCPClientError.initializeFailed(error.message)
+        }
 
-        // Extract session ID from response
-        if case .dict(let result) = response.result,
+        // Session id: the Mcp-Session-Id header (read by executeJSONRPC);
+        // smallchat servers before 1.0 put it in the result instead.
+        if sessionId == nil, case .dict(let result) = response.result,
            case .string(let sid) = result["sessionId"] {
             sessionId = sid
         }
+        guard case .dict(let result) = response.result,
+              case .string(let version) = result["protocolVersion"],
+              Self.acceptedProtocolVersions.contains(version) else {
+            throw MCPClientError.unsupportedProtocolVersion
+        }
+        protocolVersion = version
 
         // Send initialized notification
         try await sendNotification(method: MCPMethod.notificationsInitialized.rawValue)
+        initialized = true
 
         return response
+    }
+
+    private func ensureInitialized() async throws {
+        if !initialized {
+            _ = try await initialize()
+        }
     }
 
     /// List available tools from the server.
@@ -173,9 +208,18 @@ public actor MCPClientTransport {
         try await sendRequest(method: MCPMethod.ping.rawValue)
     }
 
-    /// Shutdown the session.
-    public func shutdown() async throws -> JSONRPCResponse {
-        try await sendRequest(method: MCPMethod.shutdown.rawValue)
+    /// End the session (HTTP `DELETE` on the endpoint with the session id).
+    public func terminateSession() async throws {
+        guard let endpoint, let url = URL(string: endpoint), let sid = sessionId else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue(sid, forHTTPHeaderField: "Mcp-Session-Id")
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        _ = try await URLSession.shared.data(for: request)
+        sessionId = nil
+        initialized = false
     }
 
     // MARK: - Tool Execution
@@ -229,8 +273,19 @@ public actor MCPClientTransport {
 
     // MARK: - Private Transport Methods
 
+    /// Call an upstream MCP tool. The upstream `CallToolResult` is the result's
+    /// content (flagged with `mcpCallToolResultMetadataKey`), so a smallchat
+    /// MCP server passes it through unchanged.
     private func executeMCP(toolName: String, args: [String: AnyCodableValue]) async throws -> ToolResult {
-        let response = try await callTool(name: toolName, arguments: args)
+        try await ensureInitialized()
+        var response: JSONRPCResponse
+        do {
+            response = try await callTool(name: toolName, arguments: args)
+        } catch MCPClientError.sessionExpired {
+            // The server dropped the session: start a new one, once.
+            _ = try await initialize()
+            response = try await callTool(name: toolName, arguments: args)
+        }
 
         if let error = response.error {
             return ToolResult(
@@ -243,17 +298,18 @@ public actor MCPClientTransport {
             )
         }
 
-        if case .dict(let result) = response.result {
-            let isError: Bool
-            if case .bool(let e) = result["isError"] { isError = e } else { isError = false }
-
-            return ToolResult(
-                content: result["content"] as (any Sendable)?,
-                isError: isError
-            )
+        guard case .dict(var result) = response.result else {
+            throw MCPClientError.invalidResponse("tools/call result is not an object")
         }
+        let isError: Bool
+        if case .bool(let e) = result["isError"] { isError = e } else { isError = false }
+        if result["content"] == nil { result["content"] = .array([]) }
 
-        return ToolResult(content: nil as (any Sendable)?, isError: false)
+        return ToolResult(
+            content: AnyCodableValue.dict(result),
+            isError: isError,
+            metadata: [mcpCallToolResultMetadataKey: true as any Sendable]
+        )
     }
 
     private func executeREST(toolName: String, args: [String: AnyCodableValue]) async throws -> ToolResult {
@@ -323,41 +379,93 @@ public actor MCPClientTransport {
             )
         }
 
-        var urlRequest = URLRequest(url: url)
-        urlRequest.httpMethod = "POST"
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        for (key, value) in headers {
-            urlRequest.setValue(value, forHTTPHeaderField: key)
+        let urlRequest = try buildPost(url: url, body: JSONEncoder().encode(request))
+        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        let http = response as? HTTPURLResponse
+        let status = http?.statusCode ?? 0
+
+        if status == 404, sessionId != nil, request.method != MCPMethod.initialize.rawValue {
+            sessionId = nil
+            initialized = false
+            throw MCPClientError.sessionExpired
         }
-        if let sid = sessionId {
-            urlRequest.setValue(sid, forHTTPHeaderField: "Mcp-Session-Id")
+        if request.method == MCPMethod.initialize.rawValue,
+           let sid = http?.value(forHTTPHeaderField: "Mcp-Session-Id"), !sid.isEmpty {
+            sessionId = sid
         }
 
-        let bodyData = try JSONEncoder().encode(request)
-        urlRequest.httpBody = bodyData
-
-        let (data, _) = try await URLSession.shared.data(for: urlRequest)
-        return try JSONDecoder().decode(JSONRPCResponse.self, from: data)
+        let contentType = http?.value(forHTTPHeaderField: "Content-Type") ?? ""
+        if contentType.contains("text/event-stream") {
+            return try Self.responseFromEventStream(data, id: request.id)
+        }
+        do {
+            return try JSONDecoder().decode(JSONRPCResponse.self, from: data)
+        } catch {
+            throw MCPClientError.invalidResponse("HTTP \(status): \(String(decoding: data.prefix(200), as: UTF8.self))")
+        }
     }
 
     private func sendJSONRPCNotification(_ notification: JSONRPCNotification) async throws {
         guard let endpoint, let url = URL(string: endpoint) else { return }
+        let urlRequest = try buildPost(url: url, body: JSONEncoder().encode(notification))
+        // The server answers 202 Accepted with no body.
+        _ = try await URLSession.shared.data(for: urlRequest)
+    }
 
+    private func buildPost(url: URL, body: Data) throws -> URLRequest {
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
         for (key, value) in headers {
             urlRequest.setValue(value, forHTTPHeaderField: key)
         }
         if let sid = sessionId {
             urlRequest.setValue(sid, forHTTPHeaderField: "Mcp-Session-Id")
         }
+        if let protocolVersion {
+            urlRequest.setValue(protocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
+        }
+        urlRequest.httpBody = body
+        return urlRequest
+    }
 
-        let bodyData = try JSONEncoder().encode(notification)
-        urlRequest.httpBody = bodyData
+    /// The JSON-RPC response with `id` in an SSE body (other events, such as
+    /// progress notifications, are skipped).
+    static func responseFromEventStream(_ data: Data, id: JSONRPCId?) throws -> JSONRPCResponse {
+        let text = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\r\n", with: "\n")
+        for event in text.components(separatedBy: "\n\n") {
+            let payload = event
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { $0.hasPrefix("data:") }
+                .map { line -> Substring in
+                    let rest = line.dropFirst(5)
+                    return rest.first == " " ? rest.dropFirst() : rest
+                }
+                .joined(separator: "\n")
+            guard !payload.isEmpty,
+                  let response = try? JSONDecoder().decode(JSONRPCResponse.self, from: Data(payload.utf8)),
+                  id == nil || response.id == id else { continue }
+            return response
+        }
+        throw MCPClientError.invalidResponse("no JSON-RPC response in the event stream")
+    }
+}
 
-        // Fire and forget for notifications
-        _ = try await URLSession.shared.data(for: urlRequest)
+/// Errors from `MCPClientTransport`.
+public enum MCPClientError: Error, Sendable, CustomStringConvertible {
+    case initializeFailed(String)
+    case unsupportedProtocolVersion
+    case sessionExpired
+    case invalidResponse(String)
+
+    public var description: String {
+        switch self {
+        case .initializeFailed(let message): return "MCP initialize failed: \(message)"
+        case .unsupportedProtocolVersion: return "MCP server answered initialize with an unsupported protocol version"
+        case .sessionExpired: return "MCP session expired"
+        case .invalidResponse(let message): return "Invalid MCP response: \(message)"
+        }
     }
 }
 

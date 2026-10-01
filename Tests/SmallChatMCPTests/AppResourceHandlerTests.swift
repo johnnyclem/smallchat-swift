@@ -79,7 +79,7 @@ struct AppResourceHandlerTests {
 
     @Test("MCPServer.registerApp wires handler end-to-end")
     func mcpServerRegisterApp() async throws {
-        let server = try MCPServer(config: MCPServerConfig(sourcePath: ""))
+        let server = try MCPServer(config: MCPServerConfig(sourcePath: "", dbPath: ":memory:"))
         await server.registerApp(
             tool: "my-tool",
             uiUri: "ui://my-tool/index.html",

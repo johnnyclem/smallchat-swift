@@ -94,6 +94,8 @@ let package = Package(
                 "SmallChatCore",
                 "SmallChatRuntime",
                 "SmallChatTransport",
+                "SmallChatCompiler",
+                "SmallChatEmbedding",
                 crypto,
                 .product(name: "SQLite", package: "SQLite.swift"),
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -201,7 +203,17 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),
-        .testTarget(name: "SmallChatMCPTests", dependencies: ["SmallChatMCP", "SmallChatRuntime", "SmallChatEmbedding"]),
+        .testTarget(
+            name: "SmallChatMCPTests",
+            dependencies: [
+                "SmallChatMCP",
+                "SmallChatRuntime",
+                "SmallChatEmbedding",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
+        ),
         .testTarget(name: "SmallChatChannelTests", dependencies: ["SmallChatChannel"]),
         .testTarget(name: "SmallChatDreamTests", dependencies: ["SmallChatDream"]),
         .testTarget(name: "SmallChatShorthandTests", dependencies: ["SmallChatShorthand"]),

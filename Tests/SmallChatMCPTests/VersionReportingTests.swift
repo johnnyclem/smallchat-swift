@@ -19,8 +19,7 @@ struct MCPVersionReportingTests {
         let router = MCPRouter(
             sessionStore: try SessionStore(dbPath: ":memory:"),
             resourceRegistry: ResourceRegistry(),
-            promptRegistry: PromptRegistry(),
-            sseBroker: SSEBroker()
+            promptRegistry: PromptRegistry()
         )
         let request = JSONRPCRequest(
             id: .string("init-1"),
@@ -38,5 +37,27 @@ struct MCPVersionReportingTests {
             return
         }
         #expect(version == SmallChatVersion.current)
+    }
+
+    @Test("initialize echoes a supported protocol version and offers the newest otherwise")
+    func protocolNegotiation() async throws {
+        let router = MCPRouter(
+            sessionStore: try SessionStore(dbPath: ":memory:"),
+            resourceRegistry: ResourceRegistry(),
+            promptRegistry: PromptRegistry()
+        )
+        func negotiated(_ requested: String?) async -> String? {
+            var params: [String: AnyCodableValue] = ["clientInfo": .dict(["name": .string("t"), "version": .string("0")])]
+            if let requested { params["protocolVersion"] = .string(requested) }
+            let (response, _) = await router.initialize(request: JSONRPCRequest(id: .int(1), method: "initialize", params: params))
+            guard case .dict(let result) = response.result, case .string(let v) = result["protocolVersion"] else { return nil }
+            return v
+        }
+        #expect(await negotiated("2025-06-18") == "2025-06-18")
+        #expect(await negotiated("2025-11-25") == "2025-11-25")
+        // Not implemented: 2024-11-05's HTTP+SSE transport, 2025-03-26's batches.
+        #expect(await negotiated("2024-11-05") == "2025-11-25")
+        #expect(await negotiated("2025-03-26") == "2025-11-25")
+        #expect(await negotiated(nil) == "2025-11-25")
     }
 }
