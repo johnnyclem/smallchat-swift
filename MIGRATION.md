@@ -6,6 +6,9 @@
 .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "1.0.0"),
 ```
 
+The `1.0.0` tag is created when the release is published. Until then (and for any
+earlier version, none of which was tagged) pin a commit with `revision:`.
+
 The sections below cover each breaking change from 0.6.x and what to do about it.
 [`CHANGELOG.md`](CHANGELOG.md) has the full list of changes.
 
@@ -39,6 +42,14 @@ used them; code that targets several platforms should wrap its uses in
 `MCPSSETransport` or `MCPClientTransport` instead.
 
 `SmallChatAgents` (which spawns the `claude` CLI) is not an iOS library.
+
+### swift-crypto on Linux
+
+On Linux the package now depends on
+[swift-crypto](https://github.com/apple/swift-crypto) (`3.0.0..<6.0.0`) for SHA-256 and
+HMAC; Apple platforms keep using CryptoKit. If your Linux package pins swift-crypto
+outside that range, widen one of the two. [Linux hashes](#linux-hashes) covers the
+values that change.
 
 ### `SmallChatUI` exists only on Apple platforms
 
@@ -281,9 +292,14 @@ and `uniqueSelectorCount` differ from 0.6 artifacts.
 
 `Embedder` has a `fingerprint` requirement (default `nil`). Declare one in a custom
 embedder that compiles artifacts; an embedder without one cannot load an artifact.
-`LocalEmbedder` now normalizes in double precision, and `MemoryVectorIndex` scores in
-double precision and orders ties by id, matching @smallchat/core; vectors and scores
-can differ from 0.6 in the last float32 bit.
+
+`LocalEmbedder` now computes @smallchat/core's hash-embedder vectors: it hashes UTF-16
+code units instead of UTF-8 bytes, keeps only ASCII letters, digits and whitespace
+when it tokenizes (as the TypeScript embedder does), and normalizes in double
+precision. `MemoryVectorIndex` scores in double precision and orders ties by id. Text
+with non-ASCII characters embeds differently from 0.6, and other vectors and scores
+can differ in the last float32 bit, so re-embed any vectors you stored yourself
+(compiled artifacts have to be recompiled anyway).
 
 ### CLI
 
@@ -351,6 +367,12 @@ calls) and, for the meta-tool, `setResolveHandler(_:)`; or call
 
 `ToolProxy.execute` now throws `ToolNotExecutableError` unless you pass an
 `executor:` when creating the proxy.
+
+`MCPClientTransport.execute(toolName:args:)` for an MCP tool returns the upstream
+`CallToolResult` as the result's content (an `AnyCodableValue` object with
+`content`, `structuredContent` and `isError`), flagged with
+`metadata[mcpCallToolResultMetadataKey] == true`, instead of only its `content`
+array. Read `content` from that object, or pass the result to `mcpCallToolResult(_:)`.
 
 ### Authentication
 
@@ -439,6 +461,19 @@ compile.
 - Version 1 lines need what Stenographer's import needs: an RFC 3339 `ts`, at least
   one piece of evidence on a TB, and accountable identities.
 
+### Identities and literals
+
+`assertAccountableAuthor` and `isAnonymousIdentity` compare identities by a folded key
+(width, case and invisible characters), so `ａｓｓｉｓｔａｎｔ` is anonymous like
+`assistant`. `assertAccountableAuthor` also refuses identities with control characters
+and the reserved `migration` and `detector:*` (pass `allowDetector: true` for a
+detector's own proposals).
+
+Tombstoned literals follow Stenographer's rule: without a `subject`, the dead value
+needs at least 4 UTF-16 code units and an ASCII letter (so `日本語版` now needs a
+subject), values are trimmed, and an explicit `"subject": null` is refused. Check
+drafts with `TombstoneDraft.problems()` or `TruthTombstonedLiteral.validationError()`.
+
 ### Writing back
 
 `TruthWiki.serialize` returns each entry's original line. If you changed an entry
@@ -482,7 +517,11 @@ build a `ClaudeInvocation` yourself and run it with `ClaudeProcess`, set
 
 The messenger now launches its switchboard and stenographer with `--tools`,
 `--strict-mcp-config`, `--setting-sources user` and `--append-system-prompt-file`.
-Update Claude Code if a launch fails with an unknown option.
+Update Claude Code if a launch fails with an unknown option. The switchboard runs in
+`<Application Support>/SmallChat/switchboard`
+(`ClaudeCodeTransport.Configuration.switchboardDirectory`) instead of your home
+directory, and the stenographer gets only `Read`, `Grep` and `Glob`; tools your
+settings used to let them run are no longer available to them.
 
 ### `AgentTransport.shutdown()`
 
