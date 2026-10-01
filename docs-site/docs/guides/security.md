@@ -97,7 +97,9 @@ let options = RuntimeOptions(rateLimiter: SemanticRateLimiterOptions(
 
 Each principal (`ResolveOptions.principal`, `DispatchOptions.principal`) has its own
 window. Over the limit, resolution returns the `throttled` outcome with
-`retryAfterMs` before embedding the intent; nothing runs.
+`retryAfterMs` before embedding the intent; nothing runs. An admitted intent takes its
+window slot before it is embedded (`admit`), so concurrent intents from one principal
+are counted as they arrive, and a failed embedding gives the slot back.
 
 ### Detection Heuristics
 

@@ -20,6 +20,13 @@ The manifest is `swift-tools-version: 6.1`. Use Xcode 16.3 or newer on macOS, or
 Swift 6.1+ toolchain on Linux. CI covers Xcode 16.4, the newest Xcode, and Swift 6.1,
 6.3 and 6.4 on Linux.
 
+On Linux with Swift 6.1, an executable that links `SmallChatAgents` (which uses
+`@Observable`) fails to link: 6.1's `libswiftObservation.so` references
+`swift::threading::fatal`, which its `libswiftCore.so` does not export. Link with
+`-Xlinker --allow-shlib-undefined` (`swift build -Xlinker --allow-shlib-undefined`,
+and the same for `swift test`), or use Swift 6.2 or newer. Other products, and
+macOS, are not affected.
+
 ### `OSAllocatedUnfairLock` is no longer exported on Linux
 
 Before 1.0, `import SmallChatCore` (or `import SmallChat`) on Linux brought in a
@@ -210,6 +217,13 @@ its own thresholds. Recalibrate any custom thresholds against your embedder.
 - `ResolutionCache` is keyed by `intentKey(_:)` and only used by intent dispatch;
   `resolve` reads it only with `ResolveOptions(learn: true)`. Pinned and destructive
   tools are never cached, and every hit is judged by the policy again.
+- Dispatch uses only cache entries it stored itself under the current
+  `DispatchContext.registryGeneration`, for tools that are still registered.
+  Entries you `store` into the cache yourself are misses; let dispatch fill it.
+- A dispatch whose tool is unregistered or replaced (`unregisterClass`,
+  `registerClass` with the same name, `reindex`, `swizzle`, `addOverload`,
+  `loadCategory`) while the call is being resolved or validated runs nothing and
+  returns outcome `unresolved`. Dispatch again to resolve against the new registry.
 - `SelectorTable.resolve` returns a selector carrying the intent's own vector and keeps
   no intent cache (`cachedIntentCount` is gone).
 - `IntentPinRegistry.checkExact` takes the raw intent and compares whole phrases with
@@ -223,6 +237,11 @@ its own thresholds. Recalibrate any custom thresholds against your embedder.
 each caller its own window. A refusal is the `throttled` outcome with `retryAfterMs`
 instead of a thrown `VectorFloodError`. `ResolutionCache.rateLimiter` and the
 `rateLimiter:` parameter of `SelectorTable.init` are removed.
+
+If you call the limiter yourself, use `admit(_:principal:)` before embedding, then
+`record(_:vector:)` or, if embedding failed, `release(_:)`: `admit` reserves the
+window slot in the same step as the check, so concurrent intents can't all pass it.
+`evaluate` and `check` only look and reserve nothing.
 
 ### Proofs and verification
 
@@ -328,6 +347,14 @@ claude mcp add --transport http smallchat http://127.0.0.1:3001/mcp
   `GET /health` for liveness.
 - The server negotiates `2025-11-25` or `2025-06-18`. Clients that only speak
   2024-11-05 (HTTP+SSE) cannot connect; every current official SDK can.
+- On a server bound to a loopback address, the `Host` and `Origin` names must be
+  `localhost`, `::1` or a dotted-decimal IPv4 address in 127.0.0.0/8. Other names
+  that resolve to loopback (`127.0.0.1.nip.io`, a hosts-file alias) are refused with
+  `403`; list an `Origin` you need in `MCPServerConfig.allowedOrigins`, or bind to a
+  non-loopback address and use `--auth`.
+- Requests are read like `JSON.parse` reads them. An object whose member names are
+  canonically equivalent but spelled with different code points (`"\u00e9"` and
+  `"e\u0301"`) is a parse error (`-32700`).
 
 ### Tool names and results
 
@@ -378,7 +405,9 @@ array. Read `content` from that object, or pass the result to `mcpCallToolResult
 
 `MCPServerConfig.enableAuth` and the OAuth types are removed. Pass
 `authToken: "<secret>"` (or `serve --auth`, which reads `SMALLCHAT_MCP_TOKEN` or a
-0600 token file) and configure clients to send `Authorization: Bearer <secret>`:
+0600 token file) and configure clients to send `Authorization: Bearer <secret>`.
+`serve --auth` refuses a token file that group or other users can access; if you
+wrote one yourself, `chmod 600` it:
 
 ```bash
 claude mcp add --transport http smallchat http://127.0.0.1:3001/mcp \
@@ -396,9 +425,9 @@ sets the server's key; without one each server process uses a random key.
 ### Bridge types live in `SmallChatChannel`
 
 `ChannelBridgeServer`, `ChannelBridgeProtocol`, `ChannelBridgeResponse` and
-`ChannelInboundEvent` moved from `SmallChatAgents` to `SmallChatChannel`. Code that
-imports `SmallChatAgents` or `SmallChat` keeps compiling; a target that depends only
-on `SmallChatAgents` and names these types should add `import SmallChatChannel`.
+`ChannelInboundEvent` moved from `SmallChatAgents` to `SmallChatChannel`.
+`SmallChatAgents` re-exports `SmallChatChannel`, so code that imports
+`SmallChatAgents` or `SmallChat` keeps compiling unchanged.
 
 ### `smallchat channel --http-bridge`
 

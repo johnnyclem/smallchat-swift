@@ -69,7 +69,7 @@ swift run smallchat serve --source <path> [options]
 | `--provider` | Serve one provider's tools under their upstream names | all, as `<provider>__<tool>` |
 | `--no-resolve-tool` | Do not list the read-only `smallchat_resolve` meta-tool | listed |
 | `--auth` | Require a bearer token (`SMALLCHAT_MCP_TOKEN` or the token file) | `false` |
-| `--auth-token-file` | Token file, created with a random token (mode 0600) if missing | `~/.smallchat/serve-token` |
+| `--auth-token-file` | Token file, created with a random token (mode 0600) if missing; refused if group or other users can access it | `~/.smallchat/serve-token` |
 | `--rate-limit` | Enable per-address rate limiting | `false` |
 | `--rate-limit-rpm` | Requests per minute limit | `600` |
 | `--audit` | Enable the in-memory audit log | `false` |

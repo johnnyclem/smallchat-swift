@@ -119,8 +119,8 @@ let config = MCPServerConfig(
 
 ## Security
 
-- **Host and Origin checks.** A server bound to a loopback address rejects non-loopback `Host` names and foreign `Origin` headers with `403` (DNS rebinding protection).
-- **Bearer token.** With `authToken` set, every request except `GET /health` needs `Authorization: Bearer <token>`. `smallchat serve --auth` reads the token from `SMALLCHAT_MCP_TOKEN` or a token file (default `~/.smallchat/serve-token`, created with mode 0600). OAuth is not implemented.
+- **Host and Origin checks.** A server bound to a loopback address rejects with `403` any `Host` or `Origin` name other than `localhost`, `::1` or a dotted-decimal IPv4 address in 127.0.0.0/8 (DNS rebinding protection). A DNS name is refused even when it resolves to loopback (`127.0.0.1.nip.io`); add an origin you trust to `allowedOrigins`.
+- **Bearer token.** With `authToken` set, every request except `GET /health` needs `Authorization: Bearer <token>`. `smallchat serve --auth` reads the token from `SMALLCHAT_MCP_TOKEN` or a token file (default `~/.smallchat/serve-token`, created with mode 0600; refused if group or other users can access it). OAuth is not implemented.
 - **Rate limiting** is keyed by the client's address, so a client cannot escape it by choosing new session ids. Over the limit, requests get `429`.
 - **Limits.** Bodies over `maxRequestBodyBytes` get `413`; connections beyond `maxConnections` are closed.
 

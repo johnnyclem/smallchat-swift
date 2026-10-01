@@ -134,7 +134,7 @@ CI builds every "yes" cell and runs the test suite on macOS and Linux (see `.git
 | `SmallChatTransport`, `SmallChatMCP`, `SmallChatChannel` | yes | yes | yes, without subprocess APIs ¹ |
 | `SmallChat` (umbrella) | yes | yes, without `SmallChatUI` ² | yes |
 | `SmallChatUI` | yes | no (needs SwiftUI/WebKit) | yes |
-| `SmallChatAgents` | yes | yes | no (spawns the `claude` CLI) |
+| `SmallChatAgents` | yes | yes ³ | no (spawns the `claude` CLI) |
 | `smallchat` CLI | yes | yes | n/a |
 | `SmallChatApp` (messenger) | yes | no (AppKit) | no |
 
@@ -143,6 +143,10 @@ need `Foundation.Process`, which iOS does not have, so they are compiled only on
 On iOS, `RtkTransport` passes bodies through uncompressed because the `rtk filter` subprocess cannot run.
 
 ² `SmallChatUI` and `SmallChatApp` are declared only when the manifest is evaluated on macOS.
+
+³ With Swift 6.1 on Linux, executables that link `SmallChatAgents` need
+`-Xlinker --allow-shlib-undefined`: 6.1's `libswiftObservation.so` references a symbol
+its `libswiftCore.so` does not export. Swift 6.2 and later link without it.
 On Linux, `import SmallChat` re-exports every other module.
 
 On Linux, SHA-256/HMAC come from [swift-crypto](https://github.com/apple/swift-crypto) (the
@@ -369,14 +373,14 @@ immune to instructions inside the text it reads.
 | **Intent Pinning** | Guards sensitive tools against semantic collisions. `exact` pins accept only their pinned phrases, compared as whole phrases (so "do not transfer funds" does not match "transfer funds"); `elevated` pins need a similarity of the intent's own embedding at or above their threshold (default 0.98). |
 | **Argument Validation** | Every call is validated against the tool's JSON Schema `inputSchema` before it runs; a schema the validator cannot evaluate makes the tool uncallable rather than unchecked. `format` is not checked. |
 | **Intent Sanitization** | Before embedding, `resolve` strips NUL and the other C0 control characters, collapses whitespace and truncates the intent to 1,024 characters; an empty intent is refused. |
-| **Semantic Rate Limiting** | Opt-in (`RuntimeOptions.rateLimiter`): limits novel intents embedded per principal per time window; over the limit, resolution returns `throttled` without embedding. |
+| **Semantic Rate Limiting** | Opt-in (`RuntimeOptions.rateLimiter`): limits novel intents embedded per principal per time window, counting concurrent ones as they are admitted; over the limit, resolution returns `throttled` without embedding. |
 | **No Intent Interning** | Intents are embedded on their own and never inserted into the tool-selector table or index, so long-running processes can't accumulate state per intent or dilute real tool candidates. |
 | **Selector Namespacing** | Selectors of a class registered with `registerCoreClass` cannot be taken over by another class's category, overload or swizzle (`SelectorShadowingError`) unless marked swizzlable. `registerClass` itself does not check them. |
 | **Schema Fingerprinting** | After `updateSchemaFingerprint(_:)` records a provider's changed schemas, cached resolutions made under the old ones are dropped on their next lookup. Call it when a provider reloads; nothing calls it for you. |
-| **Bearer Token** | With `serve --auth`, every MCP request (all but `GET /health`) needs `Authorization: Bearer <token>`, compared in constant time. The token comes from `SMALLCHAT_MCP_TOKEN` or a file created with mode 0600. OAuth is not implemented. |
+| **Bearer Token** | With `serve --auth`, every MCP request (all but `GET /health`) needs `Authorization: Bearer <token>`, compared in constant time. The token comes from `SMALLCHAT_MCP_TOKEN` or a file created with mode 0600 (in a 0700 directory when it creates one); a token file that group or other users can access is refused. OAuth is not implemented. |
 | **Audit Log Integrity** | HMAC-SHA256 chain over every field of each entry, under a secret key (random per server unless you pass one; there is no built-in key). It detects edits to retained entries by anyone without the key, and still verifies after old entries are evicted. In memory only: it does not survive a restart. |
 | **Connection Limits** | The MCP server closes connections beyond `maxConnections` and rejects bodies over `maxRequestBodyBytes` (413). |
-| **DNS-Rebinding Protection** | A loopback-bound MCP server rejects non-loopback `Host` names and foreign `Origin`s (403). |
+| **DNS-Rebinding Protection** | A loopback-bound MCP server rejects (403) `Host` and `Origin` names other than `localhost`, `::1` and dotted-decimal IPv4 addresses in 127.0.0.0/8; a DNS name such as `127.0.0.1.nip.io` is refused even if it resolves to loopback. Origins in `allowedOrigins` are accepted. |
 | **Sender Gating** | The channel server's allowlist of event senders (`SenderGate`), with identity validation, a sender cap and 6-hex-digit pairing codes compared in constant time. An empty allowlist admits every sender. The HTTP bridge additionally requires the shared secret. |
 | **Truth Ledger Reading** | `SmallChatTruth` refuses a truth format v2 stream with an edited line or a broken hash chain, and never counts an entry with an unknown or missing status, a struck entry or an unsigned TB as current truth. The chain shows a stream wasn't edited between its first and last line; it doesn't show who wrote it (key signatures are planned for 1.x). |
 | **Messenger** | Separate channel, notary and REST secrets kept in the Keychain (0600 files outside macOS), headless sessions with an explicit tool list, a nonce-framed switchboard protocol, and escaping of truth markers inside untrusted text (see [the messenger](#the-smallchat-app-agent-messenger)). |

@@ -134,6 +134,16 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
 - **`ToolProxy.execute` throws `ToolNotExecutableError` (SC-SW-03)** unless the
   proxy was created with an `executor`. It used to return `{"status": "executed"}`
   without running anything. Compiler-built proxies have no executor.
+- **Registry changes reach dispatches already in flight (SW-REV-02).** Once
+  `registerClass`, `unregisterClass` or `reindex` (and so `swizzle`, `addOverload`
+  and `loadCategory`) returns, `dispatch` and `dispatchById` never start a tool the
+  index no longer holds: a call whose tool left while it was being resolved or
+  validated runs nothing and returns outcome `unresolved`. (The streaming
+  variants check from outside the context's actor, so a change that lands in that
+  last hop is not seen.) Dispatch uses a cached
+  resolution only if it stored it itself under the current
+  `DispatchContext.registryGeneration` and the tool is still registered, so an
+  entry put in the `ResolutionCache` by other code is a miss.
 
 #### Artifacts, compiler and embedding
 
@@ -219,7 +229,15 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   `MCPServerConfig.enableAuth` are gone. `MCPServerConfig.authToken` requires
   `Authorization: Bearer <token>` on every request except `GET /health`.
   `serve --auth` reads the token from `SMALLCHAT_MCP_TOKEN` or `--auth-token-file`
-  (default `~/.smallchat/serve-token`, created with a random token, mode 0600).
+  (default `~/.smallchat/serve-token`; see `MCPAuthTokenFile`): a missing file is
+  created with a random token, mode 0600 from the start, in a 0700 directory, and
+  an existing file that group or other users can access is refused (SW-REV-07).
+- **The MCP server reads requests with `parseJSON` (JCS-CANONICAL-EQUIV-KEYS).**
+  Numbers are read as `JSON.parse` reads them (an integer beyond 2^53 is a double,
+  as in @smallchat/core), and an object whose member names differ in code points
+  but are canonically equivalent (`"\u00e9"` and `"e\u0301"`) is a `-32700` parse
+  error instead of being merged into one member. An integral `id` written `1.0`
+  is still the integer 1.
 - **`AuditLog` requires a key and hashes every field (SC-SW-16).**
   `AuditLog(hmacKey:)` takes a non-empty key; `MCPServer` uses
   `MCPServerConfig.auditKey` or a random key. The chain now covers `clientId` and
@@ -259,8 +277,9 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
 - **The channel bridge moved to `SmallChatChannel` (SC-SW-31).**
   `ChannelBridgeServer`, `ChannelBridgeProtocol`, `ChannelBridgeResponse` and
   `ChannelInboundEvent` were in `SmallChatAgents`; `SmallChatAgents` now depends on
-  `SmallChatChannel`, so code that imports either module (or the `SmallChat`
-  umbrella) still sees them. `ChannelBridgeProtocol.constantTimeEqual` is public.
+  `SmallChatChannel` and re-exports it (`@_exported import`), so code that imports
+  either module (or the `SmallChat` umbrella) still sees them
+  (DOC-AGENTS-REEXPORT). `ChannelBridgeProtocol.constantTimeEqual` is public.
 - **`serializeChannelTag` XML-escapes `&`, `<` and `>` in the content (SC-SW-24).**
   Content containing those characters now renders as entities (`&lt;b&gt;`, not
   `<b>` or a blocklist-escaped tag).
@@ -416,10 +435,23 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
 - **`NotaryClient.submitAndNotarize`** files a PROPOSAL envelope with Stenographer
   (`POST /proposals`, idempotent by envelope id) and notarizes it, returning the
   minted TB; `MessengerModel.authoredTombstones` keeps it in the ledger until a
-  wiki export carries it.
+  wiki export carries it, as long as the exports read cleanly
+  (`TruthLedgerSnapshot.refused`).
 - **CI on every supported platform.** macOS 15 (Xcode 16.4, Swift 6.1), the newest
   Xcode (`macos-26`), an iOS build of the `SmallChat` scheme, and builds and tests
-  in `swift:6.1`, `swift:6.3` and `swift:6.4` Linux containers.
+  in `swift:6.1`, `swift:6.3` and `swift:6.4` Linux containers (the 6.1 tests link
+  with `-Xlinker --allow-shlib-undefined`; see Known issues).
+- **`DispatchContext.registryGeneration` and `isRegistered(_:)`**,
+  `ResolvedTool.registryGeneration` and the `registryGeneration:` parameter of
+  `ResolutionCache.store` (SW-REV-02).
+- **`SemanticRateLimiter.admit(_:principal:)`**, `record(_:vector:)` and
+  `release(_:)` with `RateLimitAdmission` / `RateLimitReservation`: check and
+  reserve a window slot in one step (SW-REV-06). `evaluate` and `check` only look.
+- **`MCPAuthTokenFile.loadOrCreate(at:)`** and `MCPAuthTokenFileError`: the token
+  file `serve --auth` uses (SW-REV-07).
+- **`ClaudeProcess.enqueue(line:completion:)`** writes to `claude`'s stdin on the
+  process's own serial queue and returns at once; `Switchboard.listAgents(timeout:)`
+  takes the listing timeout (60 s by default).
 - **`SmallChatVersion.current`** in `SmallChatCore`: the one place the package
   version is spelled.
 - **The MIT `LICENSE` file (SC-SW-37, XSUITE-18)** the README badge has always
@@ -636,6 +668,46 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   Accelerate on Linux, and `dream --embedder` says that only the hash embedder is
   built in.
 
+- **A tool from an unregistered or replaced class could still run (SW-REV-02).**
+  A cache hit ran the cached tool without checking that its id still named it, and
+  a resolution that raced `unregisterClass`, `registerClass` or `reindex` cached
+  its pick after the flush, so a later dispatch of the same intent ran a tool that
+  `getTool` no longer knew (8 of 400 concurrent runs in review). Cache entries now
+  carry the registry generation, a stale resolution is not cached, and both
+  dispatch paths check the tool is still registered just before it starts.
+- **The semantic rate limiter bounds concurrent novel intents (SW-REV-06).**
+  Admission was a check, then embedding, then a record, so 20 concurrent novel
+  intents from one principal all passed `maxNovelIntents = 2` before any was
+  counted. `admit` now takes the window slot in the same step, and a failed
+  embedding gives it back.
+- **A stuck switchboard can't block the messenger (SW-REV-03).** `relay` and
+  `listAgents` wrote to the switchboard's stdin on the `Switchboard` actor, and the
+  write blocks until `claude` reads it: with a body larger than the pipe buffer and
+  a switchboard that wasn't reading, the actor stayed blocked, so the relay timeout
+  never fired and `shutdown()` hung until the process exited. Writes now go to the
+  process's own serial queue (`ClaudeProcess.enqueue`), in order and whole, and
+  `closeInput()` closes stdin after them.
+- **An earlier LIST can't end a later one (SW-REV-04).** Every `listAgents` call
+  started a 60 s timer that ended whichever LIST was waiting when it fired, so a
+  timer left from a finished LIST returned a later one early, often empty. Each
+  LIST's timer and failed write now end only that LIST, and a finished LIST
+  cancels its timer.
+- **A refused ledger keeps tombstones signed in the app out of current truth too
+  (SW-REV-05).** When an export failed to load (a bad hash, a broken chain), the
+  ledger loaded nothing, as designed, but tombstones signed in this session were
+  still added to it, so the stenographer kept objecting from a TB the unreadable
+  export might have struck. They now wait in `authoredTombstones` until a readable
+  export speaks for them, and `TruthLedgerSnapshot.refused` says the load was
+  refused.
+- **Canonically equivalent member names no longer collapse
+  (JCS-CANONICAL-EQUIV-KEYS).** Swift `String` keys compare by canonical equivalence, so `parseJSON` (and the MCP
+  server's JSONDecoder path) kept one of two members named `"\u00e9"` and
+  `"e\u0301"`, which `JSON.parse` and RFC 8785 keep as two: `canonicalJSON` and
+  `callDigest` then disagreed with @smallchat/core on the same wire JSON, and the
+  runtime validated and forwarded different arguments. `parseJSON` now refuses
+  such an object (`JSONParseError`); identical repeated names still keep the last
+  value.
+
 ### Security
 
 - **Repeating an intent can't run a tool the first call refused (SC-SW-04).** The
@@ -655,11 +727,21 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   the client's address (it used the client-chosen `Mcp-Session-Id`, so a fresh id
   per request was never throttled); sessions are validated; `maxConnections` is
   enforced (it was never read); and a loopback-bound server refuses non-loopback
-  `Host` names and foreign `Origin`s (DNS rebinding).
+  `Host` names and foreign `Origin`s (DNS rebinding). Loopback means `localhost`,
+  `::1` or a dotted-decimal IPv4 literal in 127.0.0.0/8 (`MCPServer.isLoopbackHost`);
+  a DNS name never is, so `127.attacker.example` and `127.0.0.1.nip.io`, which a
+  rebinding page can resolve to the server, are refused (SW-REV-01).
 - **`serve --auth` works, with a bearer token (SC-SW-17).** Nothing could register
   an OAuth client from the CLI, so `serve --auth` rejected every request; scopes
   were never enforced; client secrets were stored as unsalted SHA-256 (the README
   said PBKDF2). OAuth is removed; the bearer token is compared in constant time.
+- **The serve token file is never readable by other users (SW-REV-07).** It was
+  written by `FileManager.createFile`, which on Linux writes a temporary file with
+  mode 0666 minus the umask, renames it into place and only then sets 0600, in a
+  `~/.smallchat` created 0755, so another local user could read the token in that
+  window; an existing token file was used whatever its mode. It is now created by
+  `open(O_CREAT | O_EXCL)` with mode 0600, a missing directory is created 0700, and
+  a file that group or other users can access is refused.
 - **The audit log can't be forged with a public key, and verifies after eviction
   (SC-SW-16).** The built-in default HMAC key was public, so anyone could forge a
   valid chain; the chain left out `clientId` and `error`; and `verifyChain()`
@@ -739,6 +821,13 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
 
 ### Known issues
 
+- **On Linux with Swift 6.1, executables that link `SmallChatAgents` need
+  `-Xlinker --allow-shlib-undefined`** (SWIFT61-LINUX-OBSERVATION-LINK). 6.1's
+  `libswiftObservation.so` references `swift::threading::fatal`, which its
+  `libswiftCore.so` does not export, and `SmallChatAgents` uses `@Observable`, so
+  linking fails, the test bundle's included (the `swift:6.1` CI job runs
+  `swift test -Xlinker --allow-shlib-undefined`). Swift 6.2 and later, and macOS,
+  are not affected.
 - **`LWWMap` merges are not commutative on ties (SC-SW-29).** Two entries for one
   key with the same timestamp and replica id (two writes in one tick, or a set and
   a remove at the same timestamp) keep whichever side the merge started from, and
