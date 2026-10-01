@@ -180,11 +180,10 @@ struct DiscoveryView: View {
                 }
             }
 
-            // Save artifact
+            // Save artifact (format 1.0)
             let outputPath = "tools.toolkit.json"
-            let artifact = serializeCompilationResult(result, manifests: allManifests)
-            let data = try JSONSerialization.data(withJSONObject: artifact, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: URL(fileURLWithPath: outputPath))
+            let artifact = try ArtifactV1.build(result: result, manifests: allManifests, embedder: embedder.fingerprint!)
+            try artifact.write(to: URL(fileURLWithPath: outputPath))
 
             appState.discoveryLog.append("")
             appState.discoveryLog.append("Toolkit written to: \(outputPath)")
@@ -291,58 +290,6 @@ struct DiscoveryView: View {
         }
 
         return manifests
-    }
-
-    private func serializeCompilationResult(_ result: CompilationResult, manifests: [ProviderManifest]) -> [String: Any] {
-        var selectors: [String: Any] = [:]
-        for (key, sel) in result.selectors {
-            selectors[key] = [
-                "canonical": sel.canonical,
-                "parts": sel.parts,
-                "arity": sel.arity,
-                "vector": sel.vector,
-            ] as [String: Any]
-        }
-
-        var dispatchTables: [String: Any] = [:]
-        for (providerId, table) in result.dispatchTables {
-            var methods: [String: Any] = [:]
-            for (canonical, imp) in table {
-                methods[canonical] = [
-                    "providerId": imp.providerId,
-                    "toolName": imp.toolName,
-                    "transportType": imp.transportType.rawValue,
-                ] as [String: Any]
-            }
-            dispatchTables[providerId] = methods
-        }
-
-        return [
-            "version": SmallChatVersion.current,
-            "timestamp": ISO8601DateFormatter().string(from: Date()),
-            "embedding": [
-                "model": "hash-based",
-                "dimensions": 384,
-                "embedderType": "local",
-            ],
-            "stats": [
-                "toolCount": result.toolCount,
-                "uniqueSelectorCount": result.uniqueSelectorCount,
-                "mergedCount": result.mergedCount,
-                "providerCount": result.dispatchTables.count,
-                "collisionCount": result.collisions.count,
-            ],
-            "selectors": selectors,
-            "dispatchTables": dispatchTables,
-            "collisions": result.collisions.map { c in
-                [
-                    "selectorA": c.selectorA,
-                    "selectorB": c.selectorB,
-                    "similarity": c.similarity,
-                    "hint": c.hint,
-                ] as [String: Any]
-            },
-        ] as [String: Any]
     }
 }
 

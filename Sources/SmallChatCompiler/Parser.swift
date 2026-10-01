@@ -10,6 +10,8 @@ public struct ParsedTool: Sendable {
     public let arguments: [ArgumentSpec]
     public let compilerHints: CompilerHint?
     public let providerHints: ProviderCompilerHints?
+    /// MCP annotations of the upstream tool.
+    public let annotations: ToolAnnotations?
 
     public init(
         name: String,
@@ -19,7 +21,8 @@ public struct ParsedTool: Sendable {
         transportType: TransportType,
         arguments: [ArgumentSpec],
         compilerHints: CompilerHint? = nil,
-        providerHints: ProviderCompilerHints? = nil
+        providerHints: ProviderCompilerHints? = nil,
+        annotations: ToolAnnotations? = nil
     ) {
         self.name = name
         self.description = description
@@ -29,24 +32,30 @@ public struct ParsedTool: Sendable {
         self.arguments = arguments
         self.compilerHints = compilerHints
         self.providerHints = providerHints
+        self.annotations = annotations
     }
 
-    /// Text fed to the embedder. Folds provider + tool compiler hints
-    /// into a single string so that semantic dispatch can match against
-    /// vendor-supplied selector hints, aliases, and provider context.
-    public var embeddingText: String {
-        var parts: [String] = ["\(name): \(description)"]
-        if let hint = compilerHints?.selectorHint, !hint.isEmpty {
-            parts.append(hint)
-        }
-        if let aliases = compilerHints?.aliases, !aliases.isEmpty {
-            parts.append(aliases.joined(separator: " | "))
-        }
-        if let context = providerHints?.semanticContext, !context.isEmpty {
-            parts.append(context)
-        }
-        return parts.joined(separator: "\n")
+    /// The selector hint in effect: the tool's own, else its provider's
+    /// (`semanticContext`, @smallchat/core's provider `selectorHint`).
+    public var selectorHint: String? {
+        if let hint = compilerHints?.selectorHint, !hint.isEmpty { return hint }
+        if let context = providerHints?.semanticContext, !context.isEmpty { return context }
+        return nil
     }
+
+    /// The text the tool's primary selector embeds: `<name>: <description>`,
+    /// plus the selector hint when there is one (@smallchat/core's
+    /// `toolEmbeddingText`). Aliases are not folded in: each alias embeds
+    /// on its own, as its own selector.
+    public var embeddingText: String {
+        toolEmbeddingText(name: name, description: description, selectorHint: selectorHint)
+    }
+}
+
+/// `<name>: <description>`, plus ` <selectorHint>` when there is one.
+public func toolEmbeddingText(name: String, description: String, selectorHint: String?) -> String {
+    if let selectorHint, !selectorHint.isEmpty { return "\(name): \(description) \(selectorHint)" }
+    return "\(name): \(description)"
 }
 
 /// Parse an MCP-format provider manifest into individual tool definitions
@@ -79,7 +88,8 @@ public func parseMCPManifest(_ manifest: ProviderManifest) -> [ParsedTool] {
             transportType: manifest.transportType,
             arguments: arguments,
             compilerHints: tool.compilerHints,
-            providerHints: manifest.compilerHints
+            providerHints: manifest.compilerHints,
+            annotations: tool.annotations
         )
     }
 }
@@ -110,7 +120,8 @@ public func parseOpenAPISpec(_ tools: [ToolDefinition]) -> [ParsedTool] {
             providerId: tool.providerId,
             transportType: tool.transportType,
             arguments: arguments,
-            compilerHints: tool.compilerHints
+            compilerHints: tool.compilerHints,
+            annotations: tool.annotations
         )
     }
 }

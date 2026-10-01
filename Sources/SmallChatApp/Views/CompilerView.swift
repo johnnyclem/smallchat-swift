@@ -172,7 +172,7 @@ struct CompilerView: View {
             let vectorIndex = MemoryVectorIndex()
             let options = CompilerOptions(
                 collisionThreshold: appState.collisionThreshold,
-                deduplicationThreshold: appState.deduplicationThreshold,
+                duplicateThreshold: appState.deduplicationThreshold,
                 generateSemanticOverloads: appState.generateSemanticOverloads
             )
 
@@ -197,11 +197,9 @@ struct CompilerView: View {
                 appState.compilerLog.append("  \(collision.hint)")
             }
 
-            // Serialize output
-            let artifact = serializeResult(result, manifests: manifests)
-            let data = try JSONSerialization.data(withJSONObject: artifact, options: [.prettyPrinted, .sortedKeys])
-            let outputURL = URL(fileURLWithPath: appState.compilerOutputPath)
-            try data.write(to: outputURL)
+            // Serialize output (artifact format 1.0)
+            let artifact = try ArtifactV1.build(result: result, manifests: manifests, embedder: embedder.fingerprint!)
+            try artifact.write(to: URL(fileURLWithPath: appState.compilerOutputPath))
 
             appState.compilerLog.append("")
             appState.compilerLog.append("Output written to: \(appState.compilerOutputPath)")
@@ -341,59 +339,5 @@ struct CompilerView: View {
         }
 
         return manifests
-    }
-
-    // MARK: - Serialization
-
-    private func serializeResult(_ result: CompilationResult, manifests: [ProviderManifest]) -> [String: Any] {
-        var selectors: [String: Any] = [:]
-        for (key, sel) in result.selectors {
-            selectors[key] = [
-                "canonical": sel.canonical,
-                "parts": sel.parts,
-                "arity": sel.arity,
-                "vector": sel.vector,
-            ] as [String: Any]
-        }
-
-        var dispatchTables: [String: Any] = [:]
-        for (providerId, table) in result.dispatchTables {
-            var methods: [String: Any] = [:]
-            for (canonical, imp) in table {
-                methods[canonical] = [
-                    "providerId": imp.providerId,
-                    "toolName": imp.toolName,
-                    "transportType": imp.transportType.rawValue,
-                ] as [String: Any]
-            }
-            dispatchTables[providerId] = methods
-        }
-
-        return [
-            "version": SmallChatVersion.current,
-            "timestamp": ISO8601DateFormatter().string(from: Date()),
-            "embedding": [
-                "model": "hash-based",
-                "dimensions": 384,
-                "embedderType": "local",
-            ],
-            "stats": [
-                "toolCount": result.toolCount,
-                "uniqueSelectorCount": result.uniqueSelectorCount,
-                "mergedCount": result.mergedCount,
-                "providerCount": result.dispatchTables.count,
-                "collisionCount": result.collisions.count,
-            ],
-            "selectors": selectors,
-            "dispatchTables": dispatchTables,
-            "collisions": result.collisions.map { c in
-                [
-                    "selectorA": c.selectorA,
-                    "selectorB": c.selectorB,
-                    "similarity": c.similarity,
-                    "hint": c.hint,
-                ] as [String: Any]
-            },
-        ] as [String: Any]
     }
 }

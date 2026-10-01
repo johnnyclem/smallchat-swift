@@ -146,7 +146,7 @@ private func collapseECMAScriptWhitespace(_ text: String) -> String {
 
 /// The ECMAScript `\s` class (WhiteSpace and LineTerminator), which is also
 /// what `String.prototype.trim` removes.
-func isECMAScriptWhitespace(_ scalar: Unicode.Scalar) -> Bool {
+public func isECMAScriptWhitespace(_ scalar: Unicode.Scalar) -> Bool {
     switch scalar.value {
     case 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0, 0x1680,
          0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF:

@@ -145,3 +145,41 @@ private func ecmaScriptNumberString(_ value: Double, path: String) throws -> Str
     }
     return value < 0 ? "-" + body : body
 }
+
+// MARK: - Pretty JSON
+
+/// Indented JSON (two spaces, as `JSON.stringify(value, null, 2)` writes
+/// it) with members sorted by their names' UTF-16 code units, strings and
+/// numbers in their canonical (RFC 8785) forms, and a trailing newline. The
+/// same value always gives the same bytes. Throws for non-finite numbers.
+public func prettyJSON(_ value: AnyCodableValue) throws -> String {
+    var out = ""
+    try appendPretty(value, indent: "", path: "$", to: &out)
+    out += "\n"
+    return out
+}
+
+private func appendPretty(_ value: AnyCodableValue, indent: String, path: String, to out: inout String) throws {
+    let inner = indent + "  "
+    switch value {
+    case .array(let items) where !items.isEmpty:
+        out += "[\n"
+        for (i, item) in items.enumerated() {
+            out += inner
+            try appendPretty(item, indent: inner, path: "\(path)[\(i)]", to: &out)
+            out += i == items.count - 1 ? "\n" : ",\n"
+        }
+        out += indent + "]"
+    case .dict(let object) where !object.isEmpty:
+        out += "{\n"
+        let keys = object.keys.sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) }
+        for (i, key) in keys.enumerated() {
+            out += inner + (try canonicalJSON(.string(key))) + ": "
+            try appendPretty(object[key]!, indent: inner, path: "\(path).\(key)", to: &out)
+            out += i == keys.count - 1 ? "\n" : ",\n"
+        }
+        out += indent + "}"
+    default:
+        out += try canonicalJSON(value)
+    }
+}

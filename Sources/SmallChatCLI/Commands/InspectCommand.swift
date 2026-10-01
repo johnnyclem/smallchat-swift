@@ -5,7 +5,7 @@ import SmallChat
 struct InspectCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "inspect",
-        abstract: "Inspect a compiled .toolkit artifact"
+        abstract: "Inspect a compiled artifact (format 1.0); it is validated first"
     )
 
     @Argument(help: "Path to the compiled toolkit file")
@@ -17,75 +17,72 @@ struct InspectCommand: AsyncParsableCommand {
     @Flag(help: "Show providers and their tools")
     var providers: Bool = false
 
-    @Flag(help: "Show selector collisions")
+    @Flag(help: "Show selector collisions and duplicates")
     var collisions: Bool = false
 
-    @Flag(help: "Show embedding model info")
+    @Flag(help: "Show the embedder fingerprint")
     var embeddings: Bool = false
 
     func run() async throws {
-        let data = try Data(contentsOf: URL(fileURLWithPath: file))
-        guard let artifact = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let stats = artifact["stats"] as? [String: Any] else {
-            print("Failed to parse artifact")
+        let artifact: ArtifactV1
+        do {
+            artifact = try ArtifactV1.read(contentsOf: URL(fileURLWithPath: file))
+        } catch {
+            FileHandle.standardError.write(Data("\(error)\n".utf8))
             throw ExitCode.failure
         }
 
         print("ToolKit artifact: \(file)")
-        print("Version: \(artifact["version"] as? String ?? "unknown")")
-        print("Compiled: \(artifact["timestamp"] as? String ?? "unknown")")
+        print("Format: \(ARTIFACT_FORMAT_VERSION)")
+        print("Content hash: \(artifact.contentHash) (verified)")
         print("Stats:")
-        print("  Tools: \(stats["toolCount"] ?? 0)")
-        print("  Unique selectors: \(stats["uniqueSelectorCount"] ?? 0)")
-        print("  Merged: \(stats["mergedCount"] ?? 0)")
-        print("  Providers: \(stats["providerCount"] ?? 0)")
-        print("  Collisions: \(stats["collisionCount"] ?? 0)")
+        print("  Tools: \(artifact.tools.count)")
+        print("  Selectors: \(artifact.selectors.count)")
+        print("  Providers: \(artifact.providers.count)")
+        print("  Collisions: \(artifact.collisions.count)")
+        print("  Duplicates: \(artifact.duplicates.count)")
 
-        if embeddings, let emb = artifact["embedding"] as? [String: Any] {
-            print("\nEmbedding model:")
-            print("  Model: \(emb["model"] as? String ?? "unknown")")
-            print("  Dimensions: \(emb["dimensions"] ?? "unknown")")
-            print("  Embedder type: \(emb["embedderType"] as? String ?? "unknown")")
+        if embeddings {
+            let e = artifact.embedder
+            print("\nEmbedder:")
+            print("  Kind: \(e.kind)")
+            print("  Model: \(e.model)")
+            print("  Model SHA-256: \(e.modelSha256 ?? "none")")
+            print("  Dimensions: \(e.dims)")
+            print("  Max length: \(e.maxLength.map(String.init) ?? "none")")
+            print("  Pooling: \(e.pooling)")
+            print("  Normalized: \(e.normalize)")
         }
 
-        if selectors, let sels = artifact["selectors"] as? [String: Any] {
+        if selectors {
             print("\nSelectors:")
-            for (_, selValue) in sels {
-                if let s = selValue as? [String: Any],
-                   let canonical = s["canonical"] as? String,
-                   let arity = s["arity"] as? Int {
-                    print("  \(canonical) (arity: \(arity))")
-                }
+            for canonical in artifact.selectors.keys.sorted() {
+                let selector = artifact.selectors[canonical]!
+                print("  \(canonical) -> \(selector.toolId) (\(selector.kind))")
             }
         }
 
-        if providers, let tables = artifact["dispatchTables"] as? [String: Any] {
+        if providers {
             print("\nProviders:")
-            for (providerId, tableValue) in tables {
-                if let methods = tableValue as? [String: Any] {
-                    print("  \(providerId): \(methods.count) tools")
-                    for (_, methodValue) in methods {
-                        if let method = methodValue as? [String: Any],
-                           let toolName = method["toolName"] as? String {
-                            print("    - \(toolName)")
-                        }
-                    }
-                }
+            for providerId in artifact.providers.keys.sorted() {
+                let tools = artifact.toolIds.filter { artifact.tools[$0]?.providerId == providerId }
+                let launch = artifact.providers[providerId]?.launch.map { $0.isStdio ? "stdio \($0.command ?? "")" : "\($0.transport) \($0.url ?? "")" } ?? "no launch spec"
+                print("  \(providerId): \(tools.count) tools (\(launch))")
+                for toolId in tools { print("    - \(toolId)") }
             }
         }
 
-        if collisions, let cols = artifact["collisions"] as? [[String: Any]] {
+        if collisions {
             print("\nCollisions:")
-            if cols.isEmpty {
-                print("  None")
-            } else {
-                for c in cols {
-                    let sA = c["selectorA"] as? String ?? ""
-                    let sB = c["selectorB"] as? String ?? ""
-                    let sim = c["similarity"] as? Double ?? 0
-                    let hint = c["hint"] as? String ?? ""
-                    print("  WARNING: \(sA) <-> \(sB) (\(String(format: "%.1f", sim * 100))%)")
-                    print("    \(hint)")
+            if artifact.collisions.isEmpty { print("  None") }
+            for c in artifact.collisions {
+                print("  WARNING: \(c.selectorA) <-> \(c.selectorB) (\(String(format: "%.1f", c.similarity * 100))%)")
+                print("    \(c.hint)")
+            }
+            if !artifact.duplicates.isEmpty {
+                print("\nDuplicates (compiled with --allow-duplicates):")
+                for d in artifact.duplicates {
+                    print("  \(d.toolA) <-> \(d.toolB) (cosine \(String(format: "%.3f", d.similarity)))")
                 }
             }
         }

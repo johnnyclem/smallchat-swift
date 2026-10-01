@@ -6,7 +6,7 @@
 /// configs, toolkit files and knowledge bases SmallChat generates.
 ///
 /// The compiled-artifact *format* version is separate: see
-/// `ARTIFACT_FORMAT_VERSION` in SmallChatMCP.
+/// `ARTIFACT_FORMAT_VERSION` in SmallChatCore.
 public enum SmallChatVersion {
     public static let current = "1.0.0"
 }

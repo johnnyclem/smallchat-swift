@@ -104,64 +104,23 @@ private func extractKnownToolNames(_ manifests: [ProviderManifest]) -> [String] 
 
 // MARK: - Serialization
 
-private func serializeResult(
+/// The artifact (format 1.0) for a dream compilation: the compiled tools,
+/// with the dream's priority decisions under `extensions.dream` (covered by
+/// the content hash, ignored by loaders: dispatch ranks by similarity only).
+private func dreamArtifact(
     _ result: CompilationResult,
-    embedderType: String,
+    manifests: [ProviderManifest],
+    embedder: EmbedderFingerprint,
     hints: ToolPriorityHints
-) -> Data {
-    var output: [String: Any] = [:]
-
-    var selectors: [String: Any] = [:]
-    for (key, sel) in result.selectors {
-        selectors[key] = [
-            "canonical": sel.canonical,
-            "parts": sel.parts,
-            "arity": sel.arity,
-            "vector": sel.vector,
-        ] as [String: Any]
-    }
-
-    var dispatchTables: [String: Any] = [:]
-    for (providerId, table) in result.dispatchTables {
-        var methods: [String: Any] = [:]
-        for (canonical, imp) in table {
-            methods[canonical] = [
-                "providerId": imp.providerId,
-                "toolName": imp.toolName,
-                "transportType": imp.transportType.rawValue,
-            ] as [String: Any]
-        }
-        dispatchTables[providerId] = methods
-    }
-
-    let dreamMetadata: [String: Any] = [
-        "boosted": hints.boosted,
-        "demoted": hints.demoted,
-        "excluded": Array(hints.excluded),
-        "reasoning": hints.reasoning,
-        "generatedAt": ISO8601DateFormatter().string(from: Date()),
+) throws -> ArtifactV1 {
+    let dream: [String: AnyCodableValue] = [
+        "boosted": .dict(hints.boosted.mapValues { .double($0) }),
+        "demoted": .dict(hints.demoted.mapValues { .double($0) }),
+        "excluded": .array(hints.excluded.sorted().map { .string($0) }),
+        "reasoning": .dict(hints.reasoning.mapValues { .string($0) }),
+        "generatedAt": .string(ISO8601DateFormatter().string(from: Date())),
     ]
-
-    output["version"] = SmallChatVersion.current
-    output["timestamp"] = ISO8601DateFormatter().string(from: Date())
-    output["embedding"] = [
-        "model": embedderType == "onnx" ? "all-MiniLM-L6-v2" : "hash-based",
-        "dimensions": 384,
-        "embedderType": embedderType,
-    ] as [String: Any]
-    output["stats"] = [
-        "toolCount": result.toolCount,
-        "uniqueSelectorCount": result.uniqueSelectorCount,
-        "mergedCount": result.mergedCount,
-        "providerCount": result.dispatchTables.count,
-        "collisionCount": result.collisions.count,
-    ] as [String: Any]
-    output["selectors"] = selectors
-    output["dispatchTables"] = dispatchTables
-    output["dreamMetadata"] = dreamMetadata
-
-    // swiftlint:disable:next force_try
-    return try! JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys])
+    return try ArtifactV1.build(result: result, manifests: manifests, embedder: embedder, extensions: ["dream": .dict(dream)])
 }
 
 // MARK: - Main Entry Points
@@ -245,21 +204,26 @@ public func compileLatest(_ options: CompileLatestOptions = CompileLatestOptions
             transportType: manifest.transportType,
             endpoint: manifest.endpoint,
             version: manifest.version,
-            channel: manifest.channel
+            channel: manifest.channel,
+            description: manifest.description,
+            compilerHints: manifest.compilerHints,
+            launch: manifest.launch
         )
     }
 
+    // smallchat-swift's built-in embedder is the hash embedder; the artifact
+    // records it, so it is never mistaken for an ONNX-compiled toolkit.
     let embedder = LocalEmbedder()
     let vectorIndex = MemoryVectorIndex()
     let compiler = ToolCompiler(embedder: embedder, vectorIndex: vectorIndex)
     let result = try await compiler.compile(filteredManifests)
 
-    // Serialize with dream metadata
-    let jsonData = serializeResult(result, embedderType: config.embedder.rawValue, hints: hints)
+    // Serialize (artifact format 1.0) with the dream's decisions as an extension
+    let artifact = try dreamArtifact(result, manifests: filteredManifests, embedder: embedder.fingerprint!, hints: hints)
     let outputPath = (projectDir as NSString).appendingPathComponent(config.outputPath)
     let newArtifactPath = outputPath + ".dream-pending.json"
 
-    try jsonData.write(to: URL(fileURLWithPath: newArtifactPath))
+    try artifact.write(to: URL(fileURLWithPath: newArtifactPath))
 
     print("  Compiled: \(result.toolCount) tools, \(result.uniqueSelectorCount) selectors")
 

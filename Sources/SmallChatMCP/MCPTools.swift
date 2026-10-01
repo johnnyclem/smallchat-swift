@@ -26,6 +26,29 @@ public struct MCPExposedTool: Sendable, Equatable {
     public let toolName: String
     public let description: String?
     public let inputSchema: [String: AnyCodableValue]?
+    public let title: String?
+    public let outputSchema: [String: AnyCodableValue]?
+    public let annotations: ToolAnnotations?
+
+    public init(
+        name: String,
+        providerId: String,
+        toolName: String,
+        description: String?,
+        inputSchema: [String: AnyCodableValue]?,
+        title: String? = nil,
+        outputSchema: [String: AnyCodableValue]? = nil,
+        annotations: ToolAnnotations? = nil
+    ) {
+        self.name = name
+        self.providerId = providerId
+        self.toolName = toolName
+        self.description = description
+        self.inputSchema = inputSchema
+        self.title = title
+        self.outputSchema = outputSchema
+        self.annotations = annotations
+    }
 
     /// Canonical tool id: `<providerId>/<toolName>`.
     public var toolId: String { "\(providerId)/\(toolName)" }
@@ -37,6 +60,9 @@ public struct MCPExposedTool: Sendable, Equatable {
             "inputSchema": .dict(inputSchema ?? ["type": .string("object")]),
         ]
         if let description { entry["description"] = .string(description) }
+        if let title { entry["title"] = .string(title) }
+        if let outputSchema { entry["outputSchema"] = .dict(outputSchema) }
+        if let annotations, !annotations.isEmpty { entry["annotations"] = .dict(annotations.jsonValue) }
         return entry
     }
 }
@@ -60,19 +86,13 @@ public struct MCPToolCatalog: Sendable {
 
     public static let aggregateSeparator = "__"
 
-    public init(artifact: SerializedArtifact, naming: MCPToolNaming = .aggregate) {
+    public init(artifact: ArtifactV1, naming: MCPToolNaming = .aggregate) {
         self.naming = naming
 
-        // One entry per tool, even if several selectors point at it.
-        var entries: [String: DispatchEntry] = [:]
-        for providerKey in artifact.dispatchTables.keys.sorted() {
-            let methods = artifact.dispatchTables[providerKey] ?? [:]
-            for canonical in methods.keys.sorted() {
-                guard let entry = methods[canonical] else { continue }
-                if case .provider(let id) = naming, entry.providerId != id { continue }
-                let toolId = "\(entry.providerId)/\(entry.toolName)"
-                if entries[toolId] == nil { entries[toolId] = entry }
-            }
+        var entries: [String: ArtifactTool] = [:]
+        for (toolId, tool) in artifact.tools {
+            if case .provider(let id) = naming, tool.providerId != id { continue }
+            entries[toolId] = tool
         }
 
         var skipped: [MCPSkippedTool] = []
@@ -85,14 +105,14 @@ public struct MCPToolCatalog: Sendable {
                     skipped.append(MCPSkippedTool(toolId: toolId, reason: "provider id \"\(entry.providerId)\" must match [A-Za-z0-9_-], contain no \"__\" and not end in \"_\" to prefix aggregate names; serve it with --provider \(entry.providerId)"))
                     continue
                 }
-                guard let aggregate = mcpAggregateName(providerId: entry.providerId, toolName: entry.toolName) else {
-                    let candidate = entry.providerId + Self.aggregateSeparator + entry.toolName
+                guard let aggregate = mcpAggregateName(providerId: entry.providerId, toolName: entry.name) else {
+                    let candidate = entry.providerId + Self.aggregateSeparator + entry.name
                     skipped.append(MCPSkippedTool(toolId: toolId, reason: "\"\(candidate)\" is not a valid aggregate tool name (^[A-Za-z0-9_-]{1,128}$); serve it with --provider \(entry.providerId)"))
                     continue
                 }
                 name = aggregate
             case .provider:
-                name = entry.toolName
+                name = entry.name
                 guard !name.isEmpty else {
                     skipped.append(MCPSkippedTool(toolId: toolId, reason: "empty tool name"))
                     continue
@@ -101,9 +121,12 @@ public struct MCPToolCatalog: Sendable {
             candidates[name, default: []].append(MCPExposedTool(
                 name: name,
                 providerId: entry.providerId,
-                toolName: entry.toolName,
+                toolName: entry.name,
                 description: entry.description,
-                inputSchema: entry.inputSchema
+                inputSchema: entry.inputSchema,
+                title: entry.title,
+                outputSchema: entry.outputSchema,
+                annotations: entry.annotations
             ))
         }
 

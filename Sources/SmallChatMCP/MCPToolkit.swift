@@ -17,43 +17,56 @@ public struct MCPToolUnavailableError: Error, Sendable, CustomStringConvertible 
 }
 
 /// A tool implementation that calls the upstream tool at its provider's
-/// endpoint: MCP tools over Streamable HTTP (`tools/call`), REST tools as
-/// `POST <endpoint>/<toolName>`. A tool whose provider declares no endpoint,
-/// or whose transport is not supported here, throws `MCPToolUnavailableError`
+/// remote launch URL: MCP tools over Streamable HTTP (`tools/call`), REST
+/// tools as `POST <url>/<toolName>`. A tool whose provider has no remote
+/// launch URL (none, or a stdio command, which `serve` does not start), or
+/// whose transport is not supported here, throws `MCPToolUnavailableError`
 /// instead of pretending to run.
 public final class EndpointToolIMP: ToolIMP {
     public let providerId: String
     public let toolName: String
     public let transportType: TransportType
     public let schema: ToolSchema?
+    public let annotations: ToolAnnotations?
     /// Why `execute` cannot reach the tool (nil when it can).
     public let unavailableReason: String?
     private let client: MCPClientTransport?
 
-    public init(entry: DispatchEntry, client: MCPClientTransport?) {
-        self.providerId = entry.providerId
-        self.toolName = entry.toolName
-        let transportType = TransportType(rawValue: entry.transportType) ?? .mcp
+    public init(tool: ArtifactTool, provider: ArtifactProvider?, client: MCPClientTransport?) {
+        self.providerId = tool.providerId
+        self.toolName = tool.name
+        let transportType = TransportType(rawValue: tool.transportType) ?? .mcp
         self.transportType = transportType
         self.schema = ToolSchema(
-            name: entry.toolName,
-            description: entry.description ?? "",
-            inputSchema: Self.schemaType(entry.inputSchema)
+            name: tool.name,
+            description: tool.description,
+            inputSchema: JSONSchemaType(json: tool.inputSchema)
         )
-        switch (transportType, entry.endpoint) {
-        case (_, nil):
+        self.annotations = tool.annotations
+        let url = Self.remoteURL(provider)
+        switch (transportType, provider?.launch, url) {
+        case (_, nil, _):
             self.client = nil
-            self.unavailableReason = "provider \(entry.providerId) declares no endpoint"
-        case (.mcp, let endpoint?) where endpoint.hasPrefix("http://") || endpoint.hasPrefix("https://"):
+            self.unavailableReason = "provider \(tool.providerId) records no launch spec or endpoint"
+        case (_, let launch?, nil) where launch.isStdio:
+            self.client = nil
+            self.unavailableReason = "provider \(tool.providerId) is a stdio server (\(launch.command ?? "?")); smallchat-swift serve runs only HTTP providers"
+        case (.mcp, _, let url?) where url.hasPrefix("http://") || url.hasPrefix("https://"):
             self.client = client
-            self.unavailableReason = client == nil ? "no client for \(endpoint)" : nil
-        case (.rest, _):
+            self.unavailableReason = client == nil ? "no client for \(url)" : nil
+        case (.rest, _, _?):
             self.client = client
             self.unavailableReason = client == nil ? "no client for the REST endpoint" : nil
-        case (_, let endpoint?):
+        case (_, _, let url):
             self.client = nil
-            self.unavailableReason = "\(transportType.rawValue) endpoint \(endpoint) is not supported by smallchat serve"
+            self.unavailableReason = "\(transportType.rawValue) endpoint \(url ?? "?") is not supported by smallchat serve"
         }
+    }
+
+    /// The URL of a provider's remote launch spec, if it has one.
+    static func remoteURL(_ provider: ArtifactProvider?) -> String? {
+        guard let launch = provider?.launch, !launch.isStdio, let url = launch.url, !url.isEmpty else { return nil }
+        return url
     }
 
     /// Whether `execute` can reach the tool.
@@ -79,15 +92,6 @@ public final class EndpointToolIMP: ToolIMP {
         }
         return try await client.execute(toolName: toolName, args: arguments)
     }
-
-    private static func schemaType(_ schema: [String: AnyCodableValue]?) -> JSONSchemaType {
-        guard let schema,
-              let data = try? JSONEncoder().encode(schema),
-              let decoded = try? JSONDecoder().decode(JSONSchemaType.self, from: data) else {
-            return JSONSchemaType(type: "object")
-        }
-        return decoded
-    }
 }
 
 // MARK: - Toolkit
@@ -95,70 +99,79 @@ public final class EndpointToolIMP: ToolIMP {
 /// A loaded toolkit: the artifact the server lists and a runtime whose tools
 /// execute through their providers' endpoints.
 public struct MCPToolkit: Sendable {
-    public let artifact: SerializedArtifact
+    public let artifact: ArtifactV1
     public let runtime: ToolRuntime
     /// Canonical ids (`<providerId>/<toolName>`) of tools that are listed but
     /// cannot run, with the reason.
     public let unavailable: [MCPSkippedTool]
 
     /// Load a toolkit from `source`: a directory of provider manifests (found
-    /// recursively), one manifest file, or a compiled artifact.
+    /// recursively), one manifest file, or a compiled artifact (format 1.0;
+    /// older artifacts are refused with a request to recompile).
     ///
-    /// Manifests are compiled with the local embedder. A compiled artifact
-    /// carries each provider's endpoint only when it was compiled by 1.0 or
-    /// later; tools from older artifacts are listed but cannot run.
-    public static func load(source: String, options: RuntimeOptions = RuntimeOptions()) async throws -> MCPToolkit {
+    /// Manifests are compiled with the hash embedder (`LocalEmbedder`, 384
+    /// dimensions). An artifact is used only with the embedder its
+    /// fingerprint names: `embedder` when given (it must declare that
+    /// fingerprint), else the built-in one (`builtinEmbedder(for:)`).
+    public static func load(
+        source: String,
+        embedder: (any Embedder)? = nil,
+        options: RuntimeOptions = RuntimeOptions()
+    ) async throws -> MCPToolkit {
         let artifact = try await loadArtifact(source: source)
-        return try await make(artifact: artifact, options: options)
+        return try await make(artifact: artifact, embedder: embedder, options: options)
     }
 
     /// Build the runtime for `artifact`: one `ToolClass` per provider holding
-    /// an `EndpointToolIMP` per tool, and the artifact's selector vectors
-    /// interned for semantic dispatch.
+    /// an `EndpointToolIMP` per tool, reachable through each of the tool's
+    /// selectors (primary and aliases), with the artifact's vectors
+    /// registered as they are (never merged). Refuses an embedder whose
+    /// fingerprint differs from the artifact's (`EmbedderMismatchError`).
     public static func make(
-        artifact: SerializedArtifact,
-        embedder: any Embedder = LocalEmbedder(),
+        artifact: ArtifactV1,
+        embedder: (any Embedder)? = nil,
         vectorIndex: any VectorIndex = MemoryVectorIndex(),
         options: RuntimeOptions = RuntimeOptions()
     ) async throws -> MCPToolkit {
+        let embedder = try embedder ?? builtinEmbedder(for: artifact.embedder)
+        try artifact.assertEmbedder(embedder)
+        var options = options
+        options.artifactHash = artifact.contentHash
         let runtime = ToolRuntime(vectorIndex: vectorIndex, embedder: embedder, options: options)
 
         var clients: [String: MCPClientTransport] = [:]
         var unavailable: [MCPSkippedTool] = []
-        for providerId in artifact.dispatchTables.keys.sorted() {
-            let methods = artifact.dispatchTables[providerId] ?? [:]
-            let toolClass = ToolClass(name: providerId)
-            for canonical in methods.keys.sorted() {
-                guard let entry = methods[canonical] else { continue }
-                var client: MCPClientTransport?
-                if let endpoint = entry.endpoint, let type = TransportType(rawValue: entry.transportType),
-                   type == .mcp || type == .rest {
-                    let key = "\(entry.providerId)|\(endpoint)"
-                    client = clients[key] ?? MCPClientTransport(options: MCPTransportOptions(transportType: type, endpoint: endpoint))
-                    clients[key] = client
-                }
-                let imp = EndpointToolIMP(entry: entry, client: client)
-                if let reason = imp.unavailableReason {
-                    unavailable.append(MCPSkippedTool(toolId: "\(entry.providerId)/\(entry.toolName)", reason: reason))
-                }
-
-                let selector: ToolSelector
-                if let data = artifact.selectors[canonical], !data.vector.isEmpty {
-                    selector = try await runtime.selectorTable.intern(embedding: data.vector, canonical: canonical)
-                } else {
-                    let parts = canonical.split(separator: ":").map(String.init)
-                    selector = ToolSelector(vector: [], canonical: canonical, parts: parts, arity: max(0, parts.count - 1))
-                }
-                toolClass.addMethod(selector, imp: imp)
+        var classes: [String: ToolClass] = [:]
+        for toolId in artifact.toolIds {
+            guard let tool = artifact.tools[toolId] else { continue }
+            let provider = artifact.providers[tool.providerId]
+            var client: MCPClientTransport?
+            if let url = EndpointToolIMP.remoteURL(provider), let type = TransportType(rawValue: tool.transportType),
+               type == .mcp || type == .rest {
+                let key = "\(tool.providerId)|\(url)"
+                client = clients[key] ?? MCPClientTransport(options: MCPTransportOptions(transportType: type, endpoint: url))
+                clients[key] = client
             }
-            try await runtime.registerClass(toolClass)
+            let imp = EndpointToolIMP(tool: tool, provider: provider, client: client)
+            if let reason = imp.unavailableReason {
+                unavailable.append(MCPSkippedTool(toolId: toolId, reason: reason))
+            }
+            let toolClass = classes[tool.providerId] ?? ToolClass(name: tool.providerId)
+            classes[tool.providerId] = toolClass
+            for selector in artifact.selectors(of: toolId) {
+                let registered = try await runtime.selectorTable.register(embedding: selector.vector, canonical: selector.canonical)
+                toolClass.addMethod(registered, imp: imp)
+            }
+        }
+        for providerId in classes.keys.sorted() {
+            try await runtime.registerClass(classes[providerId]!)
         }
 
         return MCPToolkit(artifact: artifact, runtime: runtime, unavailable: unavailable)
     }
 
     /// Read `source` as a compiled artifact or as provider manifest(s).
-    public static func loadArtifact(source: String) async throws -> SerializedArtifact {
+    public static func loadArtifact(source: String) async throws -> ArtifactV1 {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: source, isDirectory: &isDirectory) else {
             throw MCPToolkitError.notFound(source)
@@ -167,8 +180,9 @@ public struct MCPToolkit: Sendable {
             return try await compile(manifests: findManifests(in: source), source: source)
         }
         let data = try Data(contentsOf: URL(fileURLWithPath: source))
-        if let artifact = try? JSONDecoder().decode(SerializedArtifact.self, from: data) {
-            return artifact
+        if case .dict(let object)? = try? parseJSON(data),
+           object["formatVersion"] != nil || object["version"] != nil || object["dispatchTables"] != nil {
+            return try ArtifactV1.validate(.dict(object), source: source)
         }
         if let manifest = try? JSONDecoder().decode(ProviderManifest.self, from: data) {
             return try await compile(manifests: [manifest], source: source)
@@ -191,11 +205,13 @@ public struct MCPToolkit: Sendable {
         return manifests.sorted { $0.id < $1.id }
     }
 
-    private static func compile(manifests: [ProviderManifest], source: String) async throws -> SerializedArtifact {
+    /// Compile manifests with the hash embedder (384 dimensions) into a 1.0 artifact.
+    public static func compile(manifests: [ProviderManifest], source: String = "manifests") async throws -> ArtifactV1 {
         guard !manifests.isEmpty else { throw MCPToolkitError.noManifests(source) }
-        let compiler = ToolCompiler(embedder: LocalEmbedder(), vectorIndex: MemoryVectorIndex())
+        let embedder = LocalEmbedder()
+        let compiler = ToolCompiler(embedder: embedder, vectorIndex: MemoryVectorIndex())
         let result = try await compiler.compile(manifests)
-        return buildArtifact(result: result, manifests: manifests)
+        return try ArtifactV1.build(result: result, manifests: manifests, embedder: embedder.fingerprint!)
     }
 }
 

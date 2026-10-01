@@ -139,3 +139,22 @@ public struct LocalEmbedder: Embedder, Sendable {
         return Int32(n)
     }
 }
+
+// MARK: - Built-in embedders by fingerprint
+
+/// The built-in embedder an artifact fingerprint names, ready to use with
+/// that artifact. smallchat-swift ships only the hash embedder
+/// (`LocalEmbedder`); an artifact compiled with ONNX (the @smallchat/core
+/// default) or a custom embedder needs one supplied by the caller that
+/// declares the same fingerprint. Throws `EmbedderMismatchError` otherwise.
+public func builtinEmbedder(for fingerprint: EmbedderFingerprint) throws -> any Embedder {
+    let hash = EmbedderFingerprint.hash(dims: fingerprint.dims)
+    if fingerprint == hash, fingerprint.dims > 0 {
+        return LocalEmbedder(dimensions: fingerprint.dims)
+    }
+    throw EmbedderMismatchError(
+        "The artifact was compiled with \(fingerprint.summary), and smallchat-swift has no built-in embedder "
+        + "for it (only \(EmbedderFingerprint.hashModel)). Pass an embedder that declares exactly this fingerprint, "
+        + "or recompile the toolkit with the hash embedder (`smallchat compile`)."
+    )
+}

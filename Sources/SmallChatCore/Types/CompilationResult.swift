@@ -10,6 +10,11 @@ public struct CompilationResult: Sendable {
     public var semanticOverloads: [SemanticOverloadGroup]
     /// Populated by `AppCompiler.compile(_:)` when app manifests are compiled alongside tools.
     public var appArtifact: AppArtifact?
+    /// Every compiled tool, in compile order, with its selectors.
+    public var tools: [CompiledToolRef]
+    /// Distinct tools whose selectors embed at or above the duplicate
+    /// threshold (kept only when compiled with `allowDuplicates`).
+    public var duplicates: [DuplicateToolPair]
 
     public init(
         selectors: [String: ToolSelector] = [:],
@@ -21,7 +26,9 @@ public struct CompilationResult: Sendable {
         collisions: [SelectorCollision] = [],
         overloadTables: [String: OverloadTableData] = [:],
         semanticOverloads: [SemanticOverloadGroup] = [],
-        appArtifact: AppArtifact? = nil
+        appArtifact: AppArtifact? = nil,
+        tools: [CompiledToolRef] = [],
+        duplicates: [DuplicateToolPair] = []
     ) {
         self.selectors = selectors
         self.dispatchTables = dispatchTables
@@ -33,6 +40,45 @@ public struct CompilationResult: Sendable {
         self.overloadTables = overloadTables
         self.semanticOverloads = semanticOverloads
         self.appArtifact = appArtifact
+        self.tools = tools
+        self.duplicates = duplicates
+    }
+}
+
+/// One compiled tool: its canonical id and the selectors that dispatch to it.
+public struct CompiledToolRef: Sendable, Equatable {
+    /// Canonical tool id `<providerId>/<toolName>`
+    public let id: String
+    public let providerId: String
+    public let toolName: String
+    /// Canonical of the tool's primary selector
+    public let selector: String
+    /// Canonicals of its alias selectors
+    public let aliases: [String]
+
+    public init(id: String, providerId: String, toolName: String, selector: String, aliases: [String] = []) {
+        self.id = id
+        self.providerId = providerId
+        self.toolName = toolName
+        self.selector = selector
+        self.aliases = aliases
+    }
+}
+
+/// Two distinct tools whose selectors embed at or above the duplicate threshold.
+public struct DuplicateToolPair: Sendable, Codable, Equatable {
+    public let toolA: String
+    public let toolB: String
+    public let selectorA: String
+    public let selectorB: String
+    public let similarity: Double
+
+    public init(toolA: String, toolB: String, selectorA: String, selectorB: String, similarity: Double) {
+        self.toolA = toolA
+        self.toolB = toolB
+        self.selectorA = selectorA
+        self.selectorB = selectorB
+        self.similarity = similarity
     }
 }
 

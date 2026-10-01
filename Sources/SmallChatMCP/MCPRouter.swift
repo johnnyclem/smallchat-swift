@@ -69,7 +69,7 @@ public actor MCPRouter {
     }
 
     /// Set the artifact whose tools `tools/list` serves.
-    public func setArtifact(_ artifact: SerializedArtifact) {
+    public func setArtifact(_ artifact: ArtifactV1) {
         self.catalog = MCPToolCatalog(artifact: artifact, naming: opts.toolNaming)
     }
 

@@ -4,29 +4,43 @@ import Foundation
 import SmallChatCore
 import SmallChatRuntime
 import SmallChatEmbedding
+import SmallChatCompiler
 
 // MARK: - Helpers
 
-/// demo/echo, demo/fail and other/echo.
-func makeTestArtifact(endpoint: String? = nil, transportType: String = "mcp") -> SerializedArtifact {
-    func entry(_ provider: String, _ tool: String) -> DispatchEntry {
-        DispatchEntry(
-            providerId: provider,
-            toolName: tool,
-            transportType: transportType,
-            inputSchema: ["type": .string("object")],
-            description: "\(tool) from \(provider)",
-            endpoint: endpoint
+/// A compiled artifact (format 1.0, hash embedder at 16 dimensions) of
+/// `tools`; by default demo/echo, demo/fail and other/echo.
+func makeTestArtifact(
+    endpoints: [String: String] = [:],
+    tools: [(provider: String, name: String)] = [("demo", "echo"), ("demo", "fail"), ("other", "echo")]
+) async throws -> ArtifactV1 {
+    var order: [String] = []
+    var names: [String: [String]] = [:]
+    for tool in tools {
+        if names[tool.provider] == nil { order.append(tool.provider) }
+        names[tool.provider, default: []].append(tool.name)
+    }
+    let manifests = order.sorted().map { provider in
+        ProviderManifest(
+            id: provider,
+            name: provider,
+            tools: names[provider]!.map { name in
+                ToolDefinition(
+                    name: name,
+                    description: "\(name) from \(provider)",
+                    inputSchema: JSONSchemaType(type: "object"),
+                    providerId: provider,
+                    transportType: .mcp
+                )
+            },
+            transportType: .mcp,
+            endpoint: endpoints[provider]
         )
     }
-    return SerializedArtifact(
-        stats: ArtifactStats(toolCount: 3, uniqueSelectorCount: 3, providerCount: 2, collisionCount: 0),
-        selectors: [:],
-        dispatchTables: [
-            "demo": ["demo.echo": entry("demo", "echo"), "demo.fail": entry("demo", "fail")],
-            "other": ["other.echo": entry("other", "echo")],
-        ]
-    )
+    let embedder = LocalEmbedder(dimensions: 16)
+    let compiler = ToolCompiler(embedder: embedder, vectorIndex: MemoryVectorIndex(), options: CompilerOptions(allowDuplicates: true))
+    let result = try await compiler.compile(manifests)
+    return try ArtifactV1.build(result: result, manifests: manifests, embedder: embedder.fingerprint!)
 }
 
 private func makeRouter(naming: MCPToolNaming = .aggregate) async throws -> MCPRouter {
@@ -36,7 +50,7 @@ private func makeRouter(naming: MCPToolNaming = .aggregate) async throws -> MCPR
         promptRegistry: PromptRegistry(),
         options: RouterOptions(toolNaming: naming)
     )
-    await router.setArtifact(makeTestArtifact())
+    await router.setArtifact(try await makeTestArtifact())
     return router
 }
 
@@ -330,30 +344,16 @@ struct ResolveToolTests {
 struct MCPToolCatalogTests {
 
     @Test("names that are not valid MCP names are reported, not renamed")
-    func invalidNamesSkipped() {
-        let artifact = SerializedArtifact(
-            stats: ArtifactStats(toolCount: 2, uniqueSelectorCount: 2, providerCount: 1, collisionCount: 0),
-            selectors: [:],
-            dispatchTables: ["p": [
-                "a": DispatchEntry(providerId: "p", toolName: "good_tool", transportType: "mcp"),
-                "b": DispatchEntry(providerId: "p", toolName: "bad tool!", transportType: "mcp"),
-            ]]
-        )
+    func invalidNamesSkipped() async throws {
+        let artifact = try await makeTestArtifact(tools: [("p", "good_tool"), ("p", "bad tool!")])
         let catalog = MCPToolCatalog(artifact: artifact)
         #expect(catalog.tools.map(\.name) == ["p__good_tool"])
         #expect(catalog.skipped.map(\.toolId) == ["p/bad tool!"])
     }
 
     @Test("names cannot collide: a provider id with \"__\" is served only with --provider")
-    func collisionsImpossible() {
-        let artifact = SerializedArtifact(
-            stats: ArtifactStats(toolCount: 2, uniqueSelectorCount: 2, providerCount: 2, collisionCount: 0),
-            selectors: [:],
-            dispatchTables: [
-                "a__b": ["x": DispatchEntry(providerId: "a__b", toolName: "c", transportType: "mcp")],
-                "a": ["y": DispatchEntry(providerId: "a", toolName: "b__c", transportType: "mcp")],
-            ]
-        )
+    func collisionsImpossible() async throws {
+        let artifact = try await makeTestArtifact(tools: [("a__b", "c"), ("a", "b__c")])
         let catalog = MCPToolCatalog(artifact: artifact)
         // 0.6 listed neither (both wanted "a__b__c"). The suite rule
         // (spec/tool-id) makes the first "__" always end the provider id.

@@ -90,15 +90,12 @@ struct SetupCommand: AsyncParsableCommand {
         let compiler = ToolCompiler(embedder: embedder, vectorIndex: vectorIndex)
 
         print("  Embedding \(totalTools) tools...")
-        print("  Model: hash-based (v0.0.1 placeholder)")
+        print("  Embedder: \(embedder.fingerprint!.summary)")
 
         let result = try await compiler.compile(allManifests)
 
-        print("  Selectors generated: \(result.toolCount)")
-        print("  Unique selectors: \(result.uniqueSelectorCount)")
-        if result.mergedCount > 0 {
-            print("  \(result.mergedCount) tools merged as semantically equivalent")
-        }
+        print("  Tools: \(result.toolCount)")
+        print("  Selectors: \(result.uniqueSelectorCount)")
         if !result.collisions.isEmpty {
             print("  Selector collisions: \(result.collisions.count)")
             for collision in result.collisions {
@@ -106,11 +103,9 @@ struct SetupCommand: AsyncParsableCommand {
             }
         }
 
-        // Serialize
-        let artifact = serializeResult(result, manifests: allManifests)
-        let data = try JSONSerialization.data(withJSONObject: artifact, options: [.prettyPrinted, .sortedKeys])
-        let outputURL = URL(fileURLWithPath: output)
-        try data.write(to: outputURL)
+        // Serialize (artifact format 1.0)
+        let artifact = try ArtifactV1.build(result: result, manifests: allManifests, embedder: embedder.fingerprint!)
+        try artifact.write(to: URL(fileURLWithPath: output))
 
         print("\nToolkit written to: \(output)")
         print("  - \(result.uniqueSelectorCount) selectors")
@@ -392,58 +387,6 @@ struct SetupCommand: AsyncParsableCommand {
     }
 
     // MARK: - Serialization (matches CompileCommand output format)
-
-    private func serializeResult(_ result: CompilationResult, manifests: [ProviderManifest]) -> [String: Any] {
-        var selectors: [String: Any] = [:]
-        for (key, sel) in result.selectors {
-            selectors[key] = [
-                "canonical": sel.canonical,
-                "parts": sel.parts,
-                "arity": sel.arity,
-                "vector": sel.vector,
-            ] as [String: Any]
-        }
-
-        var dispatchTables: [String: Any] = [:]
-        for (providerId, table) in result.dispatchTables {
-            var methods: [String: Any] = [:]
-            for (canonical, imp) in table {
-                methods[canonical] = [
-                    "providerId": imp.providerId,
-                    "toolName": imp.toolName,
-                    "transportType": imp.transportType.rawValue,
-                ] as [String: Any]
-            }
-            dispatchTables[providerId] = methods
-        }
-
-        return [
-            "version": SmallChatVersion.current,
-            "timestamp": ISO8601DateFormatter().string(from: Date()),
-            "embedding": [
-                "model": "hash-based",
-                "dimensions": 384,
-                "embedderType": "local",
-            ],
-            "stats": [
-                "toolCount": result.toolCount,
-                "uniqueSelectorCount": result.uniqueSelectorCount,
-                "mergedCount": result.mergedCount,
-                "providerCount": result.dispatchTables.count,
-                "collisionCount": result.collisions.count,
-            ],
-            "selectors": selectors,
-            "dispatchTables": dispatchTables,
-            "collisions": result.collisions.map { c in
-                [
-                    "selectorA": c.selectorA,
-                    "selectorB": c.selectorB,
-                    "similarity": c.similarity,
-                    "hint": c.hint,
-                ] as [String: Any]
-            },
-        ] as [String: Any]
-    }
 
     // MARK: - Helpers
 

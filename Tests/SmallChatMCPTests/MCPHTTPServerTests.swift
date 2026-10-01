@@ -70,8 +70,9 @@ func startTestServer(
     rateLimitRPM: Int = 600,
     maxConnections: Int = 1000,
     recorder: CallRecorder = CallRecorder(),
-    artifact: SerializedArtifact = makeTestArtifact()
+    artifact: ArtifactV1? = nil
 ) async throws -> (server: MCPServer, endpoint: URL, base: URL) {
+    let artifact: ArtifactV1 = if let artifact { artifact } else { try await makeTestArtifact() }
     let server = try MCPServer(config: MCPServerConfig(
         port: 0,
         sourcePath: "",
@@ -315,14 +316,9 @@ struct MCPToolkitRuntimeTests {
         let (upstream, upstreamEndpoint, _) = try await startTestServer(recorder: upstreamCalls)
 
         // The served toolkit: provider "up" whose endpoint is the upstream server.
-        let artifact = SerializedArtifact(
-            stats: ArtifactStats(toolCount: 2, uniqueSelectorCount: 2, providerCount: 2, collisionCount: 0),
-            selectors: [:],
-            dispatchTables: [
-                "up": ["up.echo": DispatchEntry(providerId: "up", toolName: "demo__echo", transportType: "mcp",
-                                                endpoint: upstreamEndpoint.absoluteString)],
-                "nowhere": ["nowhere.echo": DispatchEntry(providerId: "nowhere", toolName: "echo", transportType: "mcp")],
-            ]
+        let artifact = try await makeTestArtifact(
+            endpoints: ["up": upstreamEndpoint.absoluteString],
+            tools: [("up", "demo__echo"), ("nowhere", "echo")]
         )
         let toolkit = try await MCPToolkit.make(artifact: artifact)
         #expect(toolkit.unavailable.map(\.toolId) == ["nowhere/echo"])
@@ -343,7 +339,7 @@ struct MCPToolkitRuntimeTests {
         let nowhere = try await rpc(endpoint, "tools/call", params: #"{"name":"nowhere__echo"}"#, session: session)
         #expect(nowhere.result?["isError"] as? Bool == true)
         let text = ((nowhere.result?["content"] as? [[String: Any]])?.first?["text"] as? String) ?? ""
-        #expect(text.contains("declares no endpoint"))
+        #expect(text.contains("records no launch spec or endpoint"))
 
         try await server.stop()
         try await upstream.stop()

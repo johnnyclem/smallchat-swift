@@ -222,7 +222,7 @@ public actor MCPServer {
     private let router: MCPRouter
     private let metrics: ServerMetrics
     private let connections: ConnectionGate
-    private var artifact: SerializedArtifact?
+    private var artifact: ArtifactV1?
     private var eventLoopGroup: (any EventLoopGroup)?
     private var serverChannel: Channel?
     /// Requests being answered right now (what `stop()` drains).
@@ -273,7 +273,7 @@ public actor MCPServer {
     }
 
     /// Serve the tools of `artifact`.
-    public func setArtifact(_ artifact: SerializedArtifact) async {
+    public func setArtifact(_ artifact: ArtifactV1) async {
         self.artifact = artifact
         await router.setArtifact(artifact)
     }
@@ -554,8 +554,8 @@ public actor MCPServer {
             "status": .string("ok"),
             "version": .string(mcpServerVersion),
             "protocolVersions": .array(mcpSupportedProtocolVersions.map { .string($0) }),
-            "tools": .int(artifact?.stats.toolCount ?? 0),
-            "providers": .int(artifact?.stats.providerCount ?? 0),
+            "tools": .int(artifact?.tools.count ?? 0),
+            "providers": .int(artifact?.providers.count ?? 0),
             "sessions": .int(sessionCount),
         ]
     }
