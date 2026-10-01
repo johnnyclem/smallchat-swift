@@ -367,7 +367,11 @@ public enum TruthFormat {
     }
 
     /// The fields of `YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|±HH:MM)`, or nil when the text isn't shaped like that.
-    private static func rfc3339Fields(_ ts: String) -> (year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int, offset: (hour: Int, minute: Int)?)? {
+    /// The fields `rfc3339Fields` reads. A named type keeps the returns below explicit:
+    /// Swift 6.4's type checker crashes on a ternary that returns this tuple or nil.
+    private typealias RFC3339Fields = (year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int, offset: (hour: Int, minute: Int)?)
+
+    private static func rfc3339Fields(_ ts: String) -> RFC3339Fields? {
         let b = Array(ts.utf8)
         func digits(_ start: Int, _ count: Int) -> Int? {
             guard start + count <= b.count else { return nil }
@@ -390,12 +394,15 @@ public enum TruthFormat {
             guard i > start else { return nil }
         }
         if at(i, "Z") {
-            return i + 1 == b.count ? (year, month, day, hour, minute, second, nil) : nil
+            guard i + 1 == b.count else { return nil }
+            let fields: RFC3339Fields = (year, month, day, hour, minute, second, nil)
+            return fields
         }
         guard at(i, "+") || at(i, "-"), let oh = digits(i + 1, 2), at(i + 3, ":"), let om = digits(i + 4, 2), i + 6 == b.count else {
             return nil
         }
-        return (year, month, day, hour, minute, second, (oh, om))
+        let fields: RFC3339Fields = (year, month, day, hour, minute, second, (hour: oh, minute: om))
+        return fields
     }
 
     /// A version 1 `ts`: anything `Date.parse` reads in practice — an RFC 3339
