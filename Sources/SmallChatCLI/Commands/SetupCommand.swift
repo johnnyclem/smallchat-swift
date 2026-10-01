@@ -418,7 +418,7 @@ struct SetupCommand: AsyncParsableCommand {
         }
 
         return [
-            "version": "0.6.0",
+            "version": SmallChatVersion.current,
             "timestamp": ISO8601DateFormatter().string(from: Date()),
             "embedding": [
                 "model": "hash-based",

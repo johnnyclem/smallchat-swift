@@ -86,7 +86,7 @@ public actor MCPClientTransport {
     /// Initialize the connection to an MCP server.
     public func initialize(
         clientName: String = "smallchat",
-        clientVersion: String = "0.1.0"
+        clientVersion: String = SmallChatVersion.current
     ) async throws -> JSONRPCResponse {
         let response = try await sendRequest(method: MCPMethod.initialize.rawValue, params: [
             "protocolVersion": .string(mcpProtocolVersion),

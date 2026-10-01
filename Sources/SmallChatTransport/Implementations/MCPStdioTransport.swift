@@ -1,4 +1,5 @@
 import Foundation
+import SmallChatCore
 
 // Spawns a subprocess, which iOS does not allow (no Foundation.Process).
 #if os(macOS) || os(Linux)
@@ -167,7 +168,7 @@ public actor MCPStdioTransport: Transport {
             "capabilities": [String: Any](),
             "clientInfo": [
                 "name": "smallchat",
-                "version": "0.1.0",
+                "version": SmallChatVersion.current,
             ] as [String: Any],
         ] as [String: Any])
 

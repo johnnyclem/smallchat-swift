@@ -1,4 +1,5 @@
 import ArgumentParser
+import SmallChat
 
 @main
 struct SmallChatCLI: AsyncParsableCommand {
@@ -26,7 +27,7 @@ struct SmallChatCLI: AsyncParsableCommand {
           Run "smallchat <command> --help" for detailed usage of any command.
           Run "smallchat doctor" to check your system health.
         """,
-        version: "0.6.0",
+        version: SmallChatVersion.current,
         subcommands: [
             CompileCommand.self,
             ServeCommand.self,
