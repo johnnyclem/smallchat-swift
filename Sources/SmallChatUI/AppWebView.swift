@@ -84,7 +84,8 @@ struct _AppWebViewRepresentable: UIViewRepresentable {
 
 // MARK: - Coordinator
 
-final class Coordinator: NSObject, WKNavigationDelegate, @unchecked Sendable {
+@MainActor
+final class Coordinator: NSObject, WKNavigationDelegate {
     let uiUri: String
     let state: AppViewState
     var sandbox: AppWebViewSandbox?
@@ -116,13 +117,15 @@ final class Coordinator: NSObject, WKNavigationDelegate, @unchecked Sendable {
         }
     }
 
+    /// The view's navigation delegate: the sandbox's policy, applied to
+    /// `uiUri` if the sandbox is somehow missing (never allow-all).
     func webView(
         _ webView: WKWebView,
         decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
     ) {
-        sandbox?.webView(webView, decidePolicyFor: navigationAction, decisionHandler: decisionHandler)
-            ?? decisionHandler(.allow)
+        let allowedURI = sandbox?.allowedURI ?? uiUri
+        decisionHandler(AppWebViewSandbox.policy(for: navigationAction.request.url, allowedURI: allowedURI))
     }
 }
 

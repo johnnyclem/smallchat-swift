@@ -9,10 +9,17 @@ import WebKit
 /// used by the TypeScript `AppView` component.
 ///
 /// - Scripts are enabled (default WKWebView behaviour).
-/// - Any navigation whose host/scheme differs from `allowedURI` is cancelled.
+/// - Any navigation whose host/scheme differs from `allowedURI` is cancelled,
+///   except the initial `about:blank` document `loadHTMLString(_:baseURL: nil)`
+///   creates.
 /// - A CSP `<meta>` tag is injected at document start to restrict resource loading
 ///   to the same origin.
-public final class AppWebViewSandbox: NSObject, WKNavigationDelegate, @unchecked Sendable {
+///
+/// Main-actor isolated, like WebKit's delegate protocols: the policy method's
+/// signature must match the SDK's exactly, or it isn't exposed to
+/// Objective-C and WebKit never calls it.
+@MainActor
+public final class AppWebViewSandbox: NSObject, WKNavigationDelegate {
     public let allowedURI: String
 
     public init(allowedURI: String) {
@@ -29,20 +36,22 @@ public final class AppWebViewSandbox: NSObject, WKNavigationDelegate, @unchecked
         return url.scheme == allowed.scheme && url.host == allowed.host
     }
 
+    /// The decision for one navigation: the initial `about:blank` document
+    /// and same-origin URLs are allowed, everything else is cancelled.
+    nonisolated public static func policy(for url: URL?, allowedURI: String) -> WKNavigationActionPolicy {
+        guard let url else { return .allow }  // no destination: nothing to leave for
+        if url.absoluteString == "about:blank" { return .allow }
+        return shouldAllow(url: url, allowedURI: allowedURI) ? .allow : .cancel
+    }
+
     // MARK: - WKNavigationDelegate
 
     public func webView(
         _ webView: WKWebView,
         decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
     ) {
-        // Always allow the initial HTML load (no URL, or data: scheme)
-        guard let url = navigationAction.request.url else {
-            decisionHandler(.allow)
-            return
-        }
-        let allowed = Self.shouldAllow(url: url, allowedURI: allowedURI)
-        decisionHandler(allowed ? .allow : .cancel)
+        decisionHandler(Self.policy(for: navigationAction.request.url, allowedURI: allowedURI))
     }
 }
 

@@ -48,6 +48,15 @@ target that names the `SmallChatUI` product must drop it (it never compiled ther
 Code shared with Linux that uses `AppWebView` should import `SmallChatUI` under
 `#if os(macOS) || os(iOS)`.
 
+### `AppWebViewSandbox` is main-actor isolated
+
+Create `AppWebViewSandbox` on the main actor (SwiftUI's `make*View` and
+`AppWebViewConfiguration.make(for:)` already run there). If you wrapped its
+`webView(_:decidePolicyFor:decisionHandler:)` in your own navigation delegate,
+declare the handler as `@escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void`,
+or WebKit won't call your method either. Navigations to other origins are now
+really cancelled; the initial `about:blank` document is allowed.
+
 ## Reported versions
 
 `SmallChatVersion.current` (in `SmallChatCore`) is now the only version string, and

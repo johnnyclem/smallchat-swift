@@ -158,6 +158,9 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   store without a file. `MessengerStore.init(url:secrets:)` picks the platform's
   store when `secrets` is nil. Both secrets are generated anew on the first 1.0
   launch, and the old one is removed from `messenger.json`.
+- **`AppWebViewSandbox` is `@MainActor`**, like WebKit's delegate protocols; create
+  it on the main actor (`AppWebViewConfiguration.make(for:)` already is).
+  `AppWebViewSandbox.policy(for:allowedURI:)` is new.
 - **`MessengerModel` saves in the background.** Changes are written within
   `persistDelay` (500 ms) of the first one, and when the app quits, instead of
   before each mutating call returns. Call `await model.flushPersistence()` before
@@ -303,6 +306,15 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   approvals to whatever `meta.notarize_url` a proposal event named, sending the
   secret along. It now always posts to `http://127.0.0.1:<stenographer REST port>`
   from its settings, and ignores proposal ids that could change the path.
+- **The app web view's navigation sandbox runs.** The policy method of
+  `AppWebViewSandbox` (and of `AppWebView`'s coordinator) took a plain
+  `(WKNavigationActionPolicy) -> Void` handler where the SDK's requirement is
+  `@MainActor @Sendable`, so it only nearly matched, was never exposed to
+  Objective-C, and WebKit never called it: an MCP App's `ui://` HTML could navigate
+  the view anywhere. The signatures now match, so cross-origin navigations are
+  cancelled; the initial `about:blank` document that `loadHTMLString` creates is
+  allowed explicitly, and the coordinator no longer allows everything when it has
+  no sandbox.
 - **The messenger no longer rewrites its store on the main actor for every
   change.** Each message, receipt and stenographer note re-encoded every
   conversation (pretty-printed) and wrote the file synchronously: with a 20,000
