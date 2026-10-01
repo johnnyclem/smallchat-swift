@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SmallChatChannel
 import SmallChatTruth
 
 // MARK: - Messenger model

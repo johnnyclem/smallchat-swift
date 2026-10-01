@@ -155,7 +155,19 @@ public func serializeChannelTag(
         }
     }
 
-    return "<channel \(attrs.joined(separator: " "))>\n\(sanitizeUntrustedContent(content))\n</channel>"
+    return "<channel \(attrs.joined(separator: " "))>\n\(escapeXmlText(content))\n</channel>"
+}
+
+/// Escape a string for use as XML element text.
+///
+/// Escaping `&`, `<` and `>` means content can never be read as markup: a
+/// sender cannot close the `<channel>` element and open a forged one with a
+/// more trusted `source`. (The narrower `sanitizeUntrustedContent` blocklist
+/// let `</channel>` through.)
+private func escapeXmlText(_ str: String) -> String {
+    str.replacingOccurrences(of: "&", with: "&amp;")
+       .replacingOccurrences(of: "<", with: "&lt;")
+       .replacingOccurrences(of: ">", with: "&gt;")
 }
 
 /// Escape a string for use in an XML attribute value.

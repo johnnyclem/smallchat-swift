@@ -4,6 +4,7 @@ import FoundationNetworking
 #endif
 import Testing
 @testable import SmallChatAgents
+import SmallChatChannel
 
 /// What stenographer's channel sink posts (delivery.ts `createSinkTransport`).
 private let objectionBody = #"""
@@ -193,5 +194,18 @@ struct SettingsCompatibilityTests {
         settings.recentDays = nil
         let data = try JSONEncoder().encode(settings)
         #expect(try JSONDecoder().decode(MessengerSettings.self, from: data).recentDays == nil)
+    }
+}
+
+@Suite("Channel bridge secret comparison")
+struct ChannelBridgeSecretTests {
+
+    @Test("a secret padded with 256 NUL bytes does not match")
+    func paddedSecretRejected() {
+        let secret = "s3cret"
+        #expect(!ChannelBridgeProtocol.constantTimeEqual(secret + String(repeating: "\u{0}", count: 256), secret))
+        #expect(!ChannelBridgeProtocol.constantTimeEqual(secret, secret + String(repeating: "\u{0}", count: 512)))
+        #expect(ChannelBridgeProtocol.constantTimeEqual(secret, secret))
+        #expect(!ChannelBridgeProtocol.constantTimeEqual(secret, "s3creT"))
     }
 }

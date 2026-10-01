@@ -3,20 +3,23 @@ import NIOCore
 import NIOHTTP1
 import NIOPosix
 
-// MARK: - Channel bridge (objection channel)
+// MARK: - Channel bridge
 //
-// The receiving end of stenographer's `--objection-channel <url>`: a
-// loopback HTTP endpoint that speaks smallchat's channel-bridge contract
-// (the TS `ChannelServer` HTTP bridge):
+// An HTTP endpoint that speaks smallchat's channel-bridge contract (the TS
+// `ChannelServer` HTTP bridge):
 //
 //   POST /event   {channel, content, meta?, sender?, timestamp?}
-//                 authenticated by `X-Channel-Secret` (or `Authorization: Bearer`)
+//                 authenticated by `X-Channel-Secret` (or `Authorization: Bearer`);
+//                 the secret is mandatory
 //   GET  /health  liveness, unauthenticated
 //
-// Stenographer posts each objection as it's raised with
-// `meta.kind = "objection"` and the offending Claude Code session ids in
-// `meta.session_ids`; the messenger routes it to those agents' chats and
-// relays it into the live session. Agent-drafted tombstones arrive as
+// Two users: `smallchat channel --http-bridge` injects each event into the
+// Claude Code channel (403 when sender gating or the size limit rejects it),
+// and the messenger (SmallChatAgents) receives stenographer's
+// `--objection-channel` posts. Stenographer posts each objection as it's
+// raised with `meta.kind = "objection"` and the offending Claude Code session
+// ids in `meta.session_ids`; the messenger routes it to those agents' chats
+// and relays it into the live session. Agent-drafted tombstones arrive as
 // `meta.kind = "proposal"` and wait for the user to notarize them.
 
 /// One event posted to the bridge.
@@ -66,12 +69,14 @@ public enum ChannelBridgeProtocol {
     public static let defaultChannel = "smallchat"
 
     /// Pure request handling, so the contract is testable without sockets.
+    /// `defaultChannel` names events that carry no `channel`.
     public static func handle(
         method: String,
         path: String,
         headers: [(name: String, value: String)],
         body: Data,
-        secret: String
+        secret: String,
+        defaultChannel: String = ChannelBridgeProtocol.defaultChannel
     ) -> ChannelBridgeResponse {
         let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
 
@@ -125,11 +130,15 @@ public enum ChannelBridgeProtocol {
         return (0..<32).map { _ in String(format: "%02x", UInt8.random(in: 0...255, using: &generator)) }.joined()
     }
 
-    static func constantTimeEqual(_ a: String, _ b: String) -> Bool {
+    /// Compare a caller-supplied secret with the expected one. Strings of
+    /// different lengths never match (the length is not secret); for equal
+    /// lengths the time taken does not depend on where they differ.
+    public static func constantTimeEqual(_ a: String, _ b: String) -> Bool {
         let x = Array(a.utf8), y = Array(b.utf8)
-        var diff = UInt8(truncatingIfNeeded: x.count ^ y.count)
-        for i in 0..<max(x.count, y.count) {
-            diff |= (i < x.count ? x[i] : 0) ^ (i < y.count ? y[i] : 0)
+        guard x.count == y.count else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<x.count {
+            diff |= x[i] ^ y[i]
         }
         return diff == 0
     }
@@ -146,35 +155,59 @@ public enum ChannelBridgeProtocol {
 
 // MARK: - Server
 
-/// Loopback HTTP server for the bridge. Binds 127.0.0.1 only: objections
-/// carry transcript lines.
+/// HTTP server for the bridge. Binds 127.0.0.1 unless told otherwise:
+/// events can carry transcript lines.
 public final class ChannelBridgeServer: @unchecked Sendable {
     public let port: Int
+    public let host: String
     private let secret: String
-    private let onEvent: @Sendable (ChannelInboundEvent) -> Void
+    private let defaultChannel: String
+    private let accept: @Sendable (ChannelInboundEvent) async -> Bool
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     private var channel: Channel?
 
-    public init(port: Int, secret: String, onEvent: @escaping @Sendable (ChannelInboundEvent) -> Void) {
+    /// A bridge whose events are all accepted (answered `200`).
+    public convenience init(port: Int, secret: String, onEvent: @escaping @Sendable (ChannelInboundEvent) -> Void) {
+        self.init(port: port, secret: secret) { event in
+            onEvent(event)
+            return true
+        }
+    }
+
+    /// A bridge that answers `200` when `accept` takes the event and `403`
+    /// when it refuses it.
+    public init(
+        host: String = "127.0.0.1",
+        port: Int,
+        secret: String,
+        defaultChannel: String = ChannelBridgeProtocol.defaultChannel,
+        accept: @escaping @Sendable (ChannelInboundEvent) async -> Bool
+    ) {
+        self.host = host
         self.port = port
         self.secret = secret
-        self.onEvent = onEvent
+        self.defaultChannel = defaultChannel
+        self.accept = accept
     }
 
     /// Start listening. Returns the bound port (useful when `port` is 0).
     @discardableResult
     public func start() async throws -> Int {
         let secret = self.secret
-        let onEvent = self.onEvent
+        let defaultChannel = self.defaultChannel
+        let accept = self.accept
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 16)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(BridgeHTTPHandler(secret: secret, onEvent: onEvent))
+                channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.configureHTTPServerPipeline()
+                    try channel.pipeline.syncOperations.addHandler(
+                        BridgeHTTPHandler(secret: secret, defaultChannel: defaultChannel, accept: accept)
+                    )
                 }
             }
-        let channel = try await bootstrap.bind(host: "127.0.0.1", port: port).get()
+        let channel = try await bootstrap.bind(host: host, port: port).get()
         self.channel = channel
         return channel.localAddress?.port ?? port
     }
@@ -186,19 +219,21 @@ public final class ChannelBridgeServer: @unchecked Sendable {
     }
 }
 
-private final class BridgeHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
+private final class BridgeHTTPHandler: ChannelInboundHandler {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
     private let secret: String
-    private let onEvent: @Sendable (ChannelInboundEvent) -> Void
+    private let defaultChannel: String
+    private let accept: @Sendable (ChannelInboundEvent) async -> Bool
     private var head: HTTPRequestHead?
     private var body = Data()
     private var tooLarge = false
 
-    init(secret: String, onEvent: @escaping @Sendable (ChannelInboundEvent) -> Void) {
+    init(secret: String, defaultChannel: String, accept: @escaping @Sendable (ChannelInboundEvent) async -> Bool) {
         self.secret = secret
-        self.onEvent = onEvent
+        self.defaultChannel = defaultChannel
+        self.accept = accept
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -215,6 +250,7 @@ private final class BridgeHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             }
         case .end:
             guard let head else { return }
+            self.head = nil
             let response: ChannelBridgeResponse
             if tooLarge {
                 response = ChannelBridgeProtocol.json(413, ["error": "Payload too large"])
@@ -224,12 +260,31 @@ private final class BridgeHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     path: head.uri,
                     headers: head.headers.map { ($0.name, $0.value) },
                     body: body,
-                    secret: secret
+                    secret: secret,
+                    defaultChannel: defaultChannel
                 )
             }
-            if let event = response.event { onEvent(event) }
-            write(response, keepAlive: head.isKeepAlive, context: context)
-            self.head = nil
+            guard let event = response.event else {
+                write(response, keepAlive: head.isKeepAlive, context: context)
+                return
+            }
+            // Deliver the event off the event loop, then hop back to answer:
+            // the context is only touched on its event loop.
+            let keepAlive = head.isKeepAlive
+            let loop = context.eventLoop
+            let bound = NIOLoopBound((handler: self, context: context), eventLoop: loop)
+            let accept = self.accept
+            Task {
+                let accepted = await accept(event)
+                loop.execute {
+                    let (handler, context) = bound.value
+                    handler.write(
+                        accepted ? response : ChannelBridgeProtocol.json(403, ["error": "Event rejected (sender gating or payload size)"]),
+                        keepAlive: keepAlive,
+                        context: context
+                    )
+                }
+            }
         }
     }
 

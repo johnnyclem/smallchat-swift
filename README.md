@@ -244,7 +244,7 @@ swift run smallchat <command> [options]
 | `compile` | Compile manifests into a dispatch artifact (`--strict` treats collisions as errors) | `smallchat compile --source ~/.mcp.json` |
 | `resolve` | Test intent-to-tool resolution | `smallchat resolve tools.toolkit.json "search for code"` |
 | `serve` | Serve a toolkit as an MCP server over Streamable HTTP | `smallchat serve --source ./manifests --port 3001` |
-| `channel` | Start a Claude Code channel server | `smallchat channel --port 3002` |
+| `channel` | Run a Claude Code channel server over stdio (optional HTTP bridge) | `smallchat channel --name ci` |
 | `install` | Render an install plan for a registry entry or bundle | `smallchat install examples/registry/github.json` |
 | `init` | Scaffold a new project from a template | `smallchat init my-app --template agent` |
 | `repl` | Interactive resolution shell | `smallchat repl tools.toolkit.json` |
@@ -393,14 +393,22 @@ for a 1.x release.
 smallchat ships with first-class support for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) via a dedicated channel server:
 
 ```bash
-swift run smallchat channel --port 3002
+swift run smallchat channel --name ci
+# with the HTTP bridge, so webhooks (or stenographer's --objection-channel) can post events:
+SMALLCHAT_CHANNEL_SECRET=... swift run smallchat channel --name ci --http-bridge --http-bridge-port 3002
 ```
 
 The channel uses **JSON-RPC 2.0 over stdio** and supports:
 - **Bidirectional messaging** — Claude Code can invoke tools; tools can reply back
 - **Sender gating** — Allowlist-based access control with a secure pairing flow
 - **Permission relay** — Two-way channel for requesting and granting permissions
-- **MCP handshake** — Standard `initialize` flow for capability negotiation
+- **MCP handshake** — `initialize` negotiates 2025-11-25, 2025-06-18 or 2024-11-05
+- **HTTP bridge** (`--http-bridge`) — `POST /event` (`{channel?, content, meta?, sender?}`,
+  authenticated with `X-Channel-Secret` or `Authorization: Bearer`; the secret from
+  `SMALLCHAT_CHANNEL_SECRET` is required) injects an event into the channel; `GET /health`
+  answers liveness. Permission verdicts over HTTP (`POST /permission`) are not implemented.
+
+The command exits when Claude Code closes its stdin.
 
 ## Dependencies
 

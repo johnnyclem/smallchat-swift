@@ -3,7 +3,8 @@
 //
 // Protocol:
 //   stdin/stdout -- JSON-RPC 2.0 (newline-delimited) with MCP host (Claude Code)
-//   HTTP bridge  -- optional (not implemented here; uses SmallChatTransport/NIO)
+//   HTTP bridge  -- optional: POST /event and GET /health (ChannelBridgeServer),
+//                   started by `startHTTPBridge()` when `httpBridge` is set
 //
 // This actor manages the channel server lifecycle, routes incoming messages
 // through the adapter, and manages channel connections.
@@ -63,7 +64,12 @@ public struct JsonRpcError: Sendable, Codable, Equatable {
 ///   - Reply tool (two-way channels)
 ///   - Event broadcasting via AsyncStream
 public actor ChannelServer {
+    /// MCP protocol versions the stdio channel negotiates, newest first.
+    /// 2025-03-26 is left out: it requires accepting JSON-RPC batches.
+    public static let supportedProtocolVersions = ["2025-11-25", "2025-06-18", "2024-11-05"]
+
     private let config: ChannelServerConfig
+    private var bridge: ChannelBridgeServer?
     private let adapter: ClaudeCodeChannelAdapter
     private let senderGate: SenderGate
     private var initialized: Bool = false
@@ -121,8 +127,44 @@ public actor ChannelServer {
         emitEvent(.ready)
     }
 
-    /// Shut down the server and clean up.
-    public func shutdown() {
+    /// Start the HTTP bridge when `httpBridge` is configured: `POST /event`
+    /// injects an event as if `injectEvent(_:)` were called (403 when sender
+    /// gating or the size limit rejects it), `GET /health` answers liveness.
+    /// The secret (`httpBridgeSecret`) is mandatory.
+    ///
+    /// - Returns: The bound port, or nil when the bridge is not configured.
+    @discardableResult
+    public func startHTTPBridge() async throws -> Int? {
+        guard config.httpBridge else { return nil }
+        guard let secret = config.httpBridgeSecret, !secret.isEmpty else {
+            throw ChannelBridgeError.missingSecret
+        }
+        let server = ChannelBridgeServer(
+            host: config.httpBridgeHost,
+            port: config.httpBridgePort,
+            secret: secret,
+            defaultChannel: config.channelName
+        ) { [weak self] event in
+            guard let self else { return false }
+            return await self.injectEvent(ChannelEvent(
+                channel: event.channel,
+                content: event.content,
+                meta: event.meta,
+                sender: event.sender,
+                timestamp: event.timestamp
+            ))
+        }
+        let port = try await server.start()
+        bridge = server
+        return port
+    }
+
+    /// Shut down the server (and its HTTP bridge) and clean up.
+    public func shutdown() async {
+        if let bridge {
+            await bridge.stop()
+            self.bridge = nil
+        }
         isRunning = false
         outboundContinuation?.finish()
         outboundContinuation = nil
@@ -295,8 +337,15 @@ public actor ChannelServer {
             experimental["claude/channel/permission"] = .dict([:])
         }
 
+        // Echo a supported requested version; otherwise offer the newest.
+        var version = Self.supportedProtocolVersions[0]
+        if case .string(let requested) = params["protocolVersion"],
+           Self.supportedProtocolVersions.contains(requested) {
+            version = requested
+        }
+
         var resultDict: [String: AnyCodableValue] = [
-            "protocolVersion": .string("2024-11-05"),
+            "protocolVersion": .string(version),
             "capabilities": .dict([
                 "tools": .dict([:]),
                 "experimental": .dict(experimental),
@@ -423,5 +472,14 @@ public actor ChannelServer {
             dict[key] = .string(value)
         }
         return ["meta": .dict(dict)]
+    }
+}
+
+/// Errors starting the channel's HTTP bridge.
+public enum ChannelBridgeError: Error, Sendable, CustomStringConvertible {
+    case missingSecret
+
+    public var description: String {
+        "The channel HTTP bridge needs a shared secret (httpBridgeSecret, or SMALLCHAT_CHANNEL_SECRET for the CLI)"
     }
 }

@@ -23,7 +23,7 @@ struct ChannelCommand: AsyncParsableCommand {
     @Option(help: "Channel instructions for the LLM")
     var instructions: String?
 
-    @Flag(help: "Enable HTTP bridge for inbound webhooks")
+    @Flag(help: "Enable the HTTP bridge for inbound events (POST /event; needs SMALLCHAT_CHANNEL_SECRET)")
     var httpBridge: Bool = false
 
     @Option(help: "HTTP bridge port")
@@ -49,6 +49,15 @@ struct ChannelCommand: AsyncParsableCommand {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
 
+        // The bridge's shared secret is mandatory (suite contract).
+        var bridgeSecret: String?
+        if httpBridge {
+            guard let secret = ProcessInfo.processInfo.environment["SMALLCHAT_CHANNEL_SECRET"], !secret.isEmpty else {
+                throw ValidationError("--http-bridge needs a shared secret in SMALLCHAT_CHANNEL_SECRET")
+            }
+            bridgeSecret = secret
+        }
+
         let config = ChannelServerConfig(
             channelName: name,
             twoWay: twoWay,
@@ -58,17 +67,19 @@ struct ChannelCommand: AsyncParsableCommand {
             httpBridge: httpBridge,
             httpBridgePort: httpBridgePort,
             httpBridgeHost: httpBridgeHost,
+            httpBridgeSecret: bridgeSecret,
             senderAllowlist: parsedAllowlist
         )
 
         let server = ChannelServer(config: config)
         await server.start()
+        let bridgePort = try await server.startHTTPBridge()
 
         FileHandle.standardError.write(Data(
             ("[channel] \(name) channel server started (stdio)\n" +
              "  Two-way: \(twoWay ? "yes" : "no")\n" +
              "  Permission relay: \(permissionRelay ? "yes" : "no")\n" +
-             "  HTTP bridge: \(httpBridge ? "http://\(httpBridgeHost):\(httpBridgePort)" : "disabled")\n").utf8
+             "  HTTP bridge: \(bridgePort.map { "http://\(httpBridgeHost):\($0) (POST /event, GET /health)" } ?? "disabled")\n").utf8
         ))
 
         // Forward outbound messages to stdout
@@ -109,27 +120,38 @@ struct ChannelCommand: AsyncParsableCommand {
             }
         }
 
-        // Read stdin lines and feed them to the server
-        let stdinTask = Task {
+        // Stop on stdin EOF (the host closed the channel) or SIGINT.
+        let (stopRequests, requestStop) = AsyncStream<Void>.makeStream()
+
+        // stdin is read on its own thread: readLine blocks, and must not
+        // hold a cooperative-pool thread.
+        let (lines, lineSink) = AsyncStream<String>.makeStream()
+        let reader = Thread {
             while let line = readLine(strippingNewline: false) {
+                lineSink.yield(line)
+            }
+            lineSink.finish()
+        }
+        reader.start()
+        let stdinTask = Task {
+            for await line in lines {
                 await server.handleLine(line)
             }
+            requestStop.yield(())
         }
 
-        // Wait for stdin EOF or SIGINT
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            signal(SIGINT, SIG_IGN)
-            let sigSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-            sigSource.setEventHandler {
-                sigSource.cancel()
-                continuation.resume()
-            }
-            sigSource.resume()
-        }
+        signal(SIGINT, SIG_IGN)
+        let sigSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        sigSource.setEventHandler { requestStop.yield(()) }
+        sigSource.resume()
+
+        for await _ in stopRequests { break }
+        sigSource.cancel()
 
         stdinTask.cancel()
-        outboundTask.cancel()
-        eventsTask.cancel()
         await server.shutdown()
+        // shutdown finished the streams: let the last replies reach stdout.
+        await outboundTask.value
+        eventsTask.cancel()
     }
 }

@@ -106,7 +106,13 @@ let package = Package(
         // ---- Channel ----
         .target(
             name: "SmallChatChannel",
-            dependencies: ["SmallChatCore", "SmallChatMCP"]
+            dependencies: [
+                "SmallChatCore",
+                "SmallChatMCP",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
         ),
         // ---- Dream ----
         .target(
@@ -153,6 +159,7 @@ let package = Package(
             name: "SmallChatAgents",
             dependencies: [
                 "SmallChatTruth",
+                "SmallChatChannel",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -214,7 +221,14 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),
-        .testTarget(name: "SmallChatChannelTests", dependencies: ["SmallChatChannel"]),
+        .testTarget(
+            name: "SmallChatChannelTests",
+            dependencies: [
+                "SmallChatChannel",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
+        ),
         .testTarget(name: "SmallChatDreamTests", dependencies: ["SmallChatDream"]),
         .testTarget(name: "SmallChatShorthandTests", dependencies: ["SmallChatShorthand"]),
         .testTarget(name: "SmallChatImportanceTests", dependencies: ["SmallChatImportance"]),
@@ -222,7 +236,7 @@ let package = Package(
         .testTarget(name: "SmallChatCompactionTests", dependencies: ["SmallChatCompaction"]),
         .testTarget(name: "SmallChatTruthTests", dependencies: ["SmallChatTruth", "SmallChatCompaction"]),
         .testTarget(name: "SmallChatMemexTests", dependencies: ["SmallChatMemex", "SmallChatCore"]),
-        .testTarget(name: "SmallChatAgentsTests", dependencies: ["SmallChatAgents", "SmallChatTruth"]),
+        .testTarget(name: "SmallChatAgentsTests", dependencies: ["SmallChatAgents", "SmallChatTruth", "SmallChatChannel"]),
     ]
 )
 

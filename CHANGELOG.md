@@ -109,6 +109,20 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   `mcpCallToolResultMetadataKey`), not just its `content` array.
 - **`SmallChatMCP` depends on `SmallChatCompiler` and `SmallChatEmbedding`**, so it
   can compile manifests into a runnable toolkit (`MCPToolkit`).
+- **The channel bridge moved to `SmallChatChannel`.** `ChannelBridgeServer`,
+  `ChannelBridgeProtocol`, `ChannelBridgeResponse` and `ChannelInboundEvent` were in
+  `SmallChatAgents`; `SmallChatAgents` now depends on `SmallChatChannel`, so code
+  that imports either module (or the `SmallChat` umbrella) still sees them.
+  `ChannelBridgeProtocol.constantTimeEqual` is public.
+- **`serializeChannelTag` XML-escapes `&`, `<` and `>` in the content.** It used to
+  escape only a blocklist of tag names, so content could close `</channel>` and open
+  a forged `<channel source="trusted-admin">`. Content containing those characters
+  now renders as entities (`&lt;b&gt;`, not `<b>` or a blocklist-escaped tag).
+- **`ChannelServer.shutdown()` is `async`** (it also stops the HTTP bridge).
+- **`smallchat channel --http-bridge` requires `SMALLCHAT_CHANNEL_SECRET`**, and the
+  channel server negotiates its protocol version (it always answered `2024-11-05`):
+  it echoes `2025-11-25`, `2025-06-18` or `2024-11-05` and offers `2025-11-25`
+  otherwise.
 
 ### Fixed
 
@@ -175,6 +189,17 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   and ends sessions with `terminateSession()`.
 - Tool content that is not a string is rendered as JSON (`formatContent` used
   Swift's `String(describing:)`).
+- **`smallchat channel --http-bridge` listens.** The flag and the startup banner
+  promised an HTTP bridge that was never started, so webhooks and stenographer's
+  `--objection-channel` got connection refused. `ChannelServer.startHTTPBridge()`
+  now serves `POST /event` (403 when sender gating or the size limit rejects the
+  event) and `GET /health`.
+- **`smallchat channel` exits when stdin closes.** It waited only for SIGINT, so it
+  outlived the Claude Code session that started it. stdin is read on its own
+  thread instead of blocking a cooperative-pool thread, and replies already queued
+  are written before it exits.
+- **`ChannelBridgeProtocol.constantTimeEqual` compares full lengths.** It folded the
+  length difference into 8 bits, so a secret followed by 256 NUL bytes matched.
 - **The rtk filter no longer deadlocks on large output.** It wrote the whole body
   to stdin before reading stdout, so a filter whose output filled the pipe
   buffer (about 64 KB) blocked forever. stdin is now written while stdout and

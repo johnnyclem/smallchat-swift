@@ -173,6 +173,35 @@ claude mcp add --transport http smallchat http://127.0.0.1:3001/mcp \
 `AuditLog.generateKey()`, or a key from your keychain). `MCPServerConfig.auditKey`
 sets the server's key; without one each server process uses a random key.
 
+## Channel
+
+### Bridge types live in `SmallChatChannel`
+
+`ChannelBridgeServer`, `ChannelBridgeProtocol`, `ChannelBridgeResponse` and
+`ChannelInboundEvent` moved from `SmallChatAgents` to `SmallChatChannel`. Code that
+imports `SmallChatAgents` or `SmallChat` keeps compiling; a target that depends only
+on `SmallChatAgents` and names these types should add `import SmallChatChannel`.
+
+### `smallchat channel --http-bridge`
+
+The bridge now really listens, and it needs the shared secret in
+`SMALLCHAT_CHANNEL_SECRET` (the command refuses to start without it). Post events
+with `X-Channel-Secret: $SMALLCHAT_CHANNEL_SECRET` or
+`Authorization: Bearer $SMALLCHAT_CHANNEL_SECRET`. Use a different value from
+`STENOGRAPHER_NOTARY_SECRET`. The README's `smallchat channel --port 3002` never
+worked: use `smallchat channel --name <name>` (`--http-bridge-port` sets the bridge
+port).
+
+### `ChannelServer.shutdown()` is async
+
+Add `await` where you call it outside the actor.
+
+### Channel tags escape their content
+
+`serializeChannelTag` now escapes `&`, `<` and `>` in the content, so markup in an
+event (including a closing `</channel>`) reaches the model as text. If you parsed
+the content back out of the tag, unescape those three entities.
+
 ## Linux hashes
 
 On Linux, audit-log HMACs (`AuditLog`) and Dream artifact hashes

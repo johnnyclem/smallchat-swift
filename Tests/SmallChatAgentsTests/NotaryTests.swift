@@ -4,6 +4,7 @@ import FoundationNetworking
 #endif
 import Testing
 @testable import SmallChatAgents
+import SmallChatChannel
 
 /// What stenographer's `raiseForNotarization` posts to the channel bridge.
 private func proposalEvent(_ id: String = "01PROP", sessions: String = "live-1") -> ChannelInboundEvent {
