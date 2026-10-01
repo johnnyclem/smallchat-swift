@@ -52,17 +52,28 @@ public enum TranscriptActivity {
     public static let maxRecent = 5
     static let maxSummary = 90
 
-    /// Read the tail of a transcript and summarize its latest activity.
-    public static func read(transcriptAt path: String, windowBytes: Int = 64 * 1024) -> ActivitySnapshot {
+    /// Read the tail of a transcript and summarize its latest activity. When
+    /// the newest line is longer than the window (a Write with a large file
+    /// body), the window doubles until it holds a whole line, up to
+    /// `maxWindowBytes`.
+    public static func read(
+        transcriptAt path: String, windowBytes: Int = 64 * 1024, maxWindowBytes: Int = 8 * 1024 * 1024
+    ) -> ActivitySnapshot {
         guard let handle = FileHandle(forReadingAtPath: path) else { return ActivitySnapshot() }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
-        let start = size > UInt64(windowBytes) ? size - UInt64(windowBytes) : 0
-        try? handle.seek(toOffset: start)
-        let data = (try? handle.readToEnd()) ?? Data()
-        var lines = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: true)
-        if start > 0, !lines.isEmpty { lines.removeFirst() }  // partial first line
-        return parse(lines: lines.map(String.init))
+        var window = UInt64(max(windowBytes, 1))
+        while true {
+            let start = size > window ? size - window : 0
+            try? handle.seek(toOffset: start)
+            let data = (try? handle.readToEnd()) ?? Data()
+            var lines = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: true)
+            if start > 0, !lines.isEmpty { lines.removeFirst() }  // partial first line
+            if !lines.isEmpty || start == 0 || window >= UInt64(maxWindowBytes) {
+                return parse(lines: lines.map(String.init))
+            }
+            window = min(window * 2, UInt64(maxWindowBytes))
+        }
     }
 
     public static func parse(lines: [String]) -> ActivitySnapshot {

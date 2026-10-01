@@ -184,9 +184,49 @@ public struct MessengerStore: Sendable {
         guard let url else { return }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(snapshot)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)
+    }
+}
+
+/// Writes snapshots one at a time on a background queue, in order, and never
+/// replaces a newer snapshot with an older one.
+final class MessengerStoreWriter: @unchecked Sendable {
+    private let store: MessengerStore
+    private let queue = DispatchQueue(label: "dev.smallchat.messenger-store", qos: .utility)
+    /// Generation of the last snapshot written. Only touched on `queue`.
+    private var written = 0
+
+    init(store: MessengerStore) {
+        self.store = store
+    }
+
+    /// Encode and write `snapshot` off the caller's thread.
+    func save(_ snapshot: MessengerSnapshot, generation: Int) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async {
+                continuation.resume(with: Result { try self.write(snapshot, generation: generation) })
+            }
+        }
+    }
+
+    /// Write `snapshot` before returning, after any write already queued.
+    func saveNow(_ snapshot: MessengerSnapshot, generation: Int) throws {
+        try queue.sync { try write(snapshot, generation: generation) }
+    }
+
+    /// Returns once every write queued so far is on disk.
+    func waitForPendingWrites() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { continuation.resume() }
+        }
+    }
+
+    private func write(_ snapshot: MessengerSnapshot, generation: Int) throws {
+        guard generation > written else { return }
+        try store.save(snapshot)
+        written = generation
     }
 }

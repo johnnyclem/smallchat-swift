@@ -71,9 +71,29 @@ public final class MessengerModel {
     @ObservationIgnored
     var notarySender: @Sendable (URLRequest) async throws -> String? = { try await NotaryClient.send($0) }
 
+    // Persistence: changes collect for `persistDelay`, then one snapshot is
+    // encoded and written on a background queue. Nothing is written on the
+    // main actor while the user waits, except when the app quits.
+
+    /// How long changes collect before they are written.
+    @ObservationIgnored var persistDelay: Duration = .milliseconds(500)
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
+    /// Changes made, and changes already handed to the writer.
+    @ObservationIgnored private var changeCount = 0
+    @ObservationIgnored private var savedChangeCount = 0
+    /// Snapshots handed to the writer so far.
+    @ObservationIgnored private(set) var snapshotsWritten = 0
+    private let writer: MessengerStoreWriter
+    @ObservationIgnored nonisolated(unsafe) private var terminationObserver: (any NSObjectProtocol)?
+
+    /// AppKit's `NSApplication.willTerminateNotification`, by name, so this
+    /// library needn't import AppKit.
+    public static let applicationWillTerminate = Notification.Name("NSApplicationWillTerminateNotification")
+
     public init(store: MessengerStore, transport: any AgentTransport, scanner: ClaudeSessionScanner?) {
         let snapshot = store.load()
         self.store = store
+        self.writer = MessengerStoreWriter(store: store)
         self.scanner = scanner
         self.transport = transport
         self.records = snapshot.agents
@@ -93,6 +113,16 @@ public final class MessengerModel {
         rebuildAgents()
         listenForInbound()
         reloadLedger()
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: Self.applicationWillTerminate, object: nil, queue: nil
+        ) { [weak self] _ in
+            // AppKit posts it on the main thread, right before exiting.
+            MainActor.assumeIsolated { self?.saveBeforeExit() }
+        }
+    }
+
+    deinit {
+        if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
     }
 
     /// The stored channel and notary secrets, generated (distinct from each
@@ -941,22 +971,55 @@ public final class MessengerModel {
         persist()
     }
 
-    /// Write any pending changes to the store now.
+    /// Write pending changes now and wait until they are on disk.
     public func flushPersistence() async {
-        persist()
+        saveTask?.cancel()
+        saveTask = nil
+        await savePending()
+        await writer.waitForPendingWrites()
     }
 
+    /// Note a change; it is written within `persistDelay`.
     private func persist() {
+        guard store.url != nil else { return }
+        changeCount += 1
+        guard saveTask == nil else { return }
+        let delay = persistDelay
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            await self?.savePending()
+        }
+    }
+
+    private func savePending() async {
+        saveTask = nil
+        guard let (snapshot, generation) = takeSnapshotIfChanged() else { return }
+        do {
+            try await writer.save(snapshot, generation: generation)
+        } catch {
+            lastError = "Couldn't save: \(error.localizedDescription)"
+        }
+    }
+
+    /// The app is quitting: write what's pending before returning.
+    func saveBeforeExit() {
+        saveTask?.cancel()
+        saveTask = nil
+        guard let (snapshot, generation) = takeSnapshotIfChanged() else { return }
+        try? writer.saveNow(snapshot, generation: generation)
+    }
+
+    private func takeSnapshotIfChanged() -> (MessengerSnapshot, Int)? {
+        guard changeCount > savedChangeCount else { return nil }
+        savedChangeCount = changeCount
+        snapshotsWritten += 1
         let snapshot = MessengerSnapshot(
             agents: records,
             conversations: conversations,
             stenographerSessions: stenographerSessions,
             settings: settings
         )
-        do {
-            try store.save(snapshot)
-        } catch {
-            lastError = "Couldn't save: \(error.localizedDescription)"
-        }
+        return (snapshot, changeCount)
     }
 }

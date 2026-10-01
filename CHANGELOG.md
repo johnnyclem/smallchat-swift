@@ -158,6 +158,11 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   store without a file. `MessengerStore.init(url:secrets:)` picks the platform's
   store when `secrets` is nil. Both secrets are generated anew on the first 1.0
   launch, and the old one is removed from `messenger.json`.
+- **`MessengerModel` saves in the background.** Changes are written within
+  `persistDelay` (500 ms) of the first one, and when the app quits, instead of
+  before each mutating call returns. Call `await model.flushPersistence()` before
+  reading `messenger.json` or loading a second model from the same store.
+  `messenger.json` is written without pretty-printing.
 - **Notarize URLs come only from the messenger's settings.**
   `PendingProposal.notarizeURL` is removed and `NotaryClient.parseInbox(_:)` no
   longer takes `restBase`. `NotaryClient.notarizeURL(restBase:proposalId:)` returns
@@ -298,6 +303,21 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   approvals to whatever `meta.notarize_url` a proposal event named, sending the
   secret along. It now always posts to `http://127.0.0.1:<stenographer REST port>`
   from its settings, and ignores proposal ids that could change the path.
+- **The messenger no longer rewrites its store on the main actor for every
+  change.** Each message, receipt and stenographer note re-encoded every
+  conversation (pretty-printed) and wrote the file synchronously: with a 20,000
+  message history one send took about 390 ms and rewrote 13 MB. A burst of changes
+  is now one compact write, encoded and written on a background queue.
+- **Session rescans read only the transcripts that changed.** The full rescan
+  every minute re-read up to 256 KB of every transcript under
+  `~/.claude/projects`, and parsing each timestamp built two `ISO8601DateFormatter`s
+  (about 250 µs per call on Linux). Summaries are now cached by path, size and
+  modification time (`ClaudeSessionScanner.summaryCache`), and dates parse with
+  shared `Date.ISO8601FormatStyle` values (about 1 µs).
+- **Live activity shows a tool call bigger than the tail window.** When the newest
+  transcript line was longer than the 64 KB window (a Write with a large file
+  body), no whole line was left and the card went blank. The window now doubles
+  until it holds a line, up to 8 MB.
 - **Changing the `claude` path stops the old switchboard.** The replaced transport
   was never shut down, so a second switchboard named `smallchat` kept running, and
   agents' replies could reach the one nobody listened to. A switchboard that ended

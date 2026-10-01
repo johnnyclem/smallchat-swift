@@ -220,6 +220,40 @@ struct DiscoveryTests {
         #expect(stopped.live == nil, "dead pid must not count as live")
     }
 
+    @Test("a rescan re-reads only the transcripts that changed")
+    func cachedRescan() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        var scanner = ClaudeSessionScanner(claudeHome: home)
+        scanner.isProcessAlive = { $0 == 4242 }
+        _ = scanner.scan()
+        #expect(scanner.summaryCache.reads == 2)
+        _ = scanner.scan()
+        #expect(scanner.summaryCache.reads == 2, "unchanged transcripts come from the cache")
+
+        let file = home.appendingPathComponent("projects/-Users-j-Repos-instrument/22222222-2222-2222-2222-222222222222.jsonl")
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(#"{"type":"custom-title","customTitle":"renamed"}"#.utf8 + [0x0A]))
+        try handle.close()
+        let sessions = scanner.scan()
+        #expect(scanner.summaryCache.reads == 3)
+        #expect(sessions.first { $0.sessionId.hasPrefix("2222") }?.title == "renamed")
+
+        try FileManager.default.removeItem(at: file)
+        #expect(scanner.scan().count == 1)
+        #expect(scanner.summaryCache.count == 1, "summaries of deleted transcripts are dropped")
+    }
+
+    @Test("ISO dates parse with and without fractions and offsets")
+    func isoDates() {
+        #expect(parseISODate("2026-09-22T10:00:00.000Z") == Date(timeIntervalSince1970: 1_790_071_200))
+        #expect(parseISODate("2026-09-22T11:30:00+02:00") == Date(timeIntervalSince1970: 1_790_069_400))
+        #expect(parseISODate("2026-09-22T11:30:00.5Z")?.timeIntervalSince1970 == 1_790_076_600.5)
+        #expect(parseISODate("2026-09-22") == nil)
+        #expect(parseISODate("garbage") == nil)
+    }
+
     @Test("reads the tail of large transcripts")
     func tailWindow() throws {
         let home = try makeHome()

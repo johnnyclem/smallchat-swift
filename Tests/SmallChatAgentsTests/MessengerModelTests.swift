@@ -63,8 +63,10 @@ struct StenographerTests {
 @MainActor
 @Suite("Messenger model")
 struct MessengerModelTests {
-    func makeModel(transport: MockAgentTransport = MockAgentTransport()) -> (MessengerModel, MockAgentTransport) {
-        let model = MessengerModel(store: MessengerStore(url: nil), transport: transport, scanner: nil)
+    func makeModel(
+        transport: MockAgentTransport = MockAgentTransport(), store: MessengerStore = MessengerStore(url: nil)
+    ) -> (MessengerModel, MockAgentTransport) {
+        let model = MessengerModel(store: store, transport: transport, scanner: nil)
         let now = Date()
         model.rebuildAgents(discovered: [
             DiscoveredSession(sessionId: "aaaa-1", cwd: "/r/instrument", gitBranch: nil, title: nil, lastActivity: now,
@@ -113,6 +115,42 @@ struct MessengerModelTests {
             DiscoveredSession(sessionId: "aaaa-1", cwd: "/r/instrument", gitBranch: nil, title: nil, lastActivity: Date(), transcriptPath: nil, live: nil),
         ])
         #expect(reloaded.agent("aaaa-1")?.handle == "compat-guard")
+    }
+
+    @Test("a burst of changes is saved once, never synchronously on the main actor")
+    func debouncedSave() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("messenger-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = MessengerStore(url: url, secrets: InMemorySecretStore())
+        let (model, _) = makeModel(store: store)
+        let id = try #require(model.openDirect(agentId: "aaaa-1"))
+        for i in 0..<50 { model.send("message \(i)", in: id) }
+        #expect(!FileManager.default.fileExists(atPath: url.path), "nothing is written while the user waits")
+
+        await model.flushPersistence()
+        #expect(model.snapshotsWritten == 1)
+        let saved = store.load().conversations.first { $0.id == id }
+        #expect(saved?.messages.filter { $0.author == .user }.count == 50)
+    }
+
+    @Test("pending changes are written after the delay, and when the app quits")
+    func delayedAndTerminationSave() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("messenger-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = MessengerStore(url: url, secrets: InMemorySecretStore())
+        let (model, _) = makeModel(store: store)
+        await model.flushPersistence()
+        model.persistDelay = .milliseconds(20)
+        model.setArchived(agentId: "aaaa-1", true)
+        for _ in 0..<100 where store.load().agents["aaaa-1"]?.archived != true {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(store.load().agents["aaaa-1"]?.archived == true)
+
+        model.persistDelay = .seconds(60)
+        model.setArchived(agentId: "aaaa-1", false)
+        NotificationCenter.default.post(name: MessengerModel.applicationWillTerminate, object: nil)
+        #expect(store.load().agents["aaaa-1"]?.archived == false, "quitting writes what is pending")
     }
 
     @Test("direct chat: reply is visible and needs no share decision")

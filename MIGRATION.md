@@ -253,6 +253,13 @@ In code:
   `NotaryClient.notarizeURL(restBase:proposalId:)`, which now returns an optional,
   and call `NotaryClient.parseInbox(_:)` without `restBase`.
 
+### Saving is asynchronous
+
+`MessengerModel` writes `messenger.json` in the background, within half a second
+of a change and when the app quits. Code (or a test) that reads the file, or
+creates a second model on the same store, right after changing something should
+first `await model.flushPersistence()`.
+
 ### Live sessions without a known name
 
 Sending to a live session whose Claude Code name isn't known now fails with
