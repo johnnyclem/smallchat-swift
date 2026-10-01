@@ -76,12 +76,12 @@ public enum TransportSerialization {
         let value = jsonCompatible(value)
         // Exact type checks: on Apple platforms `as? Bool` and `as? Int` both
         // match an NSNumber (and each other), so test what the value really is.
-        let type = type(of: value)
-        if type == Bool.self { return (value as! Bool) ? "true" : "false" }
-        if type == Int.self { return String(value as! Int) }
-        if type == Double.self { return String(value as! Double) }
+        let valueType = type(of: value)
+        if valueType == Bool.self { return (value as! Bool) ? "true" : "false" }
+        if valueType == Int.self { return String(value as! Int) }
+        if valueType == Double.self { return String(value as! Double) }
         if let string = value as? String { return string }
-        if type is NSNumber.Type, let number = value as? NSNumber {
+        if valueType is NSNumber.Type, let number = value as? NSNumber {
             if String(cString: number.objCType) == "c" { return number.boolValue ? "true" : "false" }
             return number.stringValue
         }
@@ -135,9 +135,9 @@ public enum TransportSerialization {
     /// - Every `{name}` placeholder in the path is replaced by the argument of
     ///   that name, percent-encoded as one path segment. A placeholder with no
     ///   argument is an error: the request is never sent with a literal `{name}`.
-    /// - Declared query params go in the query string. For GET, HEAD and
-    ///   DELETE, when the route declares no query params (or there is no
-    ///   route), every argument not used in the path goes in the query string.
+    /// - Declared query params go in the query string. For GET and HEAD when
+    ///   the route declares no query params, and for DELETE without a route,
+    ///   every argument not used in the path goes in the query string.
     /// - Otherwise the arguments not used in the path or query (or exactly the
     ///   declared body params) are the JSON body.
     public static func serializeInput(
@@ -164,10 +164,11 @@ public enum TransportSerialization {
         }
 
         // Query params
-        let hasBody = method != .GET && method != .HEAD && method != .DELETE
+        let isGetLike = method == .GET || method == .HEAD
+        let hasBody = !isGetLike
         let declaredQuery = route?.queryParams ?? []
         var queryNames: [String]
-        if declaredQuery.isEmpty && !hasBody {
+        if declaredQuery.isEmpty && (isGetLike || (route == nil && method == .DELETE)) {
             queryNames = args.keys.filter { !pathParams.contains($0) }.sorted()
         } else {
             queryNames = declaredQuery

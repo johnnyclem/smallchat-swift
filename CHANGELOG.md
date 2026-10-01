@@ -46,9 +46,9 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   route path are filled with the argument of that name, percent-encoded as one
   path segment (they used to be sent literally, as `%7Bname%7D`); a placeholder
   without an argument fails the call with the new `TransportError.invalidRequest`
-  and sends nothing. Declared `queryParams` go in the query string. GET, HEAD and
-  DELETE calls without declared query params put their arguments in the query
-  string (they used to be dropped). Other methods send the arguments not used in
+  and sends nothing. Declared `queryParams` go in the query string. GET and HEAD
+  calls without declared query params, and DELETE calls without a route, put their
+  arguments in the query string (GET arguments used to be dropped). Other methods send the arguments not used in
   the path or query as the JSON body (path params used to be duplicated there).
   `TransportSerialization.serializeInput` throws, and percent-encodes everything
   but RFC 3986 unreserved characters.

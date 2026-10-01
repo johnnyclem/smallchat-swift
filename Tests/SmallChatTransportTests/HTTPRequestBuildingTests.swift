@@ -186,6 +186,27 @@ struct HTTPRequestBuildingTests {
         #expect(server.requests.map(\.uri) == ["/list?limit=5&tag=x%20y"])
     }
 
+    @Test("DELETE without a route sends its arguments in the query; with a route, in the body")
+    func deleteArgs() async throws {
+        let server = try await RecordingHTTPServer.start()
+        let transport = await transport(server, routes: [HTTPTransportRoute(
+            toolName: "deletePet", method: .DELETE, path: "/pets/{petId}", pathParams: ["petId"]
+        )])
+
+        _ = try await transport.execute(input: TransportInput(
+            toolName: "purge", args: ["older_than": AnySendable("7d")], method: .DELETE
+        ))
+        _ = try await transport.execute(input: TransportInput(
+            toolName: "deletePet", args: ["petId": AnySendable(3), "reason": AnySendable("sold")]
+        ))
+        try await server.shutdown()
+
+        #expect(server.requests.map(\.uri) == ["/purge?older_than=7d", "/pets/3"])
+        #expect(server.requests.first?.body == "")
+        let body = try #require(try JSONSerialization.jsonObject(with: Data(server.requests[1].body.utf8)) as? [String: Any])
+        #expect(body["reason"] as? String == "sold")
+    }
+
     @Test("POST sends path params in the path and the rest as the JSON body")
     func postBody() async throws {
         let server = try await RecordingHTTPServer.start()

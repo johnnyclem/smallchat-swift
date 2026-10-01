@@ -174,15 +174,15 @@ func jsonText(_ value: AnyCodableValue) -> String {
 func anyCodableValue(from value: Any) -> AnyCodableValue? {
     // Exact type checks: on Apple platforms `as? Bool` and `as? Int` both
     // match an NSNumber (and each other), so test what the value really is.
-    let type = type(of: value)
-    if type == Bool.self { return .bool(value as! Bool) }
-    if type == Int.self { return .int(value as! Int) }
-    if type == Double.self { return .double(value as! Double) }
-    if type == Float.self { return .double(Double(value as! Float)) }
+    let valueType = type(of: value)
+    if valueType == Bool.self { return .bool(value as! Bool) }
+    if valueType == Int.self { return .int(value as! Int) }
+    if valueType == Double.self { return .double(value as! Double) }
+    if valueType == Float.self { return .double(Double(value as! Float)) }
     if let codable = value as? AnyCodableValue { return codable }
     if let string = value as? String { return .string(string) }
     if value is NSNull { return .null }
-    if type is NSNumber.Type, let number = value as? NSNumber {
+    if valueType is NSNumber.Type, let number = value as? NSNumber {
         switch String(cString: number.objCType) {
         case "c": return .bool(number.boolValue)
         case "f", "d": return .double(number.doubleValue)

@@ -296,7 +296,7 @@ SmallChatAgents ─── Agent messenger core: session discovery, handles, @men
 | **SmallChatEmbedding** | `LocalEmbedder` (FNV-1a hash, 384 dims, TS-parity), `MemoryVectorIndex` for dev/test |
 | **SmallChatTransport** | Protocol-agnostic transport layer — HTTP, MCP stdio, MCP SSE, local — with auth, retry, timeout, and circuit breaker middleware; `LoomMCPClient` for loom-mcp; `RtkTransport` for `rtk`-based prefixing/filtering |
 | **SmallChatMCP** | MCP server over Streamable HTTP (protocol 2025-11-25 and 2025-06-18): exact tool calls through a runtime whose tools run at their providers' endpoints (`MCPToolkit`), sessions (SQLite), bearer-token auth, Host/Origin checks, rate limiting, connection cap, HMAC-chained audit log, `AppResourceHandler` for `ui://` resources; `MCPClientTransport` (Streamable HTTP client) |
-| **SmallChatChannel** | Claude Code integration: JSON-RPC 2.0 over stdio, sender gating, permission relay |
+| **SmallChatChannel** | Claude Code integration: JSON-RPC 2.0 over stdio, sender gating, permission relay, and the channel HTTP bridge (`ChannelBridgeServer`: `POST /event`, mandatory shared secret) used by `smallchat channel --http-bridge` and the messenger's objection channel |
 | **SmallChatDream** | Memory-driven tool re-compilation: reads Claude session/memory logs to discover tool usage and recompile toolkits |
 | **SmallChatShorthand** | Text primitives shared by the modules below — tokenization, Jaccard/cosine similarity, FNV-1a content hashing |
 | **SmallChatImportance** | Three-signal importance detector (recency decay, co-mention centrality, novelty) with weighted ranking |
