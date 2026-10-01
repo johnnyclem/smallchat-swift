@@ -3,7 +3,10 @@ import Foundation
 import FoundationNetworking
 #endif
 import Observation
-import SmallChatChannel
+// The channel bridge types (ChannelBridgeServer, ChannelBridgeProtocol, ...)
+// lived in this module before 1.0; re-exported so code that imports only
+// SmallChatAgents keeps compiling.
+@_exported import SmallChatChannel
 import SmallChatTruth
 
 // MARK: - Messenger model
@@ -879,7 +882,8 @@ public final class MessengerModel {
 
     /// Tombstones signed here, as stenographer minted them, until a wiki
     /// export the messenger reads carries them (the export then speaks for
-    /// them, strikes included).
+    /// them, strikes included). They count as current truth only while the
+    /// exports read cleanly: a refused export might hold their strike.
     public private(set) var authoredTombstones: [TruthTbEntry] = []
     /// The envelope of a signing that didn't finish, reused when the same
     /// draft is signed again: stenographer files an envelope once by its id.
@@ -927,7 +931,12 @@ public final class MessengerModel {
         var snapshot = TruthLedgerSnapshot.load(paths: settings.wikiPaths)
         let exported = Set(snapshot.entries.map(\.id))
         authoredTombstones.removeAll { exported.contains($0.id) }
-        snapshot.entries += authoredTombstones.map { .tb($0) }
+        // A refused snapshot loads nothing (fail closed), and that includes
+        // what was signed here: the unreadable stream might strike it. The
+        // tombstones wait in `authoredTombstones` for a readable export.
+        if !snapshot.refused {
+            snapshot.entries += authoredTombstones.map { .tb($0) }
+        }
         ledger = snapshot
     }
 

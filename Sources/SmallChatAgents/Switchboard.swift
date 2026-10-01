@@ -175,6 +175,9 @@ public actor Switchboard {
     private var readTask: Task<Void, Never>?
     private var pending: [String: CheckedContinuation<Void, Error>] = [:]
     private var listWaiter: CheckedContinuation<[SwitchboardProtocol.Output], Never>?
+    /// Identifies the LIST `listWaiter` belongs to; its timer ends only that one.
+    private var listToken = 0
+    private var listTimer: Task<Void, Never>?
     private var listed: [SwitchboardProtocol.Output] = []
     private var nextTicket = 1
     private let inboundContinuation: AsyncStream<(sender: String, text: String)>.Continuation
@@ -221,7 +224,13 @@ public actor Switchboard {
         defer { timer.cancel() }
         try await withTaskCancellationHandler {
             try await awaitTicket(ticket) {
-                process.send(line: StreamJSON.userMessageLine(command))
+                // Queued, never written here: a switchboard that isn't
+                // reading would block this actor, and with it the timer,
+                // cancellation and shutdown.
+                process.enqueue(line: StreamJSON.userMessageLine(command)) { [weak self] written in
+                    guard !written else { return }
+                    Task { await self?.fail(ticket, reason: "the switchboard isn't reading its input") }
+                }
             }
         } onCancel: {
             Task { await self.fail(ticket, reason: "relay cancelled") }
@@ -229,16 +238,23 @@ public actor Switchboard {
     }
 
     /// Ask Claude Code which sessions are reachable (names as it knows them).
-    public func listAgents() async throws -> [(name: String, cwd: String, status: String)] {
+    /// Returns what was listed when the LIST turn ends, or after `timeout`.
+    public func listAgents(timeout: Duration = .seconds(60)) async throws -> [(name: String, cwd: String, status: String)] {
         let process = try ensureRunning()
         let outputs: [SwitchboardProtocol.Output] = await withCheckedContinuation { cont in
             listWaiter?.resume(returning: listed)
+            listToken += 1
+            let token = listToken
             listWaiter = cont
             listed = []
-            process.send(line: StreamJSON.userMessageLine(SwitchboardProtocol.listCommand(nonce: nonce)))
-            Task { [weak self] in
-                try? await Task.sleep(for: .seconds(60))
-                await self?.finishList()
+            listTimer?.cancel()
+            listTimer = Task { [weak self] in
+                guard (try? await Task.sleep(for: timeout)) != nil else { return }
+                await self?.finishList(token: token)
+            }
+            process.enqueue(line: StreamJSON.userMessageLine(SwitchboardProtocol.listCommand(nonce: nonce))) { [weak self] written in
+                guard !written else { return }
+                Task { await self?.finishList(token: token) }
             }
         }
         return outputs.compactMap {
@@ -260,16 +276,21 @@ public actor Switchboard {
 
     // MARK: Internals
 
-    private func awaitTicket(_ ticket: String, send: @Sendable () -> Bool) async throws {
+    private func awaitTicket(_ ticket: String, send: @Sendable () -> Void) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             pending[ticket] = cont
-            if !send() { fail(ticket, reason: "the switchboard isn't reading its input") }
+            send()
         }
     }
 
-    private func finishList() {
+    /// End the current LIST, or only the one `token` names (a timer or a
+    /// failed write of an earlier LIST must not end a later one).
+    private func finishList(token: Int? = nil) {
+        if let token, token != listToken { return }
         guard let waiter = listWaiter else { return }
         listWaiter = nil
+        listTimer?.cancel()
+        listTimer = nil
         waiter.resume(returning: listed)
     }
 
@@ -280,8 +301,7 @@ public actor Switchboard {
     private func failAll(_ reason: String) {
         for (_, cont) in pending { cont.resume(throwing: SwitchboardError(reason: reason)) }
         pending.removeAll()
-        listWaiter?.resume(returning: listed)
-        listWaiter = nil
+        finishList()
     }
 
     private func ensureRunning() throws -> ClaudeProcess {

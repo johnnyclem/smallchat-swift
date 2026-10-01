@@ -9,12 +9,24 @@ import SmallChatCore
 // MARK: - Fixtures
 
 /// Writes `contents` to an executable file in a fresh temporary directory.
+///
+/// The file that runs is never open for writing in this process: a child
+/// another test spawns at that moment would hold the descriptor for a
+/// moment, and exec'ing the file would then fail with ETXTBSY ("Text file
+/// busy"). The source is written here and `cp`, in its own process, creates
+/// the executable.
 private func makeExecutable(_ name: String, _ contents: String) throws -> String {
     let dir = FileManager.default.temporaryDirectory
         .appendingPathComponent("smallchat-subprocess-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let path = dir.appendingPathComponent(name).path
-    try contents.write(toFile: path, atomically: true, encoding: .utf8)
+    try contents.write(toFile: path + ".src", atomically: true, encoding: .utf8)
+    let cp = Process()
+    cp.executableURL = URL(fileURLWithPath: "/bin/cp")
+    cp.arguments = [path + ".src", path]
+    try cp.run()
+    cp.waitUntilExit()
+    guard cp.terminationStatus == 0 else { throw CocoaError(.fileWriteUnknown) }
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
     return path
 }

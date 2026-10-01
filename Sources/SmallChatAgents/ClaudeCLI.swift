@@ -167,6 +167,9 @@ public final class ClaudeProcess: @unchecked Sendable {
     private let stdinPipe = Pipe()
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
+    /// stdin writes, in order, off the cooperative pool: a write blocks
+    /// until claude reads it, which a stuck claude never does.
+    private let writeQueue = DispatchQueue(label: "smallchat.claude.stdin")
     private let lock = NSLock()
     private var buffer = Data()
     private var stderrText = ""
@@ -247,15 +250,31 @@ public final class ClaudeProcess: @unchecked Sendable {
     }
 
     /// Write one line to stdin (for `--input-format stream-json`). Returns
-    /// false when the process no longer reads its stdin.
+    /// false when the process no longer reads its stdin. Blocks until claude
+    /// has read the line, so never call it from an actor or the cooperative
+    /// pool; use `enqueue(line:completion:)` there.
     @discardableResult
     public func send(line: String) -> Bool {
-        let data = Data((line.hasSuffix("\n") ? line : line + "\n").utf8)
-        return PipeIO.writeAll(data, to: stdinPipe.fileHandleForWriting)
+        let data = Self.lineData(line)
+        return writeQueue.sync { PipeIO.writeAll(data, to: stdinPipe.fileHandleForWriting) }
     }
 
+    /// Queue one line for stdin and return at once. Lines are written in
+    /// order, each whole, on a dedicated queue; `completion` gets false when
+    /// the process stopped reading its stdin.
+    public func enqueue(line: String, completion: @escaping @Sendable (Bool) -> Void = { _ in }) {
+        let data = Self.lineData(line)
+        writeQueue.async { [self] in completion(PipeIO.writeAll(data, to: stdinPipe.fileHandleForWriting)) }
+    }
+
+    /// Close stdin after the lines already queued (a queued write that
+    /// claude never reads ends when the process does).
     public func closeInput() {
-        try? stdinPipe.fileHandleForWriting.close()
+        writeQueue.async { [self] in try? stdinPipe.fileHandleForWriting.close() }
+    }
+
+    private static func lineData(_ line: String) -> Data {
+        Data((line.hasSuffix("\n") ? line : line + "\n").utf8)
     }
 
     public func terminate() {

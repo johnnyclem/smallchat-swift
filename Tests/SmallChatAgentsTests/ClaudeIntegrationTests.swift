@@ -276,9 +276,19 @@ struct DiscoveryTests {
 /// Drives the real process plumbing against a fake `claude` shell script.
 @Suite("Claude process plumbing")
 struct ProcessPlumbingTests {
+    /// The script that runs is never open for writing in this process (a
+    /// child another test spawns meanwhile would hold the descriptor for a
+    /// moment, and exec would fail with ETXTBSY): `cp`, in its own process,
+    /// creates it from a source written here.
     func fakeClaude(_ body: String) throws -> String {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("fake-claude-\(UUID().uuidString)")
-        try ("#!/bin/sh\n" + body).write(to: url, atomically: true, encoding: .utf8)
+        try ("#!/bin/sh\n" + body).write(toFile: url.path + ".src", atomically: true, encoding: .utf8)
+        let cp = Process()
+        cp.executableURL = URL(fileURLWithPath: "/bin/cp")
+        cp.arguments = [url.path + ".src", url.path]
+        try cp.run()
+        cp.waitUntilExit()
+        guard cp.terminationStatus == 0 else { throw CocoaError(.fileWriteUnknown) }
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         return url.path
     }
@@ -342,6 +352,58 @@ struct ProcessPlumbingTests {
             try await switchboard.relay(to: "api", cwd: "/", body: "hi", timeout: .milliseconds(300))
         }
         #expect(ContinuousClock.now - started < .seconds(5))
+        await switchboard.shutdown()
+    }
+
+    @Test("SW-REV-03: a relay too big for the pipe of a switchboard that never reads still times out, and the actor stays free")
+    func relayTimeoutWithLargeBody() async throws {
+        let exe = try fakeClaude("exec sleep 30\n")
+        let switchboard = Switchboard(executable: exe)
+        let started = ContinuousClock.now
+        await #expect(throws: SwitchboardError(reason: "switchboard timed out")) {
+            try await switchboard.relay(to: "api", cwd: "/", body: String(repeating: "x", count: 256 * 1024), timeout: .milliseconds(300))
+        }
+        #expect(ContinuousClock.now - started < .seconds(5))
+        await switchboard.shutdown()
+        #expect(ContinuousClock.now - started < .seconds(5), "shutdown waited for the blocked write")
+    }
+
+    @Test("SW-REV-03: concurrent large relays reach the switchboard whole, one line each")
+    func largeRelaysInOrder() async throws {
+        // One receipt per line, for the ticket the line names; a line that
+        // isn't one whole relay command (interleaved or cut) gets none.
+        let exe = try fakeClaude(#"""
+        exec perl -ne 'BEGIN { $| = 1 } print qq({"type":"assistant","message":{"content":[{"type":"text","text":"DELIVERED N0NCE $1"}]}}\n) if /END_BODY N0NCE/ && /RELAY N0NCE (t\d+)/'
+        """#)
+        let switchboard = Switchboard(executable: exe, nonce: "N0NCE")
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for i in 0..<4 {
+                group.addTask {
+                    try await switchboard.relay(to: "api", cwd: "/", body: String(repeating: "\(i)", count: 200 * 1024), timeout: .seconds(20))
+                }
+            }
+            try await group.waitForAll()
+        }
+        await switchboard.shutdown()
+    }
+
+    @Test("SW-REV-04: an earlier LIST's timer does not end a later LIST")
+    func staleListTimer() async throws {
+        // The first LIST is answered at once, the second after 1.5 s.
+        let exe = try fakeClaude(#"""
+        n=0
+        while IFS= read -r line; do
+          n=$((n+1))
+          [ "$n" -gt 1 ] && sleep 1.5
+          printf '{"type":"assistant","message":{"content":[{"type":"text","text":"AGENT N0NCE {\\"name\\":\\"api\\",\\"cwd\\":\\"/r\\",\\"status\\":\\"\\"}"}]}}\n'
+          printf '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n'
+        done
+        """#)
+        let switchboard = Switchboard(executable: exe, nonce: "N0NCE")
+        let first = try await switchboard.listAgents(timeout: .seconds(1))
+        #expect(first.map(\.name) == ["api"])
+        let second = try await switchboard.listAgents(timeout: .seconds(10))
+        #expect(second.map(\.name) == ["api"], "the first LIST's timer ended the second one early")
         await switchboard.shutdown()
     }
 

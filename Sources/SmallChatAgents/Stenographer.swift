@@ -31,11 +31,14 @@ public struct TruthLedgerSnapshot: Sendable, Equatable {
     public var entries: [TruthLedgerEntry]
     public var sources: [String]
     public var errors: [String]
+    /// A stream was refused (a bad hash, a broken chain): nothing was loaded.
+    public var refused: Bool
 
-    public init(entries: [TruthLedgerEntry] = [], sources: [String] = [], errors: [String] = []) {
+    public init(entries: [TruthLedgerEntry] = [], sources: [String] = [], errors: [String] = [], refused: Bool = false) {
         self.entries = entries
         self.sources = sources
         self.errors = errors
+        self.refused = refused
     }
 
     public var selection: TruthSelection { TruthWiki.selectCurrentTruth(entries) }
@@ -78,7 +81,8 @@ public struct TruthLedgerSnapshot: Sendable, Equatable {
         return TruthLedgerSnapshot(
             entries: parsed.entries,
             sources: files,
-            errors: parsed.errors.map(\.description)
+            errors: parsed.errors.map(\.description),
+            refused: parsed.refused
         )
     }
 }

@@ -191,4 +191,44 @@ struct TombstoneModelTests {
         model.send("still logBudget = 30 here", in: chat)
         #expect(model.conversation(chat)?.messages.dropFirst(before).contains { $0.author == .stenographer } == false)
     }
+
+    @Test("SW-REV-05: a refused export keeps tombstones signed here out of current truth too")
+    func refusedExportFailsClosed() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("wikidir-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let model = makeModel()
+        model.settings.wikiPaths = [dir.path]
+        let stenographer = try await fake(for: model)
+        defer { Task { try? await stenographer.shutdown() } }
+        let tb = try await model.assertTombstone(TombstoneDraftTests().good)
+        #expect(model.ledger.tombstones.map(\.id) == [tb.id])
+
+        // The export carries the TB struck by a ruling, but one line fails its hash.
+        var export = try TruthFormat.chain([
+            #"{"id":"\#(tb.id)","type":"TB","ts":"2026-10-01T12:00:00.000Z","author":"johnny","claim":"LOG_BUDGET 30 is dead; the budget is 100.","evidence":[{"kind":"commit","ref":"a1b2c3"}],"signedBy":"johnny","literals":[{"dead":"30","subject":"LOG_BUDGET","current":"100"}],"status":"active"}"#,
+            #"{"id":"01RULING0000000000000000001","type":"RULING","ts":"2026-10-01T12:05:00.000Z","author":"kim","kind":"strike","opinion":"the commit was reverted","target":"\#(tb.id)"}"#,
+            #"{"id":"01RULING0000000000000000001:\#(tb.id)","type":"TRANSITION","ts":"2026-10-01T12:05:00.000Z","author":"kim","target":"\#(tb.id)","status":"struck","cause":{"kind":"strike","ref":"01RULING0000000000000000001"}}"#,
+        ])
+        export[1] = export[1].replacingOccurrences(of: "the commit was reverted", with: "the commit was reverted!")
+        try Data((export.joined(separator: "\n") + "\n").utf8).write(to: dir.appendingPathComponent("johnny.jsonl"))
+        model.reloadLedger()
+        #expect(model.ledger.refused)
+        #expect(!model.ledger.errors.isEmpty)
+        #expect(model.ledger.tombstones.isEmpty, "nothing is current truth while the export is refused")
+        #expect(model.authoredTombstones.map(\.id) == [tb.id], "kept until a readable export speaks for it")
+
+        model.rebuildAgents(discovered: [DiscoveredSession(sessionId: "a1", cwd: "/r/x", gitBranch: nil, title: nil, lastActivity: Date(), transcriptPath: nil, live: nil)])
+        let chat = try #require(model.openDirect(agentId: "a1"))
+        model.send("still logBudget = 30 here", in: chat)
+        #expect(model.conversation(chat)?.messages.contains { $0.author == .stenographer } == false,
+                "objected from \(tb.id) although the ledger was refused")
+
+        // With the refused file gone, the TB signed here is current again.
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("johnny.jsonl"))
+        model.reloadLedger()
+        #expect(model.ledger.errors.isEmpty)
+        #expect(model.ledger.tombstones.map(\.id) == [tb.id])
+    }
 }
