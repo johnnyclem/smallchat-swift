@@ -3,7 +3,8 @@ import SmallChatAgents
 import SmallChatTruth
 
 /// Author and sign a tombstone: what's dead, the evidence, and the literals
-/// the stenographer should object to from now on.
+/// the stenographer should object to from now on. It goes to stenographer
+/// as a proposal you notarize; nothing is written to a wiki file.
 struct TombstoneSheet: View {
     @Environment(MessengerModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -16,6 +17,7 @@ struct TombstoneSheet: View {
     @State private var literals: [LiteralRow] = []
     @State private var signer = ""
     @State private var error: String?
+    @State private var signing = false
 
     struct EvidenceRow: Identifiable {
         let id = UUID()
@@ -102,10 +104,10 @@ struct TombstoneSheet: View {
                     LabeledContent("Sign as") {
                         TextField("your name", text: $signer).textFieldStyle(.roundedBorder)
                     }
-                    LabeledContent("Written to") {
-                        Text(model.tombstoneTarget ?? "no wiki file configured")
+                    LabeledContent("Sent to") {
+                        Text("stenographer at \(model.stenographerRestBase.absoluteString), notarized by you")
                             .font(.caption.monospaced())
-                            .foregroundStyle(model.tombstoneTarget == nil ? Color.orange : Color.secondary)
+                            .foregroundStyle(Color.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
@@ -124,7 +126,7 @@ struct TombstoneSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Sign Tombstone", action: sign)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!draft.problems().isEmpty || model.tombstoneTarget == nil)
+                    .disabled(!draft.problems().isEmpty || signing)
             }
         }
         .padding(20)
@@ -132,7 +134,7 @@ struct TombstoneSheet: View {
         .onAppear(perform: load)
     }
 
-    private let evidenceKinds: [TruthEvidence.Kind] = [.commit, .file, .test, .command, .wiki, .message]
+    private let evidenceKinds: [TruthEvidence.Kind] = [.commit, .file, .test, .claimedCommand, .wiki, .message]
 
     private var draft: TombstoneDraft {
         TombstoneDraft(
@@ -159,11 +161,16 @@ struct TombstoneSheet: View {
     }
 
     private func sign() {
-        do {
-            try model.assertTombstone(draft)
-            dismiss()
-        } catch {
-            self.error = String(describing: error)
+        signing = true
+        let draft = self.draft
+        Task {
+            do {
+                try await model.assertTombstone(draft)
+                dismiss()
+            } catch {
+                self.error = String(describing: error)
+            }
+            signing = false
         }
     }
 }

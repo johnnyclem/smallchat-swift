@@ -42,9 +42,12 @@ public final class MessengerModel {
     /// Authenticates stenographer's posts to the objection channel bridge
     /// (`SMALLCHAT_CHANNEL_SECRET`).
     public private(set) var channelSecret: String
-    /// Authenticates the messenger's notarize and dismiss calls to
+    /// Authenticates the messenger's proposal, notarize and dismiss calls to
     /// stenographer (`STENOGRAPHER_NOTARY_SECRET`). Never the channel secret.
     public private(set) var notarySecret: String
+    /// The bearer token every stenographer REST request carries
+    /// (`STENOGRAPHER_REST_TOKEN`). Distinct from both other secrets.
+    public private(set) var restToken: String
     /// Last problem worth telling the user about.
     public var lastError: String?
 
@@ -103,6 +106,7 @@ public final class MessengerModel {
         let secrets = Self.ensureSecrets(in: store.secrets)
         self.channelSecret = secrets.channel
         self.notarySecret = secrets.notary
+        self.restToken = secrets.restToken
         if let problem = secrets.problem { lastError = problem }
         if settings.carriesLegacySecret {
             // An older build kept the channel secret in messenger.json; the
@@ -125,15 +129,15 @@ public final class MessengerModel {
         if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
     }
 
-    /// The stored channel and notary secrets, generated (distinct from each
-    /// other) when missing. A store that can't be written still yields
-    /// secrets for this session, with a problem to show.
-    static func ensureSecrets(in store: any MessengerSecretStore) -> (channel: String, notary: String, problem: String?) {
+    /// The stored channel and notary secrets and REST token, generated
+    /// (distinct from each other) when missing. A store that can't be
+    /// written still yields secrets for this session, with a problem to show.
+    static func ensureSecrets(in store: any MessengerSecretStore) -> (channel: String, notary: String, restToken: String, problem: String?) {
         var problem: String?
-        func value(_ secret: MessengerSecret, distinctFrom other: String?) -> String {
-            if let existing = store.read(secret), !existing.isEmpty, existing != other { return existing }
+        func value(_ secret: MessengerSecret, distinctFrom others: [String]) -> String {
+            if let existing = store.read(secret), !existing.isEmpty, !others.contains(existing) { return existing }
             var fresh = ChannelBridgeProtocol.generateSecret()
-            while fresh == other { fresh = ChannelBridgeProtocol.generateSecret() }
+            while others.contains(fresh) { fresh = ChannelBridgeProtocol.generateSecret() }
             do {
                 try store.write(fresh, for: secret)
             } catch {
@@ -141,9 +145,10 @@ public final class MessengerModel {
             }
             return fresh
         }
-        let channel = value(.channel, distinctFrom: nil)
-        let notary = value(.notary, distinctFrom: channel)
-        return (channel, notary, problem)
+        let channel = value(.channel, distinctFrom: [])
+        let notary = value(.notary, distinctFrom: [channel])
+        let restToken = value(.restToken, distinctFrom: [channel, notary])
+        return (channel, notary, restToken, problem)
     }
 
     /// Swap the transport (e.g. after the `claude` path changes in Settings).
@@ -812,7 +817,7 @@ public final class MessengerModel {
     /// Picks up drafts raised while the messenger wasn't listening.
     public func refreshProposals() async {
         do {
-            let open = try await NotaryClient.openDrafts(restBase: stenographerRestBase)
+            let open = try await NotaryClient.openDrafts(restBase: stenographerRestBase, restToken: restToken)
             let known = Set(pendingProposals.map(\.id))
             pendingProposals.insert(contentsOf: open.filter { !known.contains($0.id) }, at: 0)
         } catch {
@@ -837,7 +842,7 @@ public final class MessengerModel {
         }
         setProposalState(proposalId, .working)
         do {
-            let request = try NotaryClient.request(for: decision, notarizeURL: url, secret: notarySecret)
+            let request = try NotaryClient.request(for: decision, notarizeURL: url, secret: notarySecret, restToken: restToken)
             let entryId = try await notarySender(request)
             switch decision {
             case .approve: setProposalState(proposalId, .notarized(entryId: entryId))
@@ -867,44 +872,63 @@ public final class MessengerModel {
 
     // MARK: Authoring tombstones
 
-    /// The wiki file new tombstones go to: the configured one, else the first
-    /// wiki path (a directory gets `smallchat-tombstones.jsonl` inside it).
-    public var tombstoneTarget: String? {
-        let raw = settings.tombstoneFile ?? settings.wikiPaths.first
-        guard let raw, !raw.isEmpty else { return nil }
-        let path = (raw as NSString).expandingTildeInPath
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
-            return (path as NSString).appendingPathComponent("smallchat-tombstones.jsonl")
-        }
-        return path
-    }
+    /// The identity the messenger files tombstone proposals under. The
+    /// person who signs notarizes them, and stenographer refuses a notary
+    /// who also drafted the proposal, so this is never the signer.
+    public nonisolated static let proposalAuthor = "agent:smallchat-messenger"
 
-    /// Sign a tombstone and append it to the wiki. The stenographer starts
-    /// objecting to its literals immediately; stenographer proper picks it
-    /// up on its next `import_wiki_entries`.
+    /// Tombstones signed here, as stenographer minted them, until a wiki
+    /// export the messenger reads carries them (the export then speaks for
+    /// them, strikes included).
+    public private(set) var authoredTombstones: [TruthTbEntry] = []
+    /// The envelope of a signing that didn't finish, reused when the same
+    /// draft is signed again: stenographer files an envelope once by its id.
+    @ObservationIgnored private var unfinishedTombstone: (draft: TombstoneDraft, envelope: TruthProposalEnvelope)?
+
+    /// Sign a tombstone. One writer per wiki file: nothing is written to a
+    /// wiki file. The draft goes to stenographer as a PROPOSAL envelope
+    /// (`POST /proposals`), and the signer notarizes it there
+    /// (`POST /proposals/:id/notarize`); stenographer mints the TB and
+    /// exports it. The stenographer here objects to its literals at once.
     @discardableResult
-    public func assertTombstone(_ draft: TombstoneDraft) throws -> TruthTbEntry {
-        guard let target = tombstoneTarget else {
-            throw TruthError.malformedLine(line: 0, reason: "Add a wiki file on the Stenographer page first — tombstones are written there.")
+    public func assertTombstone(_ draft: TombstoneDraft) async throws -> TruthTbEntry {
+        guard !notarySecret.isEmpty else {
+            throw TruthError.malformedLine(line: 0, reason: "No notary secret is set.")
         }
-        let entry = try draft.sign()
-        try TruthWiki.append([.tb(entry)], toFileAt: target)
-        // Make sure the ledger reads the file it was just written to.
-        let covered = settings.wikiPaths.contains { path in
-            let expanded = (path as NSString).expandingTildeInPath
-            return expanded == target || target.hasPrefix(expanded.hasSuffix("/") ? expanded : expanded + "/")
+        let envelope: TruthProposalEnvelope
+        if let unfinished = unfinishedTombstone, unfinished.draft == draft {
+            envelope = unfinished.envelope
+        } else {
+            envelope = try draft.proposal(author: Self.proposalAuthor)
+            unfinishedTombstone = (draft, envelope)
         }
-        if !covered { settings.wikiPaths.append(target) }
-        if settings.signerIdentity.isEmpty { settings.signerIdentity = draft.signer.trimmingCharacters(in: .whitespaces) }
+        let minted = try await NotaryClient.submitAndNotarize(
+            envelope, notary: draft.notary, restBase: stenographerRestBase, secret: notarySecret, restToken: restToken
+        )
+        unfinishedTombstone = nil
+        let tb = minted.tombstone ?? {
+            // Stenographer minted the draft as submitted; its reply just couldn't be read
+            guard case .tb(let claim, let evidence, let literals) = envelope.draft else { preconditionFailure("a tombstone envelope") }
+            return TruthTbEntry(
+                id: minted.entryId ?? minted.proposalId, ts: envelope.ts, author: draft.notary, claim: claim,
+                evidence: evidence, signedBy: draft.notary, status: .active, literals: literals
+            )
+        }()
+        authoredTombstones.removeAll { $0.id == tb.id }
+        authoredTombstones.append(tb)
+        if settings.signerIdentity.isEmpty { settings.signerIdentity = draft.notary }
         reloadLedger()
-        return entry
+        return tb
     }
 
     // MARK: Stenographer
 
     public func reloadLedger() {
-        ledger = TruthLedgerSnapshot.load(paths: settings.wikiPaths)
+        var snapshot = TruthLedgerSnapshot.load(paths: settings.wikiPaths)
+        let exported = Set(snapshot.entries.map(\.id))
+        authoredTombstones.removeAll { exported.contains($0.id) }
+        snapshot.entries += authoredTombstones.map { .tb($0) }
+        ledger = snapshot
     }
 
     private func askStenographer(_ question: String, in conversationId: String) {

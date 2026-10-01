@@ -2,17 +2,23 @@ import Foundation
 
 // MARK: - SmallChatTruth
 //
-// Consumer-side seam for stenographer's TB/UV v2 asserted-truth ledger,
-// ported from the TS truth-ledger interop in `@shorthand/core/truth`.
-// Short-hand-style compaction reads signed TB/UV entries from the
-// append-only wiki JSONL, carries them under the §7 consumption rules,
+// Consumer-side seam for stenographer's asserted-truth ledger, reading the
+// suite's truth format v2 (stenographer spec/truth-format; README in
+// Tests/Fixtures/truth-format). Short-hand-style compaction reads TB/UV
+// entries from a truth stream, carries them under the §7 consumption rules,
 // and may emit candidate invariants back as PROPOSAL lines — never as
-// signed truth.
+// signed truth. Truth itself is written by stenographer (one writer per
+// wiki file); this module only reads it.
 //
 // The design principle that must survive any refactor: TWO AXES, NOT
 // ONE. Every entry carries provenance (where did this come from) and a
 // confidence type (how much should you trust it). Collapsing TB and UV
 // back into one "invariant" bucket is a regression.
+//
+// Status, evidence kind and verifyBy kind are open strings: a newer writer
+// may send values this version doesn't know. They are kept as written,
+// never coerced to a known value, and an unknown or missing status is
+// never current truth (fail closed).
 
 // MARK: - Confidence & statuses
 
@@ -22,24 +28,98 @@ public enum TruthConfidence: String, Sendable, Codable {
     case uv
 }
 
-public enum TbStatus: String, Sendable, Codable {
-    case active
-    case contested
-    case overridden
+/// A TB's status. Open: any string a line carries is kept; only `active`
+/// and `contested` are current truth.
+public struct TbStatus: RawRepresentable, Hashable, Sendable, Codable, ExpressibleByStringLiteral, CustomStringConvertible {
+    public let rawValue: String
+
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public init(stringLiteral value: String) { self.rawValue = value }
+
+    public init(from decoder: Decoder) throws {
+        rawValue = try decoder.singleValueContainer().decode(String.self)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    public static let active: TbStatus = "active"
+    public static let contested: TbStatus = "contested"
+    public static let overridden: TbStatus = "overridden"
+    public static let struck: TbStatus = "struck"
+
+    /// The statuses this version knows, in lattice order.
+    public static let known: [TbStatus] = [.active, .contested, .overridden, .struck]
+
+    public var isKnown: Bool { Self.known.contains(self) }
+    public var description: String { rawValue }
 }
 
-public enum UvStatus: String, Sendable, Codable {
-    case open
-    case verified
-    case refuted
+/// A UV's status. Open: any string a line carries is kept; only `open` is
+/// current (a heads-up).
+public struct UvStatus: RawRepresentable, Hashable, Sendable, Codable, ExpressibleByStringLiteral, CustomStringConvertible {
+    public let rawValue: String
+
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public init(stringLiteral value: String) { self.rawValue = value }
+
+    public init(from decoder: Decoder) throws {
+        rawValue = try decoder.singleValueContainer().decode(String.self)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    public static let open: UvStatus = "open"
+    public static let verified: UvStatus = "verified"
+    public static let refuted: UvStatus = "refuted"
+    public static let struck: UvStatus = "struck"
+
+    /// The statuses this version knows, in lattice order.
+    public static let known: [UvStatus] = [.open, .verified, .refuted, .struck]
+
+    public var isKnown: Bool { Self.known.contains(self) }
+    public var description: String { rawValue }
 }
 
 // MARK: - Evidence & verification hints
 
 /// A piece of evidence attached to a TB.
 public struct TruthEvidence: Sendable, Codable, Equatable {
-    public enum Kind: String, Sendable, Codable {
-        case commit, file, test, command, wiki, message
+    /// Open: a kind this version doesn't know is kept as written.
+    public struct Kind: RawRepresentable, Hashable, Sendable, Codable, ExpressibleByStringLiteral, CustomStringConvertible {
+        public let rawValue: String
+
+        public init(rawValue: String) { self.rawValue = rawValue }
+        public init(stringLiteral value: String) { self.rawValue = value }
+
+        public init(from decoder: Decoder) throws {
+            rawValue = try decoder.singleValueContainer().decode(String.self)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
+
+        public static let commit: Kind = "commit"
+        public static let file: Kind = "file"
+        public static let test: Kind = "test"
+        /// Command output the submitter says it saw. Stenographer records
+        /// it as `claimedCommand` (it did not run the command); `command`
+        /// appears only on entries recorded before 1.0.
+        public static let command: Kind = "command"
+        public static let claimedCommand: Kind = "claimed-command"
+        public static let wiki: Kind = "wiki"
+        public static let message: Kind = "message"
+
+        public static let known: [Kind] = [.commit, .file, .test, .command, .claimedCommand, .wiki, .message]
+
+        public var description: String { rawValue }
     }
 
     public let kind: Kind
@@ -57,8 +137,30 @@ public struct TruthEvidence: Sendable, Codable, Equatable {
 
 /// Machine-actionable verification hint carried by every UV.
 public struct TruthVerifyBy: Sendable, Codable, Equatable {
-    public enum Kind: String, Sendable, Codable {
-        case command, inspect, ask, observe
+    /// Open: a kind this version doesn't know is kept as written.
+    public struct Kind: RawRepresentable, Hashable, Sendable, Codable, ExpressibleByStringLiteral, CustomStringConvertible {
+        public let rawValue: String
+
+        public init(rawValue: String) { self.rawValue = rawValue }
+        public init(stringLiteral value: String) { self.rawValue = value }
+
+        public init(from decoder: Decoder) throws {
+            rawValue = try decoder.singleValueContainer().decode(String.self)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
+
+        public static let command: Kind = "command"
+        public static let inspect: Kind = "inspect"
+        public static let ask: Kind = "ask"
+        public static let observe: Kind = "observe"
+
+        public static let known: [Kind] = [.command, .inspect, .ask, .observe]
+
+        public var description: String { rawValue }
     }
 
     public let kind: Kind
@@ -88,25 +190,94 @@ public struct TruthTombstonedLiteral: Sendable, Codable, Equatable {
         self.current = current
     }
 
-    /// Stenographer's write-time rule (`TombstonedLiteralSchema`): every
-    /// present field is non-blank, and a literal without a `subject` must
-    /// be a distinctive identifier (≥4 chars, contains a letter). A bare
-    /// value like "30" can't be matched safely without naming what it's the
-    /// value of. Returns nil when valid, else the reason.
+    /// Stenographer's write-time rule (`TombstonedLiteralSchema`), which a
+    /// submitted draft must pass: every present field non-blank once
+    /// trimmed, and a literal without a `subject` must be a distinctive
+    /// identifier — at least 4 UTF-16 code units and at least one ASCII
+    /// letter, as stenographer's `value.length >= 4 && /[A-Za-z]/` counts
+    /// them. A bare value like "30" can't be matched safely without naming
+    /// what it's the value of. Returns nil when valid, else the reason.
     public func validationError() -> String? {
-        let dead = self.dead.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dead = ecmaScriptTrim(self.dead)
         if dead.isEmpty { return "a literal needs a dead value" }
-        if let subject, subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if let subject, ecmaScriptTrim(subject).isEmpty {
             return "a literal's subject can't be blank"
         }
-        if let current, current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if let current, ecmaScriptTrim(current).isEmpty {
             return "a literal's current value can't be blank"
         }
-        if subject == nil, !(dead.count >= 4 && dead.contains(where: \.isLetter)) {
+        if subject == nil, !isDistinctiveIdentifier(dead) {
             return "a literal without a subject must be a distinctive identifier (≥4 chars, contains a letter) — name the subject of bare values"
         }
         return nil
     }
+}
+
+/// Stenographer's `isDistinctiveIdentifier`: `value.length >= 4 && /[A-Za-z]/.test(value)`
+/// — UTF-16 code units, an ASCII letter.
+func isDistinctiveIdentifier(_ value: String) -> Bool {
+    value.utf16.count >= 4 && value.unicodeScalars.contains { ("A"..."Z").contains($0) || ("a"..."z").contains($0) }
+}
+
+// MARK: - Where an entry came from
+
+/// The TRANSITION line a reader read: an entry's status changed.
+public struct TruthTransition: Sendable, Equatable {
+    public let id: String
+    public let seq: Int
+    public let ts: String
+    public let author: String
+    /// The TB or UV whose status changed.
+    public let target: String
+    /// Its new status, as written (open string).
+    public let status: String
+    /// What caused the change: `kind` (open string) and the causing entry's id, or nil.
+    public let causeKind: String
+    public let causeRef: String?
+    /// 1-based line number (blank lines count).
+    public let line: Int
+    public let file: String?
+}
+
+/// A TRANSITION read but not applied, and why.
+public struct TruthHeldTransition: Sendable, Equatable {
+    public let line: Int
+    public let id: String
+    public let reason: String
+    public let file: String?
+}
+
+/// The line an entry was read from. An entry with a source serializes back
+/// to exactly `text`, never a rewrite.
+public struct TruthEntrySource: Sendable, Equatable {
+    /// 1 (stenographer 0.x) or 2.
+    public let version: Int
+    /// The line exactly as read.
+    public let text: String
+    /// 1-based line number (blank lines count).
+    public let line: Int
+    public let seq: Int?
+    public let hash: String?
+    /// The `status` the line itself states (an entry's status may have been folded from a later TRANSITION).
+    public let lineStatus: String?
+    public let file: String?
+    /// The TRANSITION that set the entry's current status, when one did.
+    public var transition: TruthTransition?
+}
+
+/// Why a reader will not take an entry as truth, whatever its status.
+public struct TruthInadmissible: Sendable, Equatable {
+    public enum Reason: String, Sendable, Equatable {
+        /// Two lines (or two files) give the id different content.
+        case conflict
+        /// A TB without a signer (a backfilled TB): never truth on its own.
+        case unsigned
+        /// No hash to check (a version 1 TB), or an identity the signer registry doesn't list.
+        case unverifiable
+    }
+
+    public let reason: Reason
+    public let detail: String
 }
 
 // MARK: - Entries
@@ -122,11 +293,19 @@ public struct TruthTbEntry: Sendable, Equatable {
     public let evidence: [TruthEvidence]
     /// The asserting author (distinct from `author` when an agent drafted and a human signed).
     public let signedBy: String?
-    public var status: TbStatus
+    /// The current status: the line's own, or the last TRANSITION's. nil
+    /// when the line states none — not current truth (fail closed).
+    public var status: TbStatus?
     /// Matchable dead literals (§12). Empty when the TB declares none.
     public let literals: [TruthTombstonedLiteral]
-    /// Opaque stenographer namespace (`x-steno`), preserved for round-tripping.
+    /// Opaque stenographer namespace (`x-steno`).
     public let xSteno: JSONValue?
+    /// Fields this version doesn't define, kept as written.
+    public var extra: [String: JSONValue]
+    /// The line this entry was read from (nil for an entry built in code).
+    public var source: TruthEntrySource?
+    /// Set when a reader will not take this entry as truth.
+    public var inadmissible: TruthInadmissible?
 
     public init(
         id: String,
@@ -135,9 +314,12 @@ public struct TruthTbEntry: Sendable, Equatable {
         claim: String,
         evidence: [TruthEvidence],
         signedBy: String?,
-        status: TbStatus,
+        status: TbStatus?,
         literals: [TruthTombstonedLiteral] = [],
-        xSteno: JSONValue? = nil
+        xSteno: JSONValue? = nil,
+        extra: [String: JSONValue] = [:],
+        source: TruthEntrySource? = nil,
+        inadmissible: TruthInadmissible? = nil
     ) {
         self.id = id
         self.ts = ts
@@ -148,6 +330,9 @@ public struct TruthTbEntry: Sendable, Equatable {
         self.status = status
         self.literals = literals
         self.xSteno = xSteno
+        self.extra = extra
+        self.source = source
+        self.inadmissible = inadmissible
     }
 }
 
@@ -161,10 +346,15 @@ public struct TruthUvEntry: Sendable, Equatable {
     /// Why the author believes it.
     public let basis: String
     public let verifyBy: TruthVerifyBy
-    /// Id of a TB this UV disputes — puts that TB into `contested`.
+    /// Id of a TB this UV disputes. While the UV is open it rides that TB,
+    /// whatever the TB's recorded status.
     public let contests: String?
-    public var status: UvStatus
+    /// The current status (see `TruthTbEntry.status`). nil: not current.
+    public var status: UvStatus?
     public let xSteno: JSONValue?
+    public var extra: [String: JSONValue]
+    public var source: TruthEntrySource?
+    public var inadmissible: TruthInadmissible?
 
     public init(
         id: String,
@@ -174,8 +364,11 @@ public struct TruthUvEntry: Sendable, Equatable {
         basis: String,
         verifyBy: TruthVerifyBy,
         contests: String?,
-        status: UvStatus,
-        xSteno: JSONValue? = nil
+        status: UvStatus?,
+        xSteno: JSONValue? = nil,
+        extra: [String: JSONValue] = [:],
+        source: TruthEntrySource? = nil,
+        inadmissible: TruthInadmissible? = nil
     ) {
         self.id = id
         self.ts = ts
@@ -186,6 +379,9 @@ public struct TruthUvEntry: Sendable, Equatable {
         self.contests = contests
         self.status = status
         self.xSteno = xSteno
+        self.extra = extra
+        self.source = source
+        self.inadmissible = inadmissible
     }
 }
 
@@ -197,6 +393,36 @@ public enum TruthLedgerEntry: Sendable, Equatable {
         switch self {
         case .tb(let entry): return entry.id
         case .uv(let entry): return entry.id
+        }
+    }
+
+    /// `TB` or `UV`.
+    public var type: String {
+        switch self {
+        case .tb: return "TB"
+        case .uv: return "UV"
+        }
+    }
+
+    /// The current status as written, or nil when there is none.
+    public var statusValue: String? {
+        switch self {
+        case .tb(let entry): return entry.status?.rawValue
+        case .uv(let entry): return entry.status?.rawValue
+        }
+    }
+
+    public var source: TruthEntrySource? {
+        switch self {
+        case .tb(let entry): return entry.source
+        case .uv(let entry): return entry.source
+        }
+    }
+
+    public var inadmissible: TruthInadmissible? {
+        switch self {
+        case .tb(let entry): return entry.inadmissible
+        case .uv(let entry): return entry.inadmissible
         }
     }
 }
@@ -211,7 +437,8 @@ public enum ConsumptionAction: Sendable, Equatable {
     case contested
     /// Open UV — flag, don't block. Never let it read as proven.
     case flag
-    /// Refuted UV / overridden TB / verified UV — history, never citable.
+    /// Refuted/verified/struck UV, overridden/struck TB, an unknown or
+    /// missing status, or an entry a reader won't admit — history, never citable.
     case history
 }
 
@@ -226,13 +453,13 @@ Consumption rules by confidence type:
 
 /// Current truth partitioned by consumption action.
 public struct TruthSelection: Sendable, Equatable {
-    /// Active TBs — ground truth.
+    /// Active TBs with no open contest — ground truth.
     public let groundTruth: [TruthTbEntry]
-    /// Contested TBs paired with their live contesting UVs — carry both.
+    /// Contested TBs (and current TBs with an open contest) paired with their open contesting UVs — carry both.
     public let contested: [(tombstone: TruthTbEntry, contestedBy: [TruthUvEntry])]
-    /// Open UVs — flagged, never presented as proven.
+    /// Open UVs — flagged, never presented as proven. Includes the ones riding a contested TB.
     public let unverified: [TruthUvEntry]
-    /// Overridden TBs, refuted/verified UVs — excluded from current truth.
+    /// Everything that is not current truth.
     public let history: [TruthLedgerEntry]
 
     public init(
@@ -247,6 +474,11 @@ public struct TruthSelection: Sendable, Equatable {
         self.history = history
     }
 
+    /// Ids of the open UVs that ride a contested TB in this selection.
+    public var attachedUvIds: Set<String> {
+        Set(contested.flatMap { $0.contestedBy.map(\.id) })
+    }
+
     public static func == (lhs: TruthSelection, rhs: TruthSelection) -> Bool {
         lhs.groundTruth == rhs.groundTruth
             && lhs.contested.count == rhs.contested.count
@@ -258,7 +490,7 @@ public struct TruthSelection: Sendable, Equatable {
     }
 }
 
-// MARK: - Authorship — no anonymous write path
+// MARK: - Errors
 
 public enum TruthError: Error, Equatable, CustomStringConvertible {
     case anonymousAuthor(String)
@@ -270,27 +502,8 @@ public enum TruthError: Error, Equatable, CustomStringConvertible {
             return "anonymous or generic identities cannot write toward the truth ledger "
                 + "(got \"\(identity)\") — use a registered human handle or agent identity"
         case .malformedLine(let line, let reason):
-            return "malformed ledger line \(line): \(reason)"
+            return line > 0 ? "malformed ledger line \(line): \(reason)" : reason
         }
-    }
-}
-
-/// Identities that cannot stand behind anything — mirrors stenographer's floor.
-private let anonymousIdentities: Set<String> = [
-    "", "system", "assistant", "agent", "ai", "bot", "anonymous",
-    "unknown", "user", "human", "admin", "null", "none", "me",
-]
-
-public func isAnonymousIdentity(_ identity: String) -> Bool {
-    anonymousIdentities.contains(
-        identity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    )
-}
-
-/// Throws unless `author` is a specific, accountable identity.
-public func assertAccountableAuthor(_ author: String) throws {
-    if isAnonymousIdentity(author) {
-        throw TruthError.anonymousAuthor(author)
     }
 }
 

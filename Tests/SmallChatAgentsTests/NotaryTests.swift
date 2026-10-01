@@ -127,6 +127,9 @@ struct NotaryInboxTests {
         #expect(request.url?.absoluteString == "http://127.0.0.1:8799/proposals/01PROP/notarize")
         #expect(request.value(forHTTPHeaderField: "X-Notary-Secret") == model.notarySecret)
         #expect(request.value(forHTTPHeaderField: "X-Notary-Secret") != model.channelSecret)
+        // Stenographer 1.0 REST needs its bearer token on every route
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(model.restToken)")
+        #expect(Set([model.restToken, model.notarySecret, model.channelSecret]).count == 3)
         #expect(model.pendingProposals.first?.state == .notarized(entryId: "TB-NEW"))
     }
 

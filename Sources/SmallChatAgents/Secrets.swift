@@ -10,27 +10,31 @@ import Security
 
 // MARK: - Secrets
 //
-// The messenger holds two secrets, and neither stands in for the other:
+// The messenger holds three secrets, and none stands in for another:
 //
 //   channel  stenographer → the app's objection-channel bridge
 //            (`X-Channel-Secret`; stenographer's SMALLCHAT_CHANNEL_SECRET)
-//   notary   the app → stenographer's notarize/dismiss routes
+//   notary   the app → stenographer's proposal, notarize and dismiss routes
 //            (`X-Notary-Secret`; stenographer's STENOGRAPHER_NOTARY_SECRET)
+//   rest     the app → every stenographer REST route
+//            (`Authorization: Bearer`; stenographer's STENOGRAPHER_REST_TOKEN)
 //
 // Anyone who can post objections must not be able to mint tombstones, so the
-// two are generated separately. Neither is written into messenger.json, which
+// three are generated separately. None is written into messenger.json, which
 // any agent can read with its Read tool: on macOS they live in the Keychain,
 // elsewhere in 0600 files in a 0700 directory.
 
 public enum MessengerSecret: String, Sendable, CaseIterable {
     case channel = "channel-secret"
     case notary = "notary-secret"
+    case restToken = "rest-token"
 
     /// The variable stenographer reads this secret from.
     public var environmentVariable: String {
         switch self {
         case .channel: return "SMALLCHAT_CHANNEL_SECRET"
         case .notary: return "STENOGRAPHER_NOTARY_SECRET"
+        case .restToken: return "STENOGRAPHER_REST_TOKEN"
         }
     }
 
@@ -38,6 +42,7 @@ public enum MessengerSecret: String, Sendable, CaseIterable {
         switch self {
         case .channel: return "objection channel secret"
         case .notary: return "notary secret"
+        case .restToken: return "stenographer REST token"
         }
     }
 }

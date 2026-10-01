@@ -42,7 +42,8 @@ public struct MessengerSettings: Sendable, Equatable, Codable {
     public var relayObjections: Bool
     /// Who you sign tombstones as (an accountable identity, not "system").
     public var signerIdentity: String
-    /// Wiki JSONL file new tombstones are appended to (nil: first configured file).
+    /// No longer read: tombstones go to stenographer as proposals, never to a
+    /// wiki file (one writer per file). Kept so older settings round-trip.
     public var tombstoneFile: String?
     /// Stenographer's REST port (`--rest-port`), where agent drafts are notarized.
     public var stenographerRestPort: Int

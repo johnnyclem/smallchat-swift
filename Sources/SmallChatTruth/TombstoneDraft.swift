@@ -2,18 +2,20 @@ import Foundation
 
 // MARK: - Authoring a tombstone
 //
-// A human who already knows a value is dead asserts it directly: a signed
-// TB with evidence and the literals an objection can cite. It's written as
-// an ordinary wiki JSONL line, which stenographer ingests through its
-// existing `import_wiki_entries` path (literals validated there too) and
-// which this app's own ledger reads immediately. No agent can take this
-// path: it requires an accountable signer.
+// A human who already knows a value is dead asserts it: a TB with evidence
+// and the literals an objection can cite. One writer per wiki file: a tool
+// that authors truth outside stenographer never appends to a file
+// stenographer exports (a full export would drop the line, and the file
+// would no longer be one writer's stream). The draft goes to stenographer
+// as a PROPOSAL envelope (`POST /proposals`), and the person notarizes it
+// there (`POST /proposals/:id/notarize`), which mints the TB under their
+// name. SmallChatAgents' NotaryClient sends both requests.
 
 public struct TombstoneDraft: Sendable, Equatable {
     public var claim: String
     public var evidence: [TruthEvidence]
     public var literals: [TruthTombstonedLiteral]
-    /// Who asserts it. Must be a specific person, not "system"/"assistant".
+    /// Who asserts it (the notary). Must be a specific person, not "system"/"assistant".
     public var signer: String
 
     public init(claim: String = "", evidence: [TruthEvidence] = [], literals: [TruthTombstonedLiteral] = [], signer: String = "") {
@@ -43,55 +45,49 @@ public struct TombstoneDraft: Sendable, Equatable {
             out.append("Sign it: set who you sign as.")
         } else if isAnonymousIdentity(who) {
             out.append("“\(who)” isn't an accountable identity — sign as a person.")
+        } else if let issue = identityIssue(who) {
+            out.append("“\(who)” can't sign: \(issue).")
         }
         return out
     }
 
-    /// The signed entry. Throws the first problem if the draft isn't ready.
-    public func sign(now: Date = Date()) throws -> TruthTbEntry {
+    /// The signer, trimmed.
+    public var notary: String {
+        signer.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The draft as a suite PROPOSAL envelope (`kind: "tb"`), drafted by
+    /// `author` for the signer to notarize — values trimmed, blank details
+    /// dropped. `author` must not be the signer: stenographer refuses a
+    /// notary who already stands behind the proposal (contempt of corpus).
+    /// Throws the first problem if the draft isn't ready.
+    public func proposal(
+        author: String,
+        source: String = "agent",
+        id: String = ulid(),
+        now: Date = Date()
+    ) throws -> TruthProposalEnvelope {
         if let first = problems().first { throw TruthError.malformedLine(line: 0, reason: first) }
-        let who = signer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if identityKey(author) == identityKey(notary) {
+            throw TruthError.malformedLine(line: 0, reason: "“\(notary)” can't both draft and notarize the tombstone — sign as a person")
+        }
         func clean(_ s: String?) -> String? {
             s.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
         }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return TruthTbEntry(
-            id: ulid(now: now),
-            ts: formatter.string(from: now),
-            author: who,
-            claim: claim.trimmingCharacters(in: .whitespacesAndNewlines),
-            evidence: evidence.map { TruthEvidence(kind: $0.kind, ref: $0.ref.trimmingCharacters(in: .whitespaces), detail: clean($0.detail)) },
-            signedBy: who,
-            status: .active,
-            literals: literals.map {
-                TruthTombstonedLiteral(dead: $0.dead.trimmingCharacters(in: .whitespaces), subject: clean($0.subject), current: clean($0.current))
-            }
+        return try TruthProposalEnvelope(
+            id: id,
+            ts: truthTimestamp(now),
+            author: author,
+            draft: .tb(
+                claim: claim.trimmingCharacters(in: .whitespacesAndNewlines),
+                evidence: evidence.map {
+                    TruthEvidence(kind: $0.kind, ref: $0.ref.trimmingCharacters(in: .whitespacesAndNewlines), detail: clean($0.detail))
+                },
+                literals: literals.map {
+                    TruthTombstonedLiteral(dead: ecmaScriptTrim($0.dead), subject: clean($0.subject).map(ecmaScriptTrim), current: clean($0.current).map(ecmaScriptTrim))
+                }
+            ),
+            signal: TruthProposalEnvelope.Signal(source: source, detail: "drafted in the smallchat messenger for \(notary) to notarize")
         )
-    }
-}
-
-extension TruthWiki {
-    /// Append entries to a wiki JSONL file (created if missing), keeping the
-    /// file newline-terminated so each entry stays on its own line.
-    public static func append(_ entries: [TruthLedgerEntry], toFileAt path: String) throws {
-        let lines = serialize(entries)
-        guard !lines.isEmpty else { return }
-        let fm = FileManager.default
-        let url = URL(fileURLWithPath: path)
-        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !fm.fileExists(atPath: path) {
-            try Data().write(to: url)
-        }
-        let handle = try FileHandle(forUpdating: url)
-        defer { try? handle.close() }
-        let size = try handle.seekToEnd()
-        var prefix = ""
-        if size > 0 {
-            try handle.seek(toOffset: size - 1)
-            if try handle.read(upToCount: 1) != Data("\n".utf8) { prefix = "\n" }
-            try handle.seekToEnd()
-        }
-        try handle.write(contentsOf: Data((prefix + lines.joined(separator: "\n") + "\n").utf8))
     }
 }

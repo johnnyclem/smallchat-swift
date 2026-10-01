@@ -8,6 +8,8 @@ struct TruthTests {
 
     // MARK: - Fixtures (shaped like stenographer's export_wiki_entries output)
 
+    // Version 1 lines (stenographer 0.x); `parseFixtures` chains them into a
+    // truth format v2 stream.
     private let tbLine = """
     {"id":"01JAAAAAAAAAAAAAAAAAAAAAA1","type":"TB","ts":"2026-09-18T10:00:00.000Z","author":"johnny","claim":"The REST fallback path is dead; all traffic goes through MCP.","evidence":[{"kind":"commit","ref":"abc1234","detail":"removed rest-fallback.ts"}],"signedBy":"johnny","status":"active","x-steno":{"origin":"local","provenance":{"kind":"commitSha","ref":"abc1234"},"agentSessionId":null,"links":[]}}
     """
@@ -16,8 +18,13 @@ struct TruthTests {
     {"id":"01JAAAAAAAAAAAAAAAAAAAAAA2","type":"UV","ts":"2026-09-18T11:00:00.000Z","author":"sam","assertion":"The embedder cache is safe to share across worker threads.","basis":"No crash observed in three weeks of soak testing.","verifyBy":{"kind":"command","value":"npm run test -- embedding"},"contests":null,"status":"open","x-steno":{"origin":"wiki","provenance":{"kind":"manual"},"agentSessionId":null,"links":[]}}
     """
 
+    /// The two fixture entries as a v2 stream: stenographer 1.0 writes them like this.
+    private var v2Lines: [String] {
+        chainTruthLines([tbLine, uvLine])
+    }
+
     private func parseFixtures() -> [TruthLedgerEntry] {
-        let result = TruthWiki.parse(lines: [tbLine, uvLine])
+        let result = TruthWiki.parse(lines: v2Lines)
         #expect(result.errors.isEmpty)
         return result.entries
     }
@@ -28,22 +35,25 @@ struct TruthTests {
 
     // MARK: - Round trip
 
-    @Test("JSONL round trip preserves every field including x-steno")
+    @Test("JSONL round trip writes every line back byte for byte, x-steno included")
     func roundTrip() throws {
         let entries = parseFixtures()
         #expect(entries.count == 2)
+        #expect(TruthWiki.serialize(entries) == v2Lines)
 
-        let reserialized = TruthWiki.serialize(entries)
-        #expect(reserialized.count == 2)
-        let tbRoundTrip = try asJSONObject(reserialized[0])
-        let uvRoundTrip = try asJSONObject(reserialized[1])
-        let tbOriginal = try asJSONObject(tbLine)
-        let uvOriginal = try asJSONObject(uvLine)
-        #expect(tbRoundTrip == tbOriginal)
-        #expect(uvRoundTrip == uvOriginal)
+        // An entry built in code is written in the v1 shape, with every field
+        let rebuilt = entries.map { entry -> TruthLedgerEntry in
+            switch entry {
+            case .tb(var tb): tb.source = nil; return .tb(tb)
+            case .uv(var uv): uv.source = nil; return .uv(uv)
+            }
+        }
+        let reserialized = TruthWiki.serialize(rebuilt)
+        #expect(try asJSONObject(reserialized[0]) == asJSONObject(tbLine))
+        #expect(try asJSONObject(reserialized[1]) == asJSONObject(uvLine))
     }
 
-    @Test("Later lines for the same id supersede earlier ones")
+    @Test("Version 1: later lines for the same id supersede earlier ones")
     func appendOnlySupersession() throws {
         let overridden = tbLine.replacingOccurrences(of: "\"status\":\"active\"", with: "\"status\":\"overridden\"")
         let result = TruthWiki.parse(lines: [tbLine, uvLine, overridden])
@@ -55,12 +65,17 @@ struct TruthTests {
         #expect(tb.status == .overridden)
     }
 
-    @Test("Per-line errors never poison the rest of the file")
+    @Test("Version 1: per-line errors never poison the rest of the file; a v2 stream is refused whole")
     func tolerantParsing() {
         let ruling = #"{"id":"x","type":"RULING","status":"active"}"#
         let result = TruthWiki.parse(lines: ["not json", "", tbLine, ruling, uvLine])
         #expect(result.entries.count == 2)
         #expect(result.errors.count == 2)
+        #expect(result.errors.map(\.line) == [1, 4], "blank lines count")
+
+        // A refused line could be the TRANSITION that struck a TB: nothing in the stream is truth
+        let stream = TruthWiki.parse(lines: [v2Lines[0], "not json", v2Lines[1]])
+        #expect(stream.refused && stream.entries.isEmpty)
     }
 
     // MARK: - Consumption rules (§7)
@@ -205,11 +220,19 @@ struct TruthTests {
         #expect(first.type == "PROPOSAL")
         #expect(first.kind == "uv")
         #expect(first.id.count == 26)
-        #expect(first.signal.source == "shorthand-compaction")
+        #expect(first.signal.source == "compaction-candidate")
 
         let lines = TruthProposals.serialize([first])
         #expect(lines.count == 1)
-        #expect(lines[0].contains("\"type\":\"PROPOSAL\""))
+        // A suite PROPOSAL envelope: a truth format v2 line, first of its stream
+        let decoded = try TruthFormat.decode(lines[0])
+        #expect(decoded.type == .proposal && decoded.seq == 1)
+        #expect(decoded.object["kind"] == .string("uv"))
+        #expect(TruthProposals.head(of: lines) == TruthStreamHead(seq: 1, hash: decoded.hash!))
+        // Appending continues the stream
+        let next = TruthProposals.serialize([try InvariantProposal(author: "johnny", draft: draft, targetRef: "entity:sess-1:cache")], after: TruthProposals.head(of: lines))
+        #expect(try TruthFormat.decode(next[0]).seq == 2)
+        #expect(TruthFormat.checkChain([decoded, try TruthFormat.decode(next[0])]).isEmpty)
 
         let second = try InvariantProposal(author: "johnny", draft: draft, targetRef: "entity:sess-1:database")
         let fresh = TruthProposals.deduplicate([second], againstExisting: lines)
@@ -259,8 +282,9 @@ struct LiteralValidationTests {
 
     @Test("a TB line with an invalid literal is rejected; the rest of the file still loads")
     func rejectsLine() {
-        let bad = #"{"id":"TB1","type":"TB","ts":"t","author":"a","claim":"c","evidence":[],"signedBy":"a","status":"active","literals":[{"dead":"30"}]}"#
-        let good = #"{"id":"TB2","type":"TB","ts":"t","author":"a","claim":"c","evidence":[],"signedBy":"a","status":"active","literals":[{"dead":"30","subject":"LOG_BUDGET"}]}"#
+        // Version 1 lines: a file without a chain keeps its per-line tolerance
+        let bad = #"{"id":"TB1","type":"TB","ts":"2026-09-18T10:00:00.000Z","author":"alice","claim":"c","evidence":[{"kind":"commit","ref":"x"}],"signedBy":"alice","status":"active","literals":[{"dead":"30"}]}"#
+        let good = #"{"id":"TB2","type":"TB","ts":"2026-09-18T10:00:00.000Z","author":"alice","claim":"c","evidence":[{"kind":"commit","ref":"x"}],"signedBy":"alice","status":"active","literals":[{"dead":"30","subject":"LOG_BUDGET"}]}"#
         let result = TruthWiki.parse(lines: [bad, good])
         #expect(result.entries.map(\.id) == ["TB2"])
         #expect(result.errors.count == 1)

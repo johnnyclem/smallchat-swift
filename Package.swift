@@ -159,6 +159,7 @@ let package = Package(
         .target(
             name: "SmallChatAgents",
             dependencies: [
+                "SmallChatCore",
                 "SmallChatTruth",
                 "SmallChatChannel",
                 "SmallChatTransport",
@@ -237,9 +238,22 @@ let package = Package(
         .testTarget(name: "SmallChatImportanceTests", dependencies: ["SmallChatImportance"]),
         .testTarget(name: "SmallChatCRDTTests", dependencies: ["SmallChatCRDT"]),
         .testTarget(name: "SmallChatCompactionTests", dependencies: ["SmallChatCompaction"]),
-        .testTarget(name: "SmallChatTruthTests", dependencies: ["SmallChatTruth", "SmallChatCompaction"]),
+        // Truth format v2 fixtures of stenographer's spec/truth-format (copied into
+        // Tests/Fixtures/truth-format by Scripts/sync-truth-fixtures.sh).
+        .testTarget(name: "SmallChatTruthTests", dependencies: ["SmallChatTruth", "SmallChatCompaction", "SmallChatCore"]),
         .testTarget(name: "SmallChatMemexTests", dependencies: ["SmallChatMemex", "SmallChatCore"]),
-        .testTarget(name: "SmallChatAgentsTests", dependencies: ["SmallChatAgents", "SmallChatTruth", "SmallChatChannel"]),
+        .testTarget(
+            name: "SmallChatAgentsTests",
+            dependencies: [
+                "SmallChatAgents",
+                "SmallChatTruth",
+                "SmallChatChannel",
+                "SmallChatCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
+        ),
         // Golden vectors and fixtures of @smallchat/core's spec/ (copied into
         // Tests/Fixtures/spec by Scripts/sync-spec.sh).
         .testTarget(

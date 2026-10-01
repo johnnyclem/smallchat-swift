@@ -102,7 +102,7 @@ struct ObjectionChannelSettings: View {
         } header: {
             Text("Objection channel")
         } footer: {
-            Text("Stenographer pushes each real-time objection here as it's raised (`--objections deliver --objection-channel`). It lands in the offending agent's chats and, if relaying is on, interrupts that live session so it can correct course. Tombstones agents draft arrive here too and wait for you to notarize them; with `--require-notary`, agents can't assert tombstones any other way. The app approves them with a separate notary secret. Both secrets stay in your Keychain: the copied command reads them when it runs and never contains them. Loopback only.")
+            Text("Stenographer pushes each real-time objection here as it's raised (`--objections deliver --objection-channel`). It lands in the offending agent's chats and, if relaying is on, interrupts that live session so it can correct course. Tombstones agents draft arrive here too and wait for you to notarize them; with `--require-notary`, agents can't assert tombstones any other way. The app approves them with a separate notary secret, and sends Stenographer's REST token with every call. All three secrets stay in your Keychain: the copied command reads them when it runs and never contains them. Loopback only.")
         }
         .onAppear {
             port = String(model.settings.objectionChannelPort)
