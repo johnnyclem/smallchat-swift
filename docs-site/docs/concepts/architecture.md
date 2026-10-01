@@ -15,11 +15,10 @@ smallchat does the same thing — but with natural language intents instead of c
 
 ```
 User intent "find recent docs"
-  → Canonicalize: "find:recent:docs"
-  → Embed: [0.23, 0.15, ..., 0.89] (384 dims)
-  → Vector search: cosine similarity > 0.75
-  → Overload resolution: strict type matching
-  → Dispatch to best match
+  → Embed the intent: [0.23, 0.15, ..., 0.89] (384 dims)
+  → Vector search: the 5 nearest tool selectors at or above 0.60
+  → Overloads (by argument types), tier, verification, dispatch policy
+  → resolved: run exactly that tool; otherwise ask the caller to choose
 ```
 
 ## Runtime Mapping
@@ -29,9 +28,9 @@ User intent "find recent docs"
 | Class | `ToolClass` | Groups related tools |
 | Selector | `ToolSelector` | Semantic identifier with embedded vector |
 | IMP (method pointer) | `ToolIMP` protocol | Tool implementation |
-| `objc_msgSend` | `DispatchContext.resolveToolIMP()` | Hot-path dispatch |
+| `objc_msgSend` | `resolve` + `dispatchById` | Resolution (runs nothing), then exactly one call |
 | Method cache | `ResolutionCache` | LRU cache, version-aware |
-| ISA chain | Superclass traversal | Fallback resolution |
+| ISA chain | Superclass traversal | Method lookup for a matched selector |
 | Category | Provider extensions via `loadCategory()` | Extend existing classes |
 | Method swizzling | `runtime.swizzle()` | Hot-reload, testing |
 
@@ -99,28 +98,25 @@ MCP Manifests / OpenAPI Specs
 Natural Language Intent
         │
         ▼
-   Canonicalize → "find:recent:docs"
-        │
+   Pinned phrase? (whole-phrase match)
+        │ no
         ▼
-   Embed → [0.23, 0.15, ..., 0.89]
-        │
-        ▼
-   Intent Pin Check (fast path)
+   Cache Lookup (intent dispatch; keyed by intentKey)
         │ miss
         ▼
-   Cache Lookup
-        │ miss
-        ▼
-   Vector Index Search (top 5, threshold 0.75)
+   Embed → [0.23, 0.15, ..., 0.89]  (never interned)
         │
         ▼
-   Overload Resolution (type matching)
+   Vector Index Search (top 5, at or above 0.60)
         │
         ▼
-   ISA Chain Traversal (if needed)
+   Overloads, protocol conformance, pin gate
         │
         ▼
-   Execute ToolIMP
+   Tier → verification (below HIGH) → dispatch policy
+        │ resolved                 └─ otherwise: needs-disambiguation / unresolved
+        ▼
+   dispatchById: validate arguments, call digest, execute ToolIMP
         │
         ▼
    ToolResult
@@ -129,7 +125,7 @@ Natural Language Intent
 ## Key Design Decisions
 
 ### Hash-Based Embedder
-The default `LocalEmbedder` uses FNV-1a hashing with trigram decomposition instead of a neural model. This is deterministic, fast, and sufficient for development and testing. Production deployments can swap in a real embedding model by conforming to the `Embedder` protocol.
+The default `LocalEmbedder` uses FNV-1a hashing with trigram decomposition instead of a neural model. It always gives the same vector for the same text (the same as @smallchat/core's hash embedder), is fast, and is meant for development and testing. Production deployments can swap in a real embedding model by conforming to the `Embedder` protocol.
 
 ### In-Memory Vector Index
 `MemoryVectorIndex` uses brute-force cosine similarity search, suitable for up to ~10,000 tools. For larger deployments, implement the `VectorIndex` protocol with an approximate nearest neighbor library.

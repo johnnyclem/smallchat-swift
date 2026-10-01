@@ -31,8 +31,8 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   `serverInfo.version` was `0.6.0`, the channel server's was `0.3.0`, and the
   MCP clients sent `clientInfo.version` `0.1.0`, the REPL banner said `0.5.0`,
   and `smallchat --version` and the `version` field of generated configs,
-  toolkit files and knowledge bases said `0.6.0`. The compiled-artifact format version (`ARTIFACT_FORMAT_VERSION`)
-  is unchanged.
+  toolkit files and knowledge bases said `0.6.0`. The compiled-artifact format version
+  (`ARTIFACT_FORMAT_VERSION`) is separate; it is now `1.0` (see below).
 - **Linux uses real SHA-256 for audit-log HMACs and Dream artifact hashes.**
   Without CryptoKit, `AuditLog` fell back to an FNV hash and Dream's artifact
   versioning to djb2. Both now use swift-crypto's `HMAC<SHA256>`/`SHA256`, the
@@ -84,11 +84,10 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   `isError` result. Results are MCP `CallToolResult`s (`content`,
   `structuredContent` for JSON objects, `isError`, `_meta["dev.smallchat/toolId"]`)
   instead of `{invocationId, status, result}`. Tool names no longer go through
-  semantic resolution: that is the opt-in `smallchat_dispatch` meta-tool
-  (`MCPServerConfig.semanticDispatch`, `serve --semantic-dispatch`).
-  `MCPRouter.setRefinementHandler` is replaced by `setToolExecutor(_:)` and
-  `setSemanticDispatchHandler(_:)`; `MCPRouter.init` no longer takes an
-  `SSEBroker`.
+  semantic resolution: the read-only `smallchat_resolve` meta-tool proposes a tool
+  for an intent (see below). `MCPRouter.setRefinementHandler` is replaced by
+  `setToolExecutor(_:)` and `setResolveHandler(_:)`; `MCPRouter.init` no longer
+  takes an `SSEBroker`.
 - **OAuth is removed; `--auth` means a bearer token.** `OAuthManager`, `OAuthToken`,
   `OAuthClient`, `MCPScope`, `PermissionsConfig` and `MCPServerConfig.enableAuth`
   are gone. Nothing could register a client from the CLI, so `serve --auth`
@@ -171,9 +170,141 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   longer takes `restBase`. `NotaryClient.notarizeURL(restBase:proposalId:)` returns
   nil for an id other than letters, digits, `-` and `_`
   (`NotaryClient.isValidProposalId(_:)`); such proposals are not queued.
+- **Dispatch follows @smallchat/core 1.0: resolving and running are separate.**
+  `resolve(_:options:)` (on `ToolRuntime` and `DispatchContext`; also
+  `resolveIntent(context:intent:options:)`) returns a `Resolution` and runs nothing:
+  outcome `resolved`, `needs-disambiguation`, `unresolved` or `throttled`, the tier,
+  the chosen canonical tool id (`<providerId>/<toolName>`, see `makeToolId`), the
+  ranked candidates and a `ResolutionProof`. `dispatchById(_:args:options:)`
+  validates the arguments and runs exactly the named tool.
+  `dispatch(_:args:options:)` by intent resolves (with the cache) and then runs the
+  chosen tool through `dispatchById`; when resolution does not settle on one tool,
+  nothing runs and the result is `isError` with `metadata["outcome"]` and a
+  `ToolRefinement` whose near matches carry tool ids (`DispatchOutcomeCode`,
+  `DispatchMetadataKey`). `tieredDispatch`, `TieredDispatchResult`,
+  `StrictAmbiguityError`, `DispatchContext.forward` and the fallback chain types
+  (`FallbackStep`, `FallbackStrategy`, `FallbackResult`, `FallbackChainResult`) are
+  removed: no broadened search or forwarding step runs a tool the intent did not
+  resolve to. `DispatchBuilder.execContent()` throws the new `DispatchError`
+  for an `isError` result instead of returning the error payload.
+- **One dispatch policy on every path** (`evaluateDispatchPolicy`,
+  `DispatchPolicyOptions`): pinned phrases, cache hits, vector and overload matches,
+  protocol conformance and decomposed sub-intents are all judged by it, and a denial
+  is needs-disambiguation, never a fallback. Below HIGH (MEDIUM, LOW) a tool runs
+  only after an LLM verifier approves it (`DispatchConfig.requireLLMForSubHighDispatch`,
+  default on; `LLMClient.providesVerification`, false for `NoOpLLMClient`), so with
+  no LLM client a MEDIUM or LOW match is never run by intent. A destructive tool
+  (`ToolIMP.annotations`, `isDestructive`) runs by intent only from a pinned phrase
+  or an EXACT similarity computed from the intent's own embedding.
+  `DispatchConfig.strict` verifies below EXACT and raises the candidate floor to
+  MEDIUM. `ToolIMP` has a new `annotations` requirement (default `nil`), and
+  `ToolProxy.init` takes `annotations:`.
+- **Tier thresholds and ranking match @smallchat/core 1.0.** `DispatchConfig` holds
+  `thresholds: TierThresholds` (EXACT 0.95, HIGH 0.85, MEDIUM 0.75, LOW 0.60;
+  `exactThreshold`… are computed from it), `strict`,
+  `requireLLMForSubHighDispatch`, `treatUnannotatedAsDestructive`,
+  `maxDecompositionDepth` and `maxSubDispatches`. `vectorSearchThreshold`,
+  `ambiguityGap`, `enableVerification`, `enableDecomposition`, `enableRefinement` and
+  the `runnerUp:` parameter of `tier(for:)` are removed, and with them the Swift-only
+  downgrade of a match whose runner-up was close. Scores are quantized to 1e-4
+  (`quantizeScore`) and ties ordered by tool id (`rankedBefore`).
+- **Intents are never interned and identity keys are exact.** `SelectorTable.resolve`
+  returns a selector with the intent's own vector and no longer keeps an intent
+  cache (`cachedIntentCount` is gone); `SelectorTable.init` no longer takes a rate
+  limiter. `canonicalize` is display-only and follows 1.0 (punctuation deleted, the
+  32-token cap `maxCanonicalTokens` removed); the resolution cache is keyed by
+  `intentKey(_:)`, and intent pins compare whole phrases with
+  `normalizePinPhrase(_:)` (`IntentPinRegistry.checkExact` takes the raw intent, so
+  "do not transfer funds" no longer matches a pin on "transfer funds").
+- **The semantic rate limiter is opt-in and per principal.** It runs only when
+  `RuntimeOptions.rateLimiter` is set, keeps a window per principal
+  (`ResolveOptions.principal`, `DispatchOptions.principal`), and a refusal is the
+  `throttled` outcome with `retryAfterMs` instead of an error.
+  `ResolutionCache.rateLimiter` is removed, and `SemanticRateLimiter`'s
+  `check`/`record`/`checkSimilarity`/`getMetrics`/`reset` take a principal.
+- **`ResolutionProof` is the 1.0 proof** (`version`, `intent`, `outcome`,
+  `decision`, `tier`, `chosen`, `confidence`, `ran`, `callDigest`,
+  `resolutionDigest`, `candidates`, `thresholds`, `guards`, `embedder`,
+  `artifactHash`, `steps`, `timings`, `proofDigest`) instead of a list of
+  `ResolutionStep`s; `proofDigest` is a SHA-256 over everything but `timings`.
+  `ResolutionStep` is removed and `finalTier` is deprecated (use `tier`).
+  `verifyCandidate` is replaced by `verify(_:intent:args:llm:options:)` returning a
+  `VerificationResult`, and `LLMClient` has a `providesVerification` requirement
+  (default true).
+- **Every call is validated against the tool's `inputSchema` before it runs.**
+  `dispatchById`, intent dispatch and MCP `tools/call` refuse arguments that fail
+  the schema (outcome `invalid-arguments` with `ValidationError`s; nothing runs). The
+  validator (`JSONSchemaValidator`) supports drafts 2020-12, 2019-09 and 07 and
+  refuses, rather than ignores, a schema it cannot evaluate (`unevaluated*`,
+  `$dynamicRef`, remote `$ref`, unknown `$schema`), so a tool with such a schema
+  cannot be called. `JSONSchemaType` now keeps every keyword it decodes
+  (`keywords`, `init(json:)`, `jsonValue`); a schema without `type` decodes with
+  `type == ""`.
+- **The MCP meta-tool is the read-only `smallchat_resolve`.** It proposes a tool
+  (name, tool id, tier, candidates, proof digest) and never runs anything; it is
+  listed by default when a runtime is wired. The executing `smallchat_dispatch`,
+  `MCPSemanticDispatchTool`, `MCPSemanticDispatchHandler`,
+  `MCPRouter.setSemanticDispatchHandler(_:)`, `MCPServerConfig.semanticDispatch` and
+  `serve --semantic-dispatch` are removed; use `MCPResolveTool`,
+  `setResolveHandler(_:)`, `MCPServerConfig.resolveTool`,
+  `MCPServer.setRuntime(_:resolveTool:)` and `serve --no-resolve-tool`. `tools/call`
+  runs tools through `ToolRuntime.dispatchById`, and its results carry
+  `_meta["dev.smallchat/resolution"]`. Aggregate names `<providerId>__<toolName>`
+  are used only for provider ids made of `[A-Za-z0-9_-]` without `__` or a trailing
+  `_` and names of at most 128 characters (`mcpAggregateName`).
+- **Artifacts are format 1.0** (`ARTIFACT_FORMAT_VERSION` is `"1.0"` and lives in
+  `SmallChatCore`). `compile`, `setup`, the app and Dream write the
+  @smallchat/core 1.0 format (`ArtifactV1`: providers with launch specs, tools,
+  selectors, collisions, duplicates, the embedder fingerprint and a content hash),
+  and every loader reads only 1.0: the file is validated against
+  spec/artifact's schema and rules, its content hash is recomputed, and a runtime
+  refuses an artifact whose embedder fingerprint differs from its embedder's
+  (`EmbedderMismatchError`). A 0.x artifact is refused (`ArtifactVersionError`);
+  recompile it. `SerializedArtifact`, `ArtifactStats`, `SelectorData`,
+  `DispatchEntry`, `ArtifactIO` and `buildArtifact` are removed; `MCPToolkit`,
+  `MCPToolCatalog`, `buildToolList` and `setArtifact` take an `ArtifactV1`.
+  `Embedder` has a `fingerprint` requirement (default `nil`; `LocalEmbedder`
+  declares `hash`/`smallchat-hash-v1`).
+- **The compiler never merges tools.** Each tool keeps its own selector; two
+  distinct tools at or above `CompilerOptions.duplicateThreshold` (0.95, was
+  `deduplicationThreshold`) are a `DuplicateToolError` unless `allowDuplicates`
+  (`compile --allow-duplicates`; `--deduplication-threshold` is now
+  `--duplicate-threshold`). Two tools claiming one selector, alias phrase or tool id
+  are a `SelectorConflictError`. Aliases are selectors of their own
+  (`<canonical>~alias~<alias>`) instead of text appended to the embedding, and a
+  tool's embedding text is `<name>: <description>` plus its selector hint, so
+  vectors differ from 0.6 artifacts. `mergedCount` is always 0.
+- **`LocalEmbedder` normalizes in double precision** and `MemoryVectorIndex`
+  computes cosine similarity in double precision with ties ordered by id, as
+  @smallchat/core does, so vector components and scores can differ from 0.6 in
+  the last float32 bit.
+- **CLI output follows the new runtime.** `resolve` prints the outcome, decision,
+  tool id, candidates and proof digest (`--json` prints the proof) and drops
+  `--top-k` and `--threshold`; `repl`, `inspect` and `docs` read format 1.0.
 
 ### Fixed
 
+- **Repeating an intent can't run a tool the first call refused (SC-SW-04).** The
+  0.6 resolution cache was consulted before tier checks, verification and strict
+  mode, so the second dispatch of an intent ran the tool the first one had declined
+  to run, in strict mode too. The cache now holds only resolutions the policy
+  allowed (never pinned or destructive tools), every hit is judged again by the
+  policy, and strict mode ignores cached resolutions below EXACT.
+- **Canonical forms, tiers and pins agree with @smallchat/core (SC-SW-15).** 0.6
+  split words at punctuation (`"search_code"` → `search:code`, `"don't"` →
+  `don:t`) where TypeScript deletes it, used thresholds of 0.98/0.85/0.70/0.55 (so
+  0.96 was HIGH in Swift and EXACT in TypeScript), and compared `exact` pins by
+  canonical form, which drops "not": `"do not transfer funds"` matched a pin on
+  `"transfer funds"`. Canonicalization, `intentKey`, pin phrases, thresholds,
+  quantization and tie-breaks now follow the TypeScript rules, and the
+  `spec/resolve` vectors check the outcomes.
+- **Strict mode does what it says (SC-SW-25).** 0.6's strict mode ran a MEDIUM
+  match without asking anyone (its docs said it returned `StrictAmbiguityError`
+  below HIGH), and keyword verification found no words in `snake_case` tool names,
+  so `delete_records` shared nothing with "delete production records". Strict mode
+  now verifies every match below EXACT and considers nothing below MEDIUM, a
+  MEDIUM or LOW match needs an LLM verifier's approval in every mode, and keyword
+  overlap splits names on any non-alphanumeric character, as TypeScript does.
 - **Builds with Swift 6.2+ (Xcode 26, and Swift 6.3/6.4 on Linux).** `HTTPTransport`,
   `LocalTransport`, `MCPSSETransport`, `MCPStdioTransport` and `RtkTransport`
   each bumped a nonisolated `static var counter` to mint their ids, which newer
@@ -220,11 +351,12 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
 - **`smallchat serve` runs tools.** It never wired a runtime, and the compiler's
   `ToolProxy` faked execution anyway. `serve` (and `MCPServer.start()` with a
   `sourcePath`) now loads manifests or an artifact with `MCPToolkit`, whose
-  `EndpointToolIMP`s call each provider's manifest `endpoint`: MCP servers over
-  Streamable HTTP, REST APIs as `POST <endpoint>/<tool>`. `compile` and
-  `buildArtifact` record each tool's description, input schema and provider
-  endpoint (schemas used to be looked up by tool name alone, so two providers
-  sharing a tool name got the same schema).
+  `EndpointToolIMP`s call each provider's remote endpoint (its manifest `endpoint`,
+  or the artifact's `launch.url`): MCP servers over Streamable HTTP, REST APIs as
+  `POST <endpoint>/<tool>`. A provider launched over stdio is listed, and its
+  tools fail when called. Artifacts record each tool's description, input schema
+  and annotations, and each provider's launch spec (schemas used to be looked up
+  by tool name alone, so two providers sharing a tool name got the same schema).
 - **The MCP perimeter matches TypeScript #85.** Rate limiting is keyed by the
   client's address (it used the client-chosen `Mcp-Session-Id`, so a fresh id per
   request was never throttled); sessions are validated; `maxConnections` is
@@ -338,9 +470,26 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
 
 ### Added
 
-- **`MCPToolkit`, `EndpointToolIMP`, `MCPToolCatalog`** and `MCPServer.setRuntime(_:semanticDispatch:)`,
+- **@smallchat/core's conformance vectors run in `swift test`.**
+  `Scripts/sync-spec.sh <smallchat checkout>` copies its `spec/` into
+  `Tests/Fixtures/spec` (recording the commit in `SOURCE`) and regenerates the
+  artifact schema; the `SmallChatConformanceTests` target runs every canonical
+  JSON, call digest, tool id, ranking and resolve vector and every artifact fixture.
+- **Canonical call digests** (`callDigest(toolId:arguments:)`, `canonicalJSON`
+  (RFC 8785), `domainDigest`, `sha256Hex`): a dispatch result's
+  `metadata["callDigest"]` and its proof's `callDigest` are the same SHA-256 as
+  @smallchat/core computes for the same tool id and arguments.
+- **`JSONSchemaValidator`**, `ToolAnnotations`, `EmbedderFingerprint`,
+  `ArtifactV1` (`read`, `parse`, `validate`, `build`, `write`,
+  `assertEmbedder`), `builtinEmbedder(for:)`, `MCPToolkit.make(artifact:…)`,
+  `ProviderManifest.launch` / `LaunchSpec`, and `ToolDefinition` `title`,
+  `outputSchema`, `annotations` and `uiResourceUri` (carried into artifacts and
+  `tools/list`).
+- `smallchat compile --dims` (hash embedder dimensions) and `smallchat resolve --json`.
+
+- **`MCPToolkit`, `EndpointToolIMP`, `MCPToolCatalog`** and `MCPServer.setRuntime(_:resolveTool:)`,
   `setToolExecutor(_:)`, `setArtifact(_:)` and `boundPort` (start on port 0 and read
-  the port). `serve` gains `--provider`, `--semantic-dispatch`, `--auth-token-file`
+  the port). `serve` gains `--provider`, `--no-resolve-tool`, `--auth-token-file`
   and `--max-connections`.
 
 - **CI on every supported platform.** Besides macOS 15 (Xcode 16.4, Swift
@@ -450,9 +599,10 @@ digits of stored vectors may differ — the one documented exception).
   `ToInt32`. Verified against the verbatim JS algorithm across ASCII, non-ASCII,
   trigram, overflow, and empty inputs (max component diff ~6e-08). Added
   `LocalEmbedderParityTests` with golden vectors.
-- **Compiled artifact now emits format version `0.5.0`** (`ARTIFACT_FORMAT_VERSION`)
-  to match the TS artifact ABI, replacing the previous hardcoded `0.1.0`. Loading
-  remains version-agnostic, so older 0.1.0/0.3.0 artifacts still decode.
+- **Compiled artifact emitted format version `0.5.0`** (`ARTIFACT_FORMAT_VERSION`)
+  to match the TS artifact ABI of the time, replacing the previous hardcoded
+  `0.1.0`. Superseded before release by artifact format 1.0 (see Breaking), which
+  refuses 0.x artifacts.
 
 ### Added (cross-platform build)
 

@@ -72,62 +72,60 @@ Extracts `ToolDefinition` objects from input manifests. Supports:
 ### Phase 2: EMBED
 
 For each tool definition:
-1. Generates a canonical selector from the tool name and description
-2. Creates a 384-dimensional vector embedding
-3. Interns the selector in the `SelectorTable` (deduplicating near-duplicates)
-4. Detects potential merges — tools from different providers that should share a selector
+1. Picks its selector canonical: `<providerId>.<name>`, or the tool's `pinSelector`
+   hint, or `<namespace>.<name>` when the provider sets a namespace.
+2. Embeds `<name>: <description>`, plus the tool's `selectorHint` (or the provider's
+   `semanticContext`), as the selector's vector.
+3. Registers the selector under that exact canonical. Tools are never merged: two
+   distinct tools always get two selectors.
+4. Gives each alias its own selector, `<canonical>~alias~<alias_with_underscores>`,
+   embedding the alias text.
 
 ### Phase 3: LINK
 
-Builds the dispatch infrastructure:
-1. Creates `ToolClass` instances and dispatch tables
-2. Detects selector collisions (different tools mapping to the same selector unintentionally)
-3. Validates no shadowing of protected namespaces
-4. Builds overload tables for tools sharing a selector
+1. Builds dispatch tables (alias selectors reach the same tool).
+2. Duplicate detection: two distinct tools whose selectors embed at cosine similarity
+   >= `duplicateThreshold` (0.95) fail the compile with `DuplicateToolError`, unless
+   `allowDuplicates`.
+3. Collision reports: selector pairs between 0.75 and the duplicate threshold are
+   listed with a hint (not errors; `compile --strict` makes them errors).
+4. Overload tables when semantic overloads are on.
+
+Two tools claiming one selector, one alias phrase, or one tool name fail with
+`SelectorConflictError`.
 
 ### Phase 4: OUTPUT
 
-Serializes the compiled artifact to JSON:
-- Embedded vectors for all selectors
-- Dispatch table mappings
-- Provider metadata
-- Version stamps for cache invalidation
+`ArtifactV1.build(result:manifests:embedder:)` writes artifact format 1.0 (below).
 
 ## Compiler Options
 
 ```swift
 let options = CompilerOptions(
-    // Minimum cosine similarity to merge two selectors
-    deduplicationThreshold: 0.95,
+    // Similarity above which distinct tools are reported as colliding
+    collisionThreshold: 0.89,
 
-    // Minimum similarity to flag a potential collision
-    collisionThreshold: 0.85,
+    // Distinct tools at or above this similarity are duplicates (a compile error)
+    duplicateThreshold: 0.95,
 
-    // Whether to auto-generate semantic overloads
-    generateSemanticOverloads: true,
+    // Keep duplicates (listed in result.duplicates) instead of failing
+    allowDuplicates: false,
 
-    // Maximum tools per provider (for sanity checking)
-    maxToolsPerProvider: 500
+    // Group semantically similar tools as overloads of one selector
+    generateSemanticOverloads: false
 )
 ```
 
-## Building Classes from Results
-
-After compilation, convert the result into runtime-ready tool classes:
+## Running a compiled toolkit
 
 ```swift
-let result = try await compiler.compile(manifests)
-let classes = compiler.buildClasses(result)
-
-let runtime = ToolRuntime(
-    vectorIndex: MemoryVectorIndex(),
-    embedder: LocalEmbedder()
-)
-
-for toolClass in classes {
-    try await runtime.registerClass(toolClass)
-}
+let artifact = try ArtifactV1.build(result: result, manifests: manifests, embedder: embedder.fingerprint!)
+let toolkit = try await MCPToolkit.make(artifact: artifact)   // or MCPToolkit.load(source:)
+let resolution = try await toolkit.runtime.resolve("read a file")
 ```
+
+`MCPToolkit` refuses an artifact whose embedder fingerprint differs from its
+embedder's (`EmbedderMismatchError`).
 
 ## Semantic Overload Generation
 
@@ -159,25 +157,33 @@ swift run smallchat docs tools.toolkit.json
 
 ## Artifact Format
 
-The compiled artifact is a JSON file containing:
+The compiled artifact is @smallchat/core's format 1.0 (`spec/artifact` in that
+repository, copied to `Tests/Fixtures/spec/artifact`), so the TypeScript and Swift
+runtimes read each other's artifacts when they use the same embedder:
 
 ```json
 {
-  "version": "0.3.0",
-  "compiled_at": "2025-01-15T10:30:00Z",
-  "providers": [...],
-  "selectors": {
-    "search:files": {
-      "vector": [0.23, 0.15, ...],
-      "canonical": "search:files",
-      "arity": 2,
-      "dispatch": {
-        "provider": "my-tools",
-        "tool": "search_files"
-      }
-    }
+  "formatVersion": "1.0",
+  "embedder": { "kind": "hash", "model": "smallchat-hash-v1", "modelSha256": null,
+                "dims": 384, "maxLength": null, "pooling": "none", "normalize": true },
+  "providers": {
+    "notes": { "id": "notes", "name": "Notes", "transportType": "mcp",
+               "launch": { "transport": "stdio", "command": "notes-mcp", "args": ["--stdio"], "env": ["NOTES_TOKEN"] } }
   },
-  "dispatch_tables": {...},
-  "metadata": {...}
+  "tools": {
+    "notes/create_note": { "id": "notes/create_note", "providerId": "notes", "name": "create_note",
+                           "description": "...", "inputSchema": { ... }, "annotations": { ... }, ... }
+  },
+  "selectors": {
+    "notes.create_note": { "canonical": "notes.create_note", "toolId": "notes/create_note", "kind": "tool", "vector": [ ... ] },
+    "notes.create_note~alias~jot_something_down": { "kind": "alias", ... }
+  },
+  "collisions": [ ... ],
+  "duplicates": [],
+  "stats": { "toolCount": 2, "selectorCount": 3, "providerCount": 1, "collisionCount": 1, "duplicateCount": 0 },
+  "contentHash": "<sha256>"
 }
 ```
+
+Loading validates the file against the schema and the format's rules, recomputes
+`contentHash`, and refuses a 0.x artifact (`ArtifactVersionError`): recompile it.

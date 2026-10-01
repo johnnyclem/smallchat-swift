@@ -9,7 +9,7 @@ title: Introduction
 
 Your agent has 50 tools. The LLM sees all 50 in its context window every single turn, burning tokens and degrading selection accuracy. You write routing logic, maintain tool registries, and pray the model picks the right one.
 
-**smallchat compiles your tools into a dispatch table.** The LLM expresses intent. The runtime resolves it — semantically, deterministically, in microseconds. No prompt stuffing. No selection lottery.
+**smallchat compiles your tools into a dispatch table.** The LLM expresses intent. The runtime resolves it to at most one tool, by embedding similarity, and runs that tool only when its dispatch policy allows; otherwise it asks. No prompt stuffing. No selection lottery.
 
 This is the **native Swift implementation** of [smallchat](https://github.com/johnnyclem/smallchat) — same architecture, same semantics, built for Apple platforms with Swift concurrency, actors, and the Swift type system.
 
@@ -26,12 +26,13 @@ This is the **native Swift implementation** of [smallchat](https://github.com/jo
 ```swift
 import SmallChat
 
-let runtime = ToolRuntime(
-    vectorIndex: MemoryVectorIndex(),
-    embedder: LocalEmbedder()
-)
+let runtime = try await MCPToolkit.load(source: "tools.toolkit.json").runtime
 
-// Dispatch by intent
+// Which tool does this intent mean? (nothing runs)
+let resolution = try await runtime.resolve("find flights")
+
+// Run exactly one tool by id, or resolve and run by intent
+let byId = try await runtime.dispatchById("flights/search_flights", args: ["to": "NYC"])
 let result = try await runtime.dispatch("find flights", args: ["to": "NYC"])
 
 // Fluent API
@@ -41,7 +42,7 @@ let content = try await runtime
     .exec()
 
 // Stream token-by-token
-for try await token in runtime.inferenceStream("find flights", args: ["to": "NYC"]) {
+for try await token in await runtime.inferenceStream("find flights", args: ["to": "NYC"]) {
     print(token, terminator: "")
 }
 ```

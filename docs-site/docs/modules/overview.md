@@ -18,7 +18,7 @@ SmallChat (umbrella)
 │   ├── ToolClass              Dispatch tables, overloads, ISA chain
 │   ├── Canonicalize           Intent → canonical selector
 │   ├── ResolutionCache        LRU cache, version-aware
-│   ├── SelectorTable          Selector interning
+│   ├── SelectorTable          Compiled tool selectors
 │   ├── OverloadTable          C++-style overload resolution
 │   ├── SelectorNamespace      Core selector protection
 │   ├── IntentPinRegistry      Semantic collision prevention

@@ -70,17 +70,33 @@ Requests without a session get `400`; unknown or expired sessions get `404`. JSO
   "content": [{ "type": "text", "text": "{\"id\":7}" }],
   "structuredContent": { "id": 7 },
   "isError": false,
-  "_meta": { "dev.smallchat/toolId": "github/create_issue" }
+  "_meta": {
+    "dev.smallchat/toolId": "github/create_issue",
+    "dev.smallchat/resolution": { "toolId": "github/create_issue", "ran": "github/create_issue", "outcome": "resolved", "decision": "exact-id", "tier": "exact", "callDigest": "…", "proofDigest": "…", "artifactHash": "…" }
+  }
 }
 ```
 
-A tool that fails returns `isError: true` with the reason as text.
+Arguments are validated against the tool's `inputSchema` before it runs; a call that
+fails validation, or a tool that fails, returns `isError: true` with the reason as
+text.
 
-Where a tool runs: `MCPToolkit` builds a runtime whose tools call their provider manifest's `endpoint` (an MCP Streamable HTTP URL for `transportType: "mcp"`, whose result is passed through; a base URL for `"rest"`, called as `POST <endpoint>/<tool>`). Tools whose provider declares no endpoint are listed but fail when called.
+Where a tool runs: `MCPToolkit` builds a runtime whose tools call their provider's
+remote endpoint (the manifest's `endpoint`, or the artifact's `launch.url`): an MCP
+Streamable HTTP URL for `transportType: "mcp"`, whose result is passed through, or a
+base URL for `"rest"`, called as `POST <endpoint>/<tool>`. Tools whose provider has no
+remote endpoint (none, or a stdio launch command, which `serve` does not start) are
+listed but fail when called.
 
-### Semantic dispatch
+### Resolving an intent: `smallchat_resolve`
 
-Semantic intent resolution is not used on `tools/call`. To expose it, enable the `smallchat_dispatch` meta-tool (`semanticDispatch: true`, CLI `--semantic-dispatch`). It takes `{"intent": "...", "arguments": {...}}`, resolves the intent through the tiered dispatch pipeline, and runs the resolved tool only at a confident tier; otherwise it returns a refinement or sub-intents and runs nothing.
+Semantic resolution is never used on `tools/call`. The read-only `smallchat_resolve`
+meta-tool (listed by default; `resolveTool: false` or CLI `--no-resolve-tool` leaves it
+out) takes `{"intent": "...", "args": {...}}` and returns a proposal — `outcome`,
+`name`, `toolId`, `tier`, `confidence`, `reason`, up to five `candidates` and the
+`proofDigest` — under the same resolution rules as the runtime. It never runs
+anything: the client calls the proposed tool by `name`, and that call is an ordinary
+`tools/call`.
 
 ## Configuration
 
@@ -97,7 +113,7 @@ let config = MCPServerConfig(
     sessionTTLMs: 86_400_000,    // Session TTL (24h)
     maxConnections: 1000,        // Connections beyond this are closed
     toolNaming: .aggregate,      // or .provider("id")
-    semanticDispatch: false      // list smallchat_dispatch
+    resolveTool: true            // list the read-only smallchat_resolve
 )
 ```
 

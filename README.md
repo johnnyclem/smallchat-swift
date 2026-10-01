@@ -19,19 +19,19 @@
 
 Your agent has 50 tools. The LLM sees all 50 in its context window every single turn — burning tokens, bloating prompts, and degrading selection accuracy. You write routing logic, maintain tool registries, and pray the model picks the right one.
 
-**smallchat compiles your tools into a dispatch table.** The LLM expresses intent. The runtime resolves it — semantically, deterministically, in microseconds. No prompt stuffing. No selection lottery.
+**smallchat compiles your tools into a dispatch table.** The LLM expresses intent. The runtime resolves it to at most one tool, by embedding similarity, and runs that tool only when its dispatch policy allows; otherwise it asks. No prompt stuffing. No selection lottery.
 
 This is the **native Swift implementation** of [smallchat](https://github.com/johnnyclem/smallchat) — same architecture, same semantics, built for Apple platforms and Linux with Swift concurrency, actors, and the Swift type system.
 
 ```
-                         ┌─────────────────────┐
-  "find recent docs"  →  │  Canonicalize        │  → "find:recent:docs"
-                         │  Embed (384-dim)     │  → [0.23, 0.15, ..., 0.89]
-                         │  Vector Search       │  → cosine similarity > 0.60
-                         │  Tier classification │  → EXACT / HIGH / MEDIUM / LOW / NONE
-                         │  Overload Resolution │  → type-validated dispatch
-                         │  Cache & Execute     │  → result (or tool_refinement_needed)
-                         └─────────────────────┘
+                         ┌──────────────────────┐
+  "find recent docs"  →  │  Embed the intent     │  → its own vector (never interned)
+                         │  Vector search        │  → candidates with cosine >= 0.60
+                         │  Tier                 │  → EXACT .95 / HIGH .85 / MEDIUM .75 / LOW .60
+                         │  Pins, verification,  │  → one dispatch policy on every path
+                         │  dispatch policy      │
+                         │  Validate & execute   │  → exactly one tool (or needs-disambiguation)
+                         └──────────────────────┘
 ```
 
 **Table of contents:** [What's New](#whats-new-in-060) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Streaming](#streaming) · [CLI Reference](#cli-reference) · [Architecture](#architecture) · [Security](#security) · [MCP Server](#mcp-server) · [Agent Messenger](#the-smallchat-app-agent-messenger) · [Claude Code Integration](#claude-code-integration) · [Dependencies](#dependencies) · [Ecosystem](#ecosystem) · [Development](#development)
@@ -50,8 +50,8 @@ Since 0.6.0, `main` has also picked up:
 
 - **`SmallChatTruth`** — truth-ledger interop with Stenographer's TB/UV v2 asserted-truth ledger at the JSONL seam: a lossless wiki JSONL codec (`TruthWiki`), the §7 consumption rules in code (active TB = ground truth, contested TB carries its disputing UVs, open UV is flagged `UNVERIFIED` and never reads as proven), corpus items + a stock `CompactionVerifier` invariant (`TruthInvariants.preserved`) that fails any compaction which drops a truth entry or strips the UNVERIFIED marker, and a proposal-only write path (`InvariantProposal`) that rejects anonymous identities.
 - **`RtkTransport`** (`SmallChatTransport`) — a transport-wrapping actor that ports the TS `rtk-which` / `rtk-transport` integration: prefixes eligible shell commands with `rtk` and pipes response bodies ≥ 512 B through `rtk filter`, with metadata attached to every response for observability. Pure pass-through when disabled.
-- **`DispatchConfig.miniLM`** — a threshold preset recalibrated for lower-contrast sentence embedders (e.g. `all-MiniLM-L6-v2`), where correct-tool paraphrases commonly score 0.60–0.74 and get misclassified as `.low` under the library defaults.
-- **Bounded selector cache** — `SelectorTable.resolve()` no longer inserts runtime intents into the shared tool-selector vector index; they're now cached in a bounded, LRU-evicted side table so long-running processes can't dilute real tool candidates or accumulate unbounded state.
+- **`DispatchConfig.miniLM`** — a threshold preset recalibrated for lower-contrast sentence embedders (e.g. `all-MiniLM-L6-v2`), where correct-tool paraphrases commonly score 0.60–0.74 and land below HIGH under the library defaults.
+- **No intent interning** — `SelectorTable.resolve()` never inserts runtime intents into the tool-selector table or vector index (1.0 also dropped the intent side cache), so long-running processes can't dilute real tool candidates or accumulate state per intent.
 - **`LocalEmbedder`** is now byte/Float32-compatible with the TS reference implementation (UTF-16 hashing, ASCII tokenization rule, exact `ToInt32` fold), verified against golden vectors.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history, including the 0.5.0
@@ -122,34 +122,38 @@ same API as CryptoKit, which Apple platforms use), and streaming HTTP bodies are
 swift run smallchat compile --source ~/.mcp.json
 ```
 
-One command. Out comes a compiled artifact with embedded vectors, dispatch tables, and resolution caching — ready to serve.
+One command. Out comes an artifact in @smallchat/core's format 1.0: providers, tools, embedded selectors, collisions, the embedder's fingerprint and a content hash — ready to serve. Near-duplicate tools are a compile error (`--allow-duplicates` keeps them).
 
 ### Use the Runtime
 
 ```swift
 import SmallChat
 
-let runtime = ToolRuntime(
-    vectorIndex: MemoryVectorIndex(),
-    embedder: LocalEmbedder()
-)
+// Load a compiled toolkit (its embedder must match the one it was compiled with)
+let toolkit = try await MCPToolkit.load(source: "tools.toolkit.json")
+let runtime = toolkit.runtime
 
-// Direct dispatch
-let result = try await runtime.dispatch("find flights", args: ["to": "NYC"])
+// Resolve: which tool would run? Nothing executes.
+let resolution = try await runtime.resolve("find flights")
+print(resolution.outcome, resolution.chosen ?? "-", resolution.tier)
 
-// Fluent API
-let content = try await runtime
-    .dispatch()
-    .intent("find flights")
-    .withArgs(["to": "NYC"])
-    .exec()
+// Run exactly one tool, by canonical id; arguments are validated against its inputSchema.
+let result = try await runtime.dispatchById("flights/search_flights", args: ["to": "NYC"])
+
+// Or resolve and run in one call. If resolution doesn't settle on one tool,
+// nothing runs: the result is isError with metadata["outcome"] and the near matches.
+let byIntent = try await runtime.dispatch("find flights", args: ["to": "NYC"])
 ```
+
+Below HIGH similarity a tool runs only after an `LLMClient` verifier approves it, and
+destructive tools (MCP `destructiveHint`) run by intent only at EXACT similarity or
+from a pinned phrase. See [`MIGRATION.md`](MIGRATION.md#dispatch) for the rules.
 
 ## How It Works
 
 smallchat borrows its architecture from the **Smalltalk / Objective-C runtime**. Tools are objects. Intents are messages. Dispatch is semantic.
 
-The LLM says *what* it wants. The runtime figures out *which tool* handles it — using vector similarity, resolution caching, superclass traversal, and fallback chains. No routing code. No tool selection prompts.
+The LLM says *what* it wants. The runtime figures out *which tool* handles it — using vector similarity, overloads and protocol conformance, under one dispatch policy — or says it can't tell and offers the nearest tools. No routing code. No tool selection prompts.
 
 ### The Dispatch Pipeline
 
@@ -158,34 +162,45 @@ User Intent (natural language string)
   │
   ▼
 ┌──────────────────────────────────────────────────────────────┐
-│ 1. Canonicalize                                              │
-│    Strip stopwords, lowercase, tokenize                      │
-│    "find my recent documents" → "find:recent:documents"      │
+│ 1. Pinned phrase                                             │
+│    The intent is, verbatim, a pinned phrase of a tool        │
 ├──────────────────────────────────────────────────────────────┤
-│ 2. Embed                                                     │
-│    FNV-1a hash → 384-dimensional vector (dev/test)           │
-│    Pluggable for production semantic embeddings              │
+│ 2. Cache (intent dispatch only)                              │
+│    Keyed by intentKey (the whole text); re-judged on a hit   │
 ├──────────────────────────────────────────────────────────────┤
-│ 3. Intent Pin Check (fast path)                              │
-│    Exact match for pinned/sensitive selectors                │
+│ 3. Rate limit (opt-in, per principal)                        │
 ├──────────────────────────────────────────────────────────────┤
-│ 4. Cache Lookup (LRU)                                        │
-│    O(1) hit for previously resolved intents                  │
+│ 4. Embed + vector search                                     │
+│    The intent's own vector; top 5 at or above LOW (0.60)     │
+│    Scores quantized to 1e-4, ties ordered by tool id         │
 ├──────────────────────────────────────────────────────────────┤
-│ 5. Vector Search                                             │
-│    Cosine similarity, top-5 candidates, threshold 0.60       │
-│    (tune per embedder — see DispatchConfig.miniLM)           │
+│ 5. Overloads, protocol conformance, pin gate                 │
 ├──────────────────────────────────────────────────────────────┤
-│ 6. Overload Resolution                                       │
-│    Type-validated signature matching against arguments       │
+│ 6. Verification                                              │
+│    Below HIGH (below EXACT in strict mode); below HIGH it    │
+│    needs an LLM verifier's approval                          │
 ├──────────────────────────────────────────────────────────────┤
-│ 7. Dispatch Table Resolve                                    │
-│    Walk ISA chain (superclass → protocol → forwarding)       │
+│ 7. Dispatch policy                                           │
+│    Pins, destructive tools only at EXACT, nothing below LOW  │
+│    → resolved | needs-disambiguation | unresolved            │
 ├──────────────────────────────────────────────────────────────┤
-│ 8. Execute & Stream                                          │
-│    Token-level → chunk-level → single-shot response tiers    │
+│ 8. dispatchById                                              │
+│    Validate arguments (JSON Schema), call digest, execute    │
+│    exactly the chosen tool (or stream it)                    │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+Every decision is recorded in a `ResolutionProof` whose `proofDigest` covers
+everything but timings. The determinism property (from @smallchat/core's
+`spec/ranking`): for the same artifact, embedder and runtime state (registered
+classes, intent pins, resolution cache, options), resolving the same intent text
+yields the same outcome, chosen tool, candidate order and `proofDigest`; intents
+resolved before do not enter into it. It does not cover an LLM verifier's or
+decomposer's answers, an opted-in rate limiter's window, or float differences
+between platforms larger than half a score quantum (5e-5). The conformance vectors
+(`swift test --filter SmallChatConformanceTests`) check outcomes, decision codes,
+chosen tools, tiers and candidate order against @smallchat/core's; proof digests are per runtime, since the proof
+step texts differ.
 
 ### Runtime Concepts
 
@@ -196,9 +211,9 @@ smallchat maps Objective-C runtime concepts directly into the tool dispatch doma
 | Class | `ToolClass` | Groups related tools from one provider |
 | Selector (`SEL`) | `ToolSelector` | Semantic intent with embedded vector |
 | IMP (function pointer) | `ToolIMP` protocol | Abstract tool implementation |
-| `objc_msgSend` | `Dispatch.resolveToolIMP()` | Core resolution + execution |
+| `objc_msgSend` | `resolve` + `dispatchById` | Resolution (pure), then execution of exactly one tool |
 | Method cache | `ResolutionCache` | LRU cache with version tracking |
-| ISA chain | Superclass traversal | Fallback resolution through class hierarchy |
+| ISA chain | Superclass traversal | Method lookup for a matched selector through the class hierarchy |
 | Protocol conformance | `ToolClass.protocols` | Capability-based dispatch |
 | Category | Provider extensions | Dynamic method injection |
 | Method swizzling | `runtime.swizzle()` | Hot-swap implementations at runtime |
@@ -209,12 +224,12 @@ smallchat supports three tiers of streaming output, all built on Swift's `AsyncS
 
 ```swift
 // Token-by-token streaming (inference)
-for try await token in runtime.inferenceStream("find flights", args: ["to": "NYC"]) {
+for try await token in await runtime.inferenceStream("find flights", args: ["to": "NYC"]) {
     print(token, terminator: "")
 }
 
 // Rich event stream (full dispatch lifecycle)
-for try await event in runtime.dispatchStream("find flights") {
+for try await event in await runtime.dispatchStream("find flights") {
     switch event {
     case .resolving(let intent):
         print("Resolving: \(intent)")
@@ -242,7 +257,7 @@ swift run smallchat <command> [options]
 |---------|-------------|---------|
 | `setup` | Interactive wizard — auto-detect MCP servers and compile a toolkit | `smallchat setup` |
 | `compile` | Compile manifests into a dispatch artifact (`--strict` treats collisions as errors) | `smallchat compile --source ~/.mcp.json` |
-| `resolve` | Test intent-to-tool resolution | `smallchat resolve tools.toolkit.json "search for code"` |
+| `resolve` | Show how an intent resolves (outcome, tool id, candidates, proof digest; nothing runs) | `smallchat resolve tools.toolkit.json "search for code"` |
 | `serve` | Serve a toolkit as an MCP server over Streamable HTTP | `smallchat serve --source ./manifests --port 3001` |
 | `channel` | Run a Claude Code channel server over stdio (optional HTTP bridge) | `smallchat channel --name ci` |
 | `install` | Render an install plan for a registry entry or bundle | `smallchat install examples/registry/github.json` |
@@ -291,7 +306,7 @@ SmallChatAgents ─── Agent messenger core: session discovery, handles, @men
 | Module | Description |
 |--------|-------------|
 | **SmallChatCore** | Type system, selectors, dispatch tables, resolution cache, overload tables, canonicalization, vector math, intent pinning, rate limiting, confidence tiers (`DispatchConfig`, incl. the `miniLM` preset), App/UI types (`ComponentSelector`, `AppManifest`, `AppArtifact`) |
-| **SmallChatRuntime** | `ToolRuntime` actor, dispatch pipeline, `DispatchBuilder` fluent API, streaming events, method swizzling, tiered dispatch (verify/decompose/refine), `AppRuntime` for UI dispatch |
+| **SmallChatRuntime** | `ToolRuntime` actor, `resolve` / `dispatchById` / intent dispatch, the dispatch policy, verification, decomposition, refinement, `DispatchBuilder` fluent API, streaming events, method swizzling, `AppRuntime` for UI dispatch |
 | **SmallChatCompiler** | 4-phase compilation pipeline: parse → embed → link → output, plus `AppCompiler` for the App/UI layer |
 | **SmallChatEmbedding** | `LocalEmbedder` (FNV-1a hash, 384 dims, TS-parity), `MemoryVectorIndex` for dev/test |
 | **SmallChatTransport** | Protocol-agnostic transport layer — HTTP, MCP stdio, MCP SSE, local — with auth, retry, timeout, and circuit breaker middleware; `LoomMCPClient` for loom-mcp; `RtkTransport` for `rtk`-based prefixing/filtering |
@@ -316,11 +331,12 @@ smallchat is designed to run in adversarial environments where untrusted inputs 
 | Feature | Protection |
 |---------|------------|
 | **Intent Sanitization** | Strips null bytes, control characters, and enforces length limits before dispatch (v0.3.0). |
-| **Intent Pinning** | Guards sensitive selectors (e.g., `delete:database`) against semantic collision attacks. Supports `exact` (canonical match only) and `elevated` (0.98 threshold) policies. |
-| **Type Validation** | Validates argument types against method signatures before dispatch, preventing type confusion attacks. |
+| **Dispatch Policy** | One rule set on every path that can run a tool (pinned phrase, cache hit, vector and overload match, protocol conformance, decomposed sub-intent): below HIGH a tool runs only with an LLM verifier's approval, destructive tools (MCP annotations) run by intent only at EXACT similarity or from a pinned phrase, and nothing below LOW runs. A denial runs nothing and returns the candidates. |
+| **Intent Pinning** | Guards sensitive tools against semantic collisions. `exact` pins accept only their pinned phrases, compared as whole phrases (so "do not transfer funds" does not match "transfer funds"); `elevated` pins need a similarity of the intent's own embedding at or above their threshold (default 0.98). |
+| **Argument Validation** | Every call is validated against the tool's JSON Schema `inputSchema` before it runs; a schema the validator cannot evaluate makes the tool uncallable rather than unchecked. |
 | **Sender Gating** | Allowlist-based access control with identity validation, max sender limits, and constant-time pairing code verification (v0.3.0). |
-| **Semantic Rate Limiting** | Prevents vector flooding DoS by tracking embedding requests per time window. |
-| **Bounded Selector Cache** | Runtime intents resolved by `SelectorTable` are kept in an LRU-evicted side table, not the shared tool-selector index — long-running processes can't accumulate unbounded state or dilute real tool candidates. |
+| **Semantic Rate Limiting** | Opt-in (`RuntimeOptions.rateLimiter`): limits novel intents embedded per principal per time window; over the limit, resolution returns `throttled` without embedding. |
+| **No Intent Interning** | Intents are embedded on their own and never inserted into the tool-selector table or index, so long-running processes can't accumulate state per intent or dilute real tool candidates. |
 | **Selector Namespacing** | Core system selectors are protected and cannot be shadowed by user-registered tools. |
 | **Bearer Token** | With `serve --auth`, every MCP request (all but `GET /health`) needs `Authorization: Bearer <token>`, compared in constant time. The token comes from `SMALLCHAT_MCP_TOKEN` or a file created with mode 0600. OAuth is not implemented. |
 | **Schema Fingerprinting** | Detects tool schema changes on hot-reload; invalidates stale cache entries automatically. |
@@ -345,9 +361,11 @@ swift run smallchat serve --source ./manifests --port 3001
 - **Where tools run.** A tool runs at its provider manifest's `endpoint`: MCP servers over
   Streamable HTTP (the upstream result is passed through), REST APIs as
   `POST <endpoint>/<tool>`. Tools whose provider has no such endpoint are listed but return
-  `isError` when called. Artifacts compiled before 1.0 carry no endpoints.
-- **Semantic dispatch is opt-in.** `--semantic-dispatch` adds the `smallchat_dispatch`
-  meta-tool, which resolves an intent through the tiered dispatch pipeline.
+  `isError` when called. Arguments are validated against the tool's `inputSchema`
+  first. Artifacts must be format 1.0 (recompile 0.x artifacts).
+- **Resolution is read-only.** The `smallchat_resolve` meta-tool (listed unless
+  `--no-resolve-tool`) proposes a tool for an intent — its name, tool id, tier,
+  candidates and proof digest — and runs nothing; the client then calls that tool.
 - **Sessions** in SQLite (`--db-path`), expiring after `--session-ttl` hours.
 - **Perimeter:** Host/Origin checks, optional bearer token (`--auth`), body size cap,
   per-address rate limiting (`--rate-limit`), connection cap (`--max-connections`), and an

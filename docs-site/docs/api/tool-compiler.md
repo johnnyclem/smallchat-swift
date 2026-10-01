@@ -7,7 +7,9 @@ title: ToolCompiler
 
 <span class="module-badge">SmallChatCompiler</span>
 
-Transforms tool manifests into optimized dispatch artifacts through a 4-phase pipeline.
+Compiles provider manifests into selectors and dispatch tables, with the same
+semantics as @smallchat/core 1.0's compiler. `ArtifactV1.build` turns the result into
+an artifact of format 1.0.
 
 ```swift
 struct ToolCompiler: Sendable
@@ -27,120 +29,99 @@ init(
 
 ```swift
 struct CompilerOptions {
-    var deduplicationThreshold: Float   // Default: 0.95
-    var collisionThreshold: Float       // Default: 0.85
-    var generateSemanticOverloads: Bool  // Default: true
-    var maxToolsPerProvider: Int         // Default: 500
+    var collisionThreshold: Double         // Default: 0.89
+    var duplicateThreshold: Double         // Default: 0.95
+    var allowDuplicates: Bool              // Default: false
+    var generateSemanticOverloads: Bool    // Default: false
+    var semanticOverloadThreshold: Double  // Default: 0.82
 }
 ```
+
+`deduplicationThreshold` is the deprecated 0.x name of `duplicateThreshold`.
 
 ## Methods
 
 ### compile
 
-Run the full 4-phase compilation pipeline:
-
 ```swift
 func compile(_ manifests: [ProviderManifest]) async throws -> CompilationResult
 ```
 
-The four phases:
-1. **PARSE** — Extract tool definitions from manifests
-2. **EMBED** — Generate vectors, intern selectors
-3. **LINK** — Build dispatch tables, detect collisions
-4. **OUTPUT** — Serialize artifact
+1. **PARSE** — read tool definitions and compiler hints; drop excluded tools.
+2. **EMBED** — every tool gets its own selector under its exact canonical
+   (`<providerId>.<name>`, or the `pinSelector` / provider `namespace` hint). The
+   selector embeds `<name>: <description>` plus the tool's selector hint (or its
+   provider's `semanticContext`). Each alias is a selector of its own,
+   `<canonical>~alias~<alias_with_underscores>`, embedding the alias text.
+3. **LINK** — dispatch tables (alias selectors reach the same tool), duplicate
+   detection, and collision reports.
+
+Tools are never merged. It throws:
+
+- `DuplicateToolError` when two distinct tools embed at cosine similarity >=
+  `duplicateThreshold`, unless `allowDuplicates` (then both are compiled and the pairs
+  are listed in `result.duplicates`).
+- `SelectorConflictError` when two tools claim one selector (a `pinSelector` or
+  namespace clash), one alias phrase, or a provider declares one tool name twice. This
+  cannot be waived.
+
+Pairs of selectors between 0.75 and the duplicate threshold are reported in
+`result.collisions` with a hint; they are not errors.
 
 ### buildClasses
-
-Convert compilation results into runtime-ready `ToolClass` instances:
 
 ```swift
 func buildClasses(_ result: CompilationResult) -> [ToolClass]
 ```
 
-## Input Types
+Groups the compiled tools by provider into `ToolClass` instances.
 
-### ProviderManifest
-
-```swift
-struct ProviderManifest {
-    let providerId: String
-    let tools: [ToolDefinition]
-}
-```
-
-### ToolDefinition
+## Writing and loading artifacts
 
 ```swift
-struct ToolDefinition {
-    let name: String
-    let description: String
-    let inputSchema: [String: AnyCodableValue]
-}
+let artifact = try ArtifactV1.build(
+    result: result,
+    manifests: manifests,
+    embedder: embedder.fingerprint!     // e.g. hash / smallchat-hash-v1 / 384 dims
+)
+try artifact.write(to: URL(fileURLWithPath: "tools.toolkit.json"))
+
+let loaded = try ArtifactV1.read(contentsOf: URL(fileURLWithPath: "tools.toolkit.json"))
 ```
+
+`ArtifactV1.parse` validates the artifact against spec/artifact's schema and rules and
+recomputes its content hash; `assertEmbedder(_:)` refuses an embedder whose
+fingerprint differs from the one the artifact records. Compiling spec/artifact's
+golden manifest with `LocalEmbedder(dimensions: 16)` reproduces its golden artifact,
+content hash included (a conformance test checks it).
 
 ## Example
 
 ```swift
-import SmallChatCompiler
-import SmallChatEmbedding
+import SmallChat
 
-let compiler = ToolCompiler(
-    embedder: LocalEmbedder(),
-    vectorIndex: MemoryVectorIndex(),
-    options: CompilerOptions(
-        deduplicationThreshold: 0.95,
-        generateSemanticOverloads: true
-    )
+let readFile = ToolDefinition(
+    name: "read_file",
+    description: "Read the contents of a file",
+    inputSchema: JSONSchemaType(json: [
+        "type": .string("object"),
+        "properties": .dict(["path": .dict(["type": .string("string")])]),
+        "required": .array([.string("path")]),
+    ]),
+    providerId: "filesystem",
+    transportType: .mcp,
+    annotations: ToolAnnotations(readOnlyHint: true)
 )
-
 let manifests = [
-    ProviderManifest(
-        providerId: "filesystem",
-        tools: [
-            ToolDefinition(
-                name: "read_file",
-                description: "Read the contents of a file",
-                inputSchema: [
-                    "type": .string("object"),
-                    "properties": .object([
-                        "path": .object(["type": .string("string")])
-                    ]),
-                    "required": .array([.string("path")])
-                ]
-            ),
-            ToolDefinition(
-                name: "write_file",
-                description: "Write content to a file",
-                inputSchema: [
-                    "type": .string("object"),
-                    "properties": .object([
-                        "path": .object(["type": .string("string")]),
-                        "content": .object(["type": .string("string")])
-                    ]),
-                    "required": .array([.string("path"), .string("content")])
-                ]
-            ),
-        ]
-    ),
+    ProviderManifest(id: "filesystem", name: "Filesystem", tools: [readFile], transportType: .mcp,
+                     endpoint: "http://127.0.0.1:4000/mcp"),
 ]
 
-// Compile
-let result = try await compiler.compile(manifests)
+let embedder = LocalEmbedder()
+let result = try await ToolCompiler(embedder: embedder, vectorIndex: MemoryVectorIndex()).compile(manifests)
+let artifact = try ArtifactV1.build(result: result, manifests: manifests, embedder: embedder.fingerprint!)
 
-// Build runtime classes
-let classes = compiler.buildClasses(result)
-
-// Register with runtime
-let runtime = ToolRuntime(
-    vectorIndex: MemoryVectorIndex(),
-    embedder: LocalEmbedder()
-)
-
-for toolClass in classes {
-    try await runtime.registerClass(toolClass)
-}
-
-// Now dispatch works
-let output = try await runtime.dispatch("read a file", args: ["path": "/tmp/hello.txt"])
+// A runtime over the artifact (its tools call the provider's endpoint).
+let toolkit = try await MCPToolkit.make(artifact: artifact)
+let resolution = try await toolkit.runtime.resolve("read a file")
 ```

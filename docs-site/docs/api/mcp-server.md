@@ -33,7 +33,7 @@ struct MCPServerConfig: Sendable {
     let maxRequestBodyBytes: Int     // Default: 1 MiB
     let shutdownDrainSeconds: Int    // Default: 30
     let toolNaming: MCPToolNaming    // .aggregate or .provider(id)
-    let semanticDispatch: Bool       // List smallchat_dispatch; default false
+    let resolveTool: Bool            // List the read-only smallchat_resolve; default true
 
     static func generateAuthToken() -> String
 }
@@ -59,12 +59,21 @@ init(config: MCPServerConfig) throws
 ## Tools
 
 ```swift
-func setArtifact(_ artifact: SerializedArtifact) async
+func setArtifact(_ artifact: ArtifactV1) async
 func setToolExecutor(_ executor: @escaping MCPToolExecutor) async
-func setRuntime(_ runtime: ToolRuntime, semanticDispatch: Bool = false) async
+func setRuntime(_ runtime: ToolRuntime, resolveTool: Bool = true) async
 ```
 
-`tools/call` runs exactly the listed tool through the executor (or, with `setRuntime`, the runtime's implementation of that provider's tool). `MCPToolkit.load(source:)` builds such a runtime from manifests or an artifact; `start()` does this itself when `sourcePath` is set.
+`tools/call` runs exactly the listed tool through the executor, or, with `setRuntime`,
+through `runtime.dispatchById(<tool id>, args:)`, which validates the arguments against
+the tool's `inputSchema` first. Results carry `_meta["dev.smallchat/toolId"]` and
+`_meta["dev.smallchat/resolution"]` (outcome, decision, tier, call digest, proof
+digest, artifact hash). With `resolveTool`, the read-only `smallchat_resolve` meta-tool
+is listed: it takes `{"intent": "...", "args": {...}}` and returns the proposed tool's
+`name`, `toolId`, `tier`, `confidence`, candidates and `proofDigest` without running
+anything. `MCPToolkit.load(source:)` builds a runtime from manifests or a format 1.0
+artifact (refusing an artifact whose embedder differs); `start()` does this itself when
+`sourcePath` is set.
 
 ## Lifecycle
 

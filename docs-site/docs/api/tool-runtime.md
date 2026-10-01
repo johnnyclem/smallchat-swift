@@ -27,20 +27,29 @@ init(
 
 ```swift
 struct RuntimeOptions: Sendable {
-    var selectorThreshold: Float    // Default: 0.95
-    var cacheSize: Int              // Default: 1024
-    var minConfidence: Double       // Default: 0.85
+    var selectorThreshold: Float                    // Default: 0.95 (SelectorTable.intern)
+    var cacheSize: Int                              // Default: 1024
+    var minConfidence: Double                       // Lowest score the cache stores; default 0.85
     var modelVersion: String?
     var selectorNamespace: SelectorNamespace?
-    var rateLimiter: SemanticRateLimiterOptions?
+    var rateLimiter: SemanticRateLimiterOptions?    // Opt-in; nil = off
+    var dispatchConfig: DispatchConfig              // Tier thresholds and policy guards
+    var llmClient: any LLMClient                    // Default: NoOpLLMClient (no verifier)
+    var intentPins: [IntentPin]
+    var artifactHash: String?                       // Recorded in every proof
 }
 ```
+
+`DispatchConfig` holds `thresholds` (EXACT 0.95, HIGH 0.85, MEDIUM 0.75, LOW 0.60),
+`strict`, `requireLLMForSubHighDispatch` (default `true`),
+`treatUnannotatedAsDestructive`, `maxDecompositionDepth` and `maxSubDispatches`. See
+[Resolution Pipeline](/concepts/resolution-pipeline).
 
 ## Properties
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `selectorTable` | `SelectorTable` | Interning table for semantic selectors |
+| `selectorTable` | `SelectorTable` | Compiled tool selectors (intents are never added) |
 | `cache` | `ResolutionCache` | LRU resolution cache |
 | `context` | `DispatchContext` | Runtime dispatch environment |
 | `selectorNamespace` | `SelectorNamespace` | Core selector protection |
@@ -108,21 +117,60 @@ func swizzle(
 
 Returns the previous implementation, or `nil` if no method existed for that selector.
 
-## Dispatch
+## Resolution and Dispatch
+
+### resolve
+
+Decide which tool an intent means. Nothing runs:
+
+```swift
+func resolve(_ intent: String, options: ResolveOptions = ResolveOptions()) async throws -> Resolution
+```
+
+`Resolution` has `outcome` (`.resolved`, `.needsDisambiguation`, `.unresolved`,
+`.throttled`), `tier`, `chosen` (a canonical tool id when resolved), `confidence`,
+`candidates`, `reason`, `refinement`, `retryAfterMs` and the `proof`.
+`ResolveOptions(learn:args:principal:)`: `learn` consults and updates the resolution
+cache, `args` lets overloads and verification see the arguments, `principal` scopes
+the rate limiter.
+
+### dispatchById
+
+Run exactly one tool, by canonical id (`<providerId>/<toolName>`), after validating the
+arguments against its `inputSchema`:
+
+```swift
+func dispatchById(
+    _ toolId: String,
+    args: [String: any Sendable] = [:],
+    options: DispatchByIdOptions = DispatchByIdOptions()
+) async throws -> ToolResult
+```
+
+`DispatchByIdOptions(resolutionDigest:principal:)`: pass a resolution's
+`proof.proofDigest` to link the call to the resolution the user confirmed.
 
 ### dispatch (with args)
 
-Dispatch an intent with arguments, returning a result:
+Resolve an intent (with the cache) and run the chosen tool through `dispatchById`:
 
 ```swift
-func dispatch(_ intent: String, args: [String: any Sendable]) async throws -> ToolResult
+func dispatch(_ intent: String, args: [String: any Sendable], options: DispatchOptions = DispatchOptions()) async throws -> ToolResult
 ```
+
+When resolution does not settle on one tool, nothing runs: the result is `isError`
+with `metadata[DispatchMetadataKey.outcome]` (a `DispatchOutcomeCode` raw value) and a
+`ToolRefinement` under `DispatchMetadataKey.refinement`.
 
 **Example:**
 
 ```swift
 let result = try await runtime.dispatch("search files", args: ["query": "config"])
-print(result.content!)
+if result.isError {
+    print(result.metadata?[DispatchMetadataKey.outcome] ?? "")
+} else {
+    print(result.content!)
+}
 ```
 
 ### dispatch (fluent)
@@ -159,14 +207,22 @@ Stream dispatch events for an intent:
 ```swift
 func dispatchStream(
     _ intent: String,
-    args: [String: any Sendable]?
+    args: [String: any Sendable]? = nil
+) -> AsyncThrowingStream<DispatchEvent, Error>
+
+func dispatchStreamById(
+    _ toolId: String,
+    args: [String: any Sendable] = [:]
 ) -> AsyncThrowingStream<DispatchEvent, Error>
 ```
+
+`dispatchStream` resolves first and streams only a resolution the policy allows; a
+refused one ends with `.done` carrying the not-executed result.
 
 **Example:**
 
 ```swift
-for try await event in runtime.dispatchStream("search", args: ["q": "hello"]) {
+for try await event in await runtime.dispatchStream("search", args: ["q": "hello"]) {
     switch event {
     case .toolStart(let name, _, let confidence, _):
         print("Dispatching to \(name) (\(confidence))")
@@ -192,7 +248,7 @@ func inferenceStream(
 **Example:**
 
 ```swift
-for try await token in runtime.inferenceStream("explain", args: ["code": src]) {
+for try await token in await runtime.inferenceStream("explain", args: ["code": src]) {
     print(token, terminator: "")
 }
 ```

@@ -15,7 +15,7 @@ If you have an existing MCP configuration (e.g., `~/.mcp.json`), compile it:
 swift run smallchat compile --source ~/.mcp.json
 ```
 
-This produces a `tools.toolkit.json` artifact containing embedded vectors, dispatch tables, and resolution metadata.
+This produces a `tools.toolkit.json` artifact in format 1.0 (the @smallchat/core format): providers, tools, embedded selectors, the embedder's fingerprint and a content hash. Two tools that embed almost identically are a compile error; give them distinct descriptions, or pass `--allow-duplicates`.
 
 You can also compile from a directory of manifests:
 
@@ -35,28 +35,33 @@ swift run smallchat resolve tools.toolkit.json "search for code"
 swift run smallchat repl tools.toolkit.json
 ```
 
-The REPL lets you type natural language intents and see which tools they resolve to, with confidence scores and resolution paths.
+Both print the outcome (`resolved`, `needs-disambiguation` or `unresolved`), the tier, the chosen tool id, the ranked candidates and the proof digest. Nothing runs.
 
 ## 3. Use in Code
 
 ```swift
 import SmallChat
 
-// Create the runtime
-let runtime = ToolRuntime(
-    vectorIndex: MemoryVectorIndex(),
-    embedder: LocalEmbedder()
-)
+// Load the compiled toolkit
+let toolkit = try await MCPToolkit.load(source: "tools.toolkit.json")
+let runtime = toolkit.runtime
 
-// Dispatch by intent — the runtime finds the right tool
-let result = try await runtime.dispatch(
-    "find flights",
-    args: ["to": "NYC"]
-)
+// Which tool does an intent mean? Nothing runs.
+let resolution = try await runtime.resolve("find flights")
+print(resolution.outcome, resolution.chosen ?? "-")
 
-print(result.content)  // Tool output
-print(result.isError)  // false if successful
+// Run exactly one tool by id (arguments are checked against its inputSchema)
+let result = try await runtime.dispatchById("flights/search_flights", args: ["to": "NYC"])
+
+// Or resolve and run in one call
+let byIntent = try await runtime.dispatch("find flights", args: ["to": "NYC"])
+print(byIntent.isError)  // true if nothing ran or the tool failed
+print(byIntent.metadata?[DispatchMetadataKey.outcome] ?? "")  // "resolved", "needs-disambiguation", ...
 ```
+
+An intent runs a tool on its own only at HIGH similarity or above (MEDIUM and LOW
+need an `LLMClient` verifier), and destructive tools only at EXACT similarity or from
+a pinned phrase. Otherwise the result lists the candidates for the user to choose.
 
 ## 4. Use the Fluent API
 
@@ -77,12 +82,12 @@ For real-time output:
 
 ```swift
 // Token-level streaming
-for try await token in runtime.inferenceStream("explain code", args: ["code": snippet]) {
+for try await token in await runtime.inferenceStream("explain code", args: ["code": snippet]) {
     print(token, terminator: "")
 }
 
 // Event-level streaming
-for try await event in runtime.dispatchStream("find flights", args: ["to": "NYC"]) {
+for try await event in await runtime.dispatchStream("find flights", args: ["to": "NYC"]) {
     switch event {
     case .resolving(let intent):
         print("Resolving: \(intent)")
@@ -112,7 +117,7 @@ This starts an MCP server over Streamable HTTP with:
 - The MCP endpoint at `http://127.0.0.1:3001/mcp` (tools listed as `<provider>__<tool>`)
 - Health check at `GET /health`
 
-Each tool runs at its provider manifest's `endpoint`; tools without one are listed but fail when called.
+Each tool runs at its provider manifest's `endpoint`; tools without one are listed but fail when called. The read-only `smallchat_resolve` tool proposes a tool for an intent without running it.
 
 ## Next Steps
 

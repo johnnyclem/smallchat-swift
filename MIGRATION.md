@@ -71,7 +71,7 @@ it is `1.0.0`. These values change:
 
 If you matched on any of these strings (in an allowlist, a test, or a log query),
 match on `SmallChatVersion.current` or the new value. `ARTIFACT_FORMAT_VERSION` is a
-separate value and did not change.
+separate value; it is now `1.0` (see [Artifacts and the compiler](#artifacts-and-the-compiler)).
 
 ## Transports
 
@@ -112,6 +112,188 @@ The client now asks for MCP `2025-11-25` and accepts `2025-11-25`, `2025-06-18`,
 fails `connect()` with `TransportError.connectionFailed`. Servers built on an
 official MCP SDK negotiate one of these.
 
+## Dispatch
+
+smallchat-swift 1.0 follows @smallchat/core 1.0's resolution rules and runs its
+conformance vectors (`Tests/Fixtures/spec`: canonical JSON, call digests, tool ids,
+ranking, resolve outcomes, artifacts). Those vectors are the parity that is tested;
+where the two runtimes disagree on a case the vectors do not cover, the TypeScript
+runtime is the reference. Not ported yet: argument coercion, the semantic map
+(learned choices), observer feedback, the decision log, replay and explain.
+
+### Resolve, then run by id
+
+`tieredDispatch`, `TieredDispatchResult`, `StrictAmbiguityError`,
+`DispatchContext.forward` and the fallback chain types are gone. Use:
+
+```swift
+// What would run? Nothing executes.
+let resolution = try await runtime.resolve("open an issue about the crash")
+switch resolution.outcome {
+case .resolved:
+    print(resolution.chosen!, resolution.tier)            // "github/create_issue", .high
+case .needsDisambiguation, .unresolved:
+    print(resolution.refinement?.nearMatches.map(\.toolId) ?? [])
+case .throttled:
+    print("retry in \(resolution.retryAfterMs ?? 0) ms")
+}
+
+// Run exactly one tool, named by its canonical id.
+let result = try await runtime.dispatchById("github/create_issue", args: ["title": "Crash on launch"])
+
+// Or both in one call: resolve (with the cache), then dispatchById the chosen tool.
+let result2 = try await runtime.dispatch("open an issue about the crash", args: ["title": "Crash"])
+```
+
+An intent dispatch that does not settle on one tool runs nothing. Its result has
+`isError == true`, and `result.metadata?[DispatchMetadataKey.outcome]` is one of the
+`DispatchOutcomeCode` raw values (`needs-disambiguation`, `unresolved`, `throttled`,
+`invalid-arguments`, `aborted`, `not-dispatched`) with a `ToolRefinement` under
+`DispatchMetadataKey.refinement`. Show the near matches to the user and call
+`dispatchById` with the tool id they pick. Code that matched on
+`TieredDispatchResult.dispatched` should check `outcome == "resolved"`. A tool that ran
+and failed is also `isError`, with outcome `resolved`.
+
+`DispatchBuilder.execContent()` now throws `DispatchError` (with the result and its
+`outcome`) for an `isError` result instead of returning the error payload as content.
+
+### Below HIGH, a tool runs only with an LLM verifier
+
+`DispatchConfig.requireLLMForSubHighDispatch` (default `true`) lets a MEDIUM or LOW
+match run only after an `LLMClient` approves it for the intent. `NoOpLLMClient`
+(the default) does not verify (`providesVerification == false`), so without a real
+client such matches come back as needs-disambiguation. Either supply an `LLMClient`
+(`RuntimeOptions(llmClient:)`), call `dispatchById` once the user has chosen, or set
+`requireLLMForSubHighDispatch = false` to let schema and keyword verification alone
+pass them. A custom `LLMClient` that cannot verify should return `false` from
+`providesVerification`.
+
+### Destructive tools need an exact match
+
+Give tools MCP annotations (`ToolIMP.annotations`, `ToolProxy(…, annotations:)`, or
+`annotations` in a manifest). A destructive tool (`destructiveHint: true`, or
+`readOnlyHint: false` without `destructiveHint`) runs by intent only from a pinned
+phrase or an EXACT similarity (>= 0.95) of the intent's own embedding; otherwise call
+it by id. Set `DispatchConfig.treatUnannotatedAsDestructive` to treat tools with no
+annotations the same way.
+
+### `DispatchConfig`
+
+| 0.6 | 1.0 |
+|---|---|
+| `exactThreshold` 0.98, `highThreshold` 0.85, `mediumThreshold` 0.70, `lowThreshold` 0.55 | `thresholds: TierThresholds` 0.95 / 0.85 / 0.75 / 0.60 (the `…Threshold` properties are read-only views of it) |
+| `vectorSearchThreshold` | the LOW threshold (MEDIUM in strict mode) |
+| `ambiguityGap`, `tier(for:runnerUp:)` | removed: a close runner-up no longer lowers the tier |
+| `enableVerification`, `enableDecomposition`, `enableRefinement` | removed: verification below HIGH always runs; decomposition needs an `LLMClient` |
+| `strict` (MEDIUM ran after keyword checks) | verifies below EXACT and considers nothing below MEDIUM |
+| — | `requireLLMForSubHighDispatch`, `treatUnannotatedAsDestructive`, `maxDecompositionDepth`, `maxSubDispatches` |
+
+Scores are quantized to 1e-4 before tiers are computed. `DispatchConfig.miniLM` keeps
+its own thresholds. Recalibrate any custom thresholds against your embedder.
+
+### Canonical forms, cache keys and pins
+
+- `canonicalize` is for display only. It now deletes punctuation inside words
+  (`"search_code"` → `searchcode`) and has no 32-token cap (`maxCanonicalTokens` is
+  gone). Do not use it as a key: use `intentKey(_:)`.
+- `ResolutionCache` is keyed by `intentKey(_:)` and only used by intent dispatch;
+  `resolve` reads it only with `ResolveOptions(learn: true)`. Pinned and destructive
+  tools are never cached, and every hit is judged by the policy again.
+- `SelectorTable.resolve` returns a selector carrying the intent's own vector and keeps
+  no intent cache (`cachedIntentCount` is gone).
+- `IntentPinRegistry.checkExact` takes the raw intent and compares whole phrases with
+  `normalizePinPhrase(_:)`, so an `exact` pin's alias no longer matches a longer or
+  negated sentence. Add every phrasing you want accepted as an alias.
+
+### Rate limiting is opt-in, per principal
+
+`SemanticRateLimiter` runs only when you set `RuntimeOptions.rateLimiter`. Pass
+`principal:` in `ResolveOptions`, `DispatchOptions` or `DispatchByIdOptions` to give
+each caller its own window. A refusal is the `throttled` outcome with `retryAfterMs`
+instead of a thrown `VectorFloodError`. `ResolutionCache.rateLimiter` and the
+`rateLimiter:` parameter of `SelectorTable.init` are removed.
+
+### Proofs and verification
+
+`ResolutionProof` has the 1.0 shape (`outcome`, `decision`, `tier`, `chosen`, `ran`,
+`candidates`, `steps`, `callDigest`, `proofDigest`, …); `ResolutionStep` is gone and
+`finalTier` is deprecated in favour of `tier`. `verifyCandidate(…)` is replaced by
+`verify(_:intent:args:llm:options:)`, which returns a `VerificationResult` (`pass`,
+`schemaMatch`, `descriptionOverlap`, `llmConfirmed`, `reason`).
+
+### Arguments are validated
+
+Every call (`dispatchById`, intent dispatch, MCP `tools/call`) is checked against the
+tool's `inputSchema` first; a failing call runs nothing and returns outcome
+`invalid-arguments` with the `ValidationError`s. Fix the caller, or the schema if it
+is wrong. A schema the validator cannot evaluate (`unevaluatedProperties`,
+`unevaluatedItems`, `$dynamicRef`, `$recursiveRef`, a remote `$ref`, an unknown
+`$schema`, an invalid `pattern`) makes the tool uncallable rather than unchecked;
+simplify such schemas.
+
+## Artifacts and the compiler
+
+### Recompile your toolkits
+
+Artifacts are format 1.0, the @smallchat/core 1.0 format, and a 0.x artifact is
+refused with `ArtifactVersionError`. Run `smallchat compile` again (or serve the
+manifest directory). The toolkit records the embedder that compiled it, and loading
+it with a different embedder throws `EmbedderMismatchError`: smallchat-swift ships
+only the hash embedder (`LocalEmbedder`, any dimensions), so an artifact compiled by
+@smallchat/core with its default ONNX embedder needs an `Embedder` of yours that
+declares the same `fingerprint`. To share one artifact between both runtimes, compile
+it with the hash embedder at the same dimensions (`smallchat compile --embedder hash`
+in TypeScript; the hash embedder is the only one here, 384 dimensions by default in
+both).
+
+In code, `SerializedArtifact`, `ArtifactIO`, `buildArtifact` and their nested types
+are replaced by `ArtifactV1`:
+
+```swift
+let result = try await ToolCompiler(embedder: embedder, vectorIndex: MemoryVectorIndex()).compile(manifests)
+let artifact = try ArtifactV1.build(result: result, manifests: manifests, embedder: embedder.fingerprint!)
+try artifact.write(to: URL(fileURLWithPath: "tools.toolkit.json"))
+
+let loaded = try ArtifactV1.read(contentsOf: URL(fileURLWithPath: "tools.toolkit.json"))
+let toolkit = try await MCPToolkit.make(artifact: loaded)   // asserts the embedder
+```
+
+`ARTIFACT_FORMAT_VERSION` moved from `SmallChatMCP` to `SmallChatCore` (both are
+re-exported by `SmallChat`).
+
+### Duplicates are errors, aliases are selectors
+
+The compiler no longer merges tools whose embeddings are close. Two distinct tools at
+or above the duplicate threshold (0.95) fail with `DuplicateToolError`, which names
+the pairs: give them distinct descriptions or a `selectorHint`, exclude one, or pass
+`CompilerOptions(allowDuplicates: true)` / `compile --allow-duplicates` to keep both
+(intents near them then resolve to needs-disambiguation). `deduplicationThreshold`
+(and `--deduplication-threshold`) is now `duplicateThreshold`
+(`--duplicate-threshold`). Two tools pinned to one selector, sharing one alias
+phrase, or one tool name declared twice by a provider fail with
+`SelectorConflictError`.
+
+Each alias is its own selector (`<canonical>~alias~<alias_with_underscores>`), and a
+tool's embedding text is `<name>: <description>` plus its selector hint, so vectors
+and `uniqueSelectorCount` differ from 0.6 artifacts.
+
+### Embedders and indexes
+
+`Embedder` has a `fingerprint` requirement (default `nil`). Declare one in a custom
+embedder that compiles artifacts; an embedder without one cannot load an artifact.
+`LocalEmbedder` now normalizes in double precision, and `MemoryVectorIndex` scores in
+double precision and orders ties by id, matching @smallchat/core; vectors and scores
+can differ from 0.6 in the last float32 bit.
+
+### CLI
+
+- `smallchat resolve` prints the outcome, tool id, candidates and proof digest
+  (`--json` for the proof); `--top-k` and `--threshold` are removed.
+- `smallchat compile` writes format 1.0 and adds `--allow-duplicates`, `--dims` and
+  `--duplicate-threshold`.
+- `smallchat serve` lists `smallchat_resolve` unless `--no-resolve-tool`;
+  `--semantic-dispatch` is removed.
+
 ## MCP server
 
 ### One endpoint: `/mcp`
@@ -146,9 +328,13 @@ one provider: `smallchat serve --provider github` or
 ```
 
 Read `isError` instead of `status`, and `structuredContent` (or the text) instead of
-`result`. Semantic intent dispatch is no longer reachable through tool names; enable
-the `smallchat_dispatch` meta-tool with `--semantic-dispatch` and call it with
-`{"intent": "...", "arguments": {...}}`.
+`result`. Semantic intent dispatch is no longer reachable through tool names, and no
+meta-tool runs a tool from an intent. Call the read-only `smallchat_resolve` meta-tool
+with `{"intent": "..."}` (and `"args"` when you know them): it returns the proposed
+tool's `name`, `toolId`, `tier`, candidates and `proofDigest`, and runs nothing. Then
+call the proposed tool by name. `serve --no-resolve-tool` leaves the meta-tool out.
+Arguments that fail a tool's `inputSchema` come back as an `isError` result and the
+tool does not run.
 
 ### Running tools
 
@@ -158,9 +344,10 @@ URL for `"rest"`), and recompile artifacts with 1.0 (`smallchat compile`) or ser
 manifest directory directly. Tools without an endpoint are listed but fail when called.
 
 In code, replace `MCPRouter.setRefinementHandler` with `setToolExecutor(_:)` (exact
-calls) and, if you want the meta-tool, `setSemanticDispatchHandler(_:)`; or call
-`MCPServer.setRuntime(_:semanticDispatch:)`. Drop the `sseBroker:` argument from
-`MCPRouter.init`.
+calls) and, for the meta-tool, `setResolveHandler(_:)`; or call
+`MCPServer.setRuntime(_:resolveTool:)`, which runs each call through
+`ToolRuntime.dispatchById`. Drop the `sseBroker:` argument from `MCPRouter.init`.
+`MCPServerConfig.semanticDispatch` is now `resolveTool` (default `true`).
 
 `ToolProxy.execute` now throws `ToolNotExecutableError` unless you pass an
 `executor:` when creating the proxy.

@@ -23,7 +23,7 @@ smallchat <command> [options]
 
 ### `compile`
 
-Compile tool manifests into a dispatch artifact.
+Compile tool manifests into an artifact of format 1.0 (the @smallchat/core format).
 
 ```bash
 swift run smallchat compile --source <path> [-o <output>]
@@ -31,8 +31,14 @@ swift run smallchat compile --source <path> [-o <output>]
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--source`, `-s` | Path to MCP config, manifest directory, or single manifest | Required |
+| `--source`, `-s` | Path to MCP config, manifest directory, or single manifest | current directory |
 | `--output`, `-o` | Output artifact path | `tools.toolkit.json` |
+| `--duplicate-threshold` | Distinct tools at or above this cosine similarity are duplicates: a compile error | `0.95` |
+| `--allow-duplicates` | Keep duplicates (listed in the artifact) instead of failing | `false` |
+| `--collision-threshold` | Similarity above which selector pairs are reported as collisions | `0.89` |
+| `--strict` | Treat selector collisions as compile errors | `false` |
+| `--dims` | Dimensions of the hash embedder | `384` |
+| `--semantic-overloads` | Group similar tools as overloads of one selector | `false` |
 
 **Examples:**
 
@@ -61,7 +67,7 @@ swift run smallchat serve --source <path> [options]
 | `--host` | Bind address | `127.0.0.1` |
 | `--db-path` | SQLite database path for sessions | `smallchat.db` |
 | `--provider` | Serve one provider's tools under their upstream names | all, as `<provider>__<tool>` |
-| `--semantic-dispatch` | Also list the `smallchat_dispatch` meta-tool | `false` |
+| `--no-resolve-tool` | Do not list the read-only `smallchat_resolve` meta-tool | listed |
 | `--auth` | Require a bearer token (`SMALLCHAT_MCP_TOKEN` or the token file) | `false` |
 | `--auth-token-file` | Token file, created with a random token (mode 0600) if missing | `~/.smallchat/serve-token` |
 | `--rate-limit` | Enable per-address rate limiting | `false` |
@@ -98,60 +104,62 @@ This launches a stdio-based JSON-RPC server for bidirectional communication with
 
 ### `resolve`
 
-Test intent-to-tool resolution against a compiled artifact.
+Show how an intent resolves against a compiled artifact: the same resolution an intent
+dispatch and `smallchat_resolve` make. Nothing runs.
 
 ```bash
-swift run smallchat resolve <artifact> <intent>
+swift run smallchat resolve <artifact> <intent> [--json]
 ```
 
 | Argument | Description |
 |----------|-------------|
-| `artifact` | Path to compiled `.toolkit.json` file |
+| `artifact` | Path to a compiled `.toolkit.json` file (format 1.0) |
 | `intent` | Natural language intent string |
+| `--json` | Print the `ResolutionProof` as JSON |
 
-**Examples:**
+**Examples** (against `Tests/Fixtures/spec/artifact/fixtures/minimal.v1.json`):
 
 ```bash
-swift run smallchat resolve tools.toolkit.json "search for code"
-# Output:
-#   Intent: "search for code"
-#   Selector: search:for:code
-#   Match: search_code (provider: github)
-#   Confidence: 0.94
-#   Resolution: cache miss → vector search → overload resolution
+swift run smallchat resolve minimal.v1.json "jot something down"
+# Intent:  "jot something down"
+# Outcome: resolved (tier exact, decision ranked)
+# Chosen:  notes/create_note (serve name notes__create_note)
+# Candidates:
+#   1.0000  exact   notes/create_note
+#   0.7346  low     notes/delete_note
+# Proof:   022f37af…
+# Nothing was executed.
 
-swift run smallchat resolve tools.toolkit.json "find recent documents"
+swift run smallchat resolve minimal.v1.json "permanently delete the note"
+# Outcome: needs-disambiguation (tier high, decision destructive-needs-exact)
+# Reason:  notes/delete_note is destructive: it runs only by exact tool id, a pinned
+#          phrase, or EXACT similarity (>= 0.95); got similarity 0.909
 ```
 
 ---
 
 ### `inspect`
 
-Examine a compiled artifact's contents.
+Examine a compiled artifact (format 1.0). It is validated first, and its content hash
+recomputed.
 
 ```bash
-swift run smallchat inspect <artifact>
+swift run smallchat inspect <artifact> [--selectors] [--providers] [--collisions] [--embeddings]
 ```
-
-Displays:
-- Compilation metadata (version, timestamp)
-- Provider summary
-- Selector table with vectors
-- Dispatch table mappings
-- Overload groups
 
 **Example:**
 
 ```bash
-swift run smallchat inspect tools.toolkit.json
-# Output:
-#   Artifact: tools.toolkit.json
-#   Version: 0.3.0
-#   Compiled: 2025-01-15T10:30:00Z
-#   Providers: 3
-#   Selectors: 47
-#   Dispatch entries: 52
-#   Overload groups: 5
+swift run smallchat inspect minimal.v1.json
+# ToolKit artifact: minimal.v1.json
+# Format: 1.0
+# Content hash: eb0df050… (verified)
+# Stats:
+#   Tools: 2
+#   Selectors: 3
+#   Providers: 1
+#   Collisions: 1
+#   Duplicates: 0
 ```
 
 ---
@@ -209,33 +217,35 @@ Produces a Markdown file documenting:
 
 ### `repl`
 
-Interactive shell for testing resolution and dispatch.
+Interactive shell for testing resolution against a compiled artifact. Nothing runs.
 
 ```bash
 swift run smallchat repl <artifact>
 ```
 
-The REPL provides:
-- Type natural language intents and see resolution results
-- View confidence scores and resolution paths
-- Test dispatch with arguments
-- Inspect the selector table and cache state
+Type an intent to see its resolution (outcome, tier, decision, chosen tool,
+candidates, proof digest).
 
 **Example session:**
 
 ```
-smallchat> search for files
-  → search_files (github) [confidence: 0.94, cache: miss]
+smallchat> jot something down
+Intent:  "jot something down"
+Outcome: resolved (tier exact, decision ranked)
+Chosen:  notes/create_note (serve name notes__create_note)
+Candidates:
+  1.0000  exact   notes/create_note
+  0.7346  low     notes/delete_note
+Proof:   022f37af…
+Nothing was executed.
 
-smallchat> read the readme
-  → read_file (filesystem) [confidence: 0.91, cache: miss]
-
-smallchat> search for files
-  → search_files (github) [confidence: 0.94, cache: hit]
-
-smallchat> :cache
-  Entries: 2 / 1024
-  Hit rate: 33%
+smallchat> :stats
+Artifact:
+  Format:     1.0
+  Embedder:   hash smallchat-hash-v1 (16 dims, normalized)
+  Tools:      2
+  Selectors:  3
+  ...
 
 smallchat> :quit
 ```
@@ -244,11 +254,11 @@ REPL commands (prefixed with `:`):
 
 | Command | Description |
 |---------|-------------|
-| `:cache` | Show cache statistics |
-| `:selectors` | List all interned selectors |
-| `:providers` | List registered providers |
-| `:help` | Show available commands |
-| `:quit` | Exit the REPL |
+| `:providers`, `:p` | List providers and their tool counts |
+| `:selectors`, `:s` | List selectors and the tools they point to |
+| `:stats` | Show the artifact's format, embedder, counts and hash |
+| `:help`, `:h` | Show available commands |
+| `:quit`, `:q` | Exit the REPL |
 
 ---
 

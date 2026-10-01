@@ -5,7 +5,8 @@ title: Your First Dispatch
 
 # Your First Dispatch
 
-This walkthrough builds a complete example from scratch — registering tool classes, adding methods, and dispatching intents.
+This walkthrough builds a complete example from scratch: a tool class, a tool, its
+selector, then resolving and running intents.
 
 ## Create the Runtime
 
@@ -14,51 +15,43 @@ Every smallchat application starts with a `ToolRuntime`:
 ```swift
 import SmallChat
 
+let embedder = LocalEmbedder()
 let runtime = ToolRuntime(
     vectorIndex: MemoryVectorIndex(),
-    embedder: LocalEmbedder(),
-    options: RuntimeOptions(
-        selectorThreshold: 0.95,
-        cacheSize: 1024,
-        minConfidence: 0.85
-    )
+    embedder: embedder
 )
 ```
 
-The runtime manages the selector table, resolution cache, and dispatch context.
+The runtime manages the selector table, the resolution cache, and the dispatch
+context.
 
-## Define a Tool Class
+## Create a Tool Implementation
 
-A `ToolClass` groups related tools — like a class in object-oriented programming:
-
-```swift
-let flightTools = ToolClass(name: "FlightTools")
-```
-
-## Create Tool Implementations
-
-Implement the `ToolIMP` protocol for each tool:
+Implement the `ToolIMP` protocol for each tool. Its canonical id is
+`<providerId>/<toolName>`, here `flights/search_flights`:
 
 ```swift
 final class SearchFlightsTool: ToolIMP, @unchecked Sendable {
     let providerId = "flights"
     let toolName = "search_flights"
     let transportType: TransportType = .local
-    var schema: ToolSchema? = nil
+    let annotations: ToolAnnotations? = ToolAnnotations(readOnlyHint: true)
+    var schema: ToolSchema? { Self.toolSchema }
 
-    func loadSchema() async throws -> ToolSchema {
-        ToolSchema(
-            name: "search_flights",
-            description: "Search for available flights",
-            inputSchema: [
-                "type": .string("object"),
-                "properties": .object([
-                    "destination": .object(["type": .string("string")]),
-                    "date": .object(["type": .string("string")])
-                ])
-            ]
-        )
-    }
+    static let toolSchema = ToolSchema(
+        name: "search_flights",
+        description: "Search for available flights",
+        inputSchema: JSONSchemaType(json: [
+            "type": .string("object"),
+            "properties": .dict([
+                "destination": .dict(["type": .string("string")]),
+                "date": .dict(["type": .string("string")]),
+            ]),
+            "required": .array([.string("destination")]),
+        ])
+    )
+
+    func loadSchema() async throws -> ToolSchema { Self.toolSchema }
 
     func execute(args: [String: any Sendable]) async throws -> ToolResult {
         let destination = args["destination"] as? String ?? "unknown"
@@ -67,88 +60,93 @@ final class SearchFlightsTool: ToolIMP, @unchecked Sendable {
 }
 ```
 
-## Register and Embed
+`annotations` tell the dispatch policy whether a tool is destructive; a read-only tool
+never is.
 
-Create a selector by embedding the intent, then register it:
+## Register the Selector and the Class
+
+Embed the tool's text, register the selector in the runtime's selector table (so
+vector search can find it), and add the method to a class:
 
 ```swift
-// Embed the intent to create a selector
-let vector = try await runtime.context.embedder.embed("search flights")
-let selector = ToolSelector(
-    vector: vector,
-    canonical: "search:flights",
-    parts: ["search", "flights"],
-    arity: 2
-)
+let vector = try await embedder.embed("search_flights: Search for available flights")
+let selector = try await runtime.selectorTable.register(embedding: vector, canonical: "flights.search_flights")
 
-// Add the method to the tool class
+let flightTools = ToolClass(name: "flights")
 flightTools.addMethod(selector, imp: SearchFlightsTool())
-
-// Register the class with the runtime
 try await runtime.registerClass(flightTools)
 ```
 
-## Dispatch an Intent
+## Resolve an Intent
 
-Now dispatch a natural language intent:
+`resolve` decides which tool an intent means, and runs nothing:
 
 ```swift
-let result = try await runtime.dispatch(
-    "find available flights",
-    args: ["destination": "Tokyo"]
-)
-
-print(result.content!)
-// "Found 3 flights to Tokyo"
+let resolution = try await runtime.resolve("search for available flights")
+switch resolution.outcome {
+case .resolved:
+    print("would run \(resolution.chosen!) at tier \(resolution.tier)")
+case .needsDisambiguation, .unresolved:
+    print("ask the user:", resolution.refinement?.nearMatches.map(\.toolId) ?? [])
+case .throttled:
+    break
+}
 ```
 
-The runtime:
-1. Embeds `"find available flights"` into a 384-dimensional vector
-2. Searches the vector index for similar selectors (cosine similarity > 0.75)
-3. Resolves through the dispatch table to `SearchFlightsTool`
-4. Executes and returns the result
+A match at EXACT (>= 0.95) or HIGH (>= 0.85) similarity resolves. A MEDIUM or LOW match
+resolves only when an `LLMClient` verifier approves it; without one, the outcome is
+`needs-disambiguation` and the refinement lists the candidates.
 
-## Add a Superclass
+## Run a Tool
 
-Tool classes support inheritance. Create a base class for shared behavior:
+Run exactly one tool by its id. The arguments are validated against its
+`inputSchema` first:
 
 ```swift
-let travelTools = ToolClass(name: "TravelTools")
-// ... add common travel methods ...
+let result = try await runtime.dispatchById("flights/search_flights", args: ["destination": "Tokyo"])
+print(result.content!)
+// "Found 3 flights to Tokyo"
 
-// Set up inheritance
-flightTools.superclass = travelTools
+let bad = try await runtime.dispatchById("flights/search_flights", args: [:])
+// bad.isError == true, outcome "invalid-arguments": missing required argument "destination"
+```
 
-// If flightTools can't handle an intent, it traverses up to travelTools
+Or resolve and run in one call. When resolution doesn't settle on one tool, nothing
+runs:
+
+```swift
+let byIntent = try await runtime.dispatch("search for available flights", args: ["destination": "Tokyo"])
+if byIntent.isError {
+    print(byIntent.metadata?[DispatchMetadataKey.outcome] ?? "")   // e.g. "needs-disambiguation"
+}
 ```
 
 ## Use the Fluent API
 
-The builder pattern provides a more expressive interface:
-
 ```swift
 let result = try await runtime
-    .dispatch("search flights")
+    .dispatch("search for available flights")
     .withArgs(["destination": "Tokyo", "date": "2025-06-15"])
     .withTimeout(.seconds(10))
     .exec()
 ```
 
+`execContent()` returns just the content, and throws `DispatchError` when the result
+is an error (including "nothing ran").
+
 ## Watch Resolution Events
 
-Stream dispatch events for observability:
-
 ```swift
-for try await event in runtime.dispatchStream("search flights", args: ["destination": "NYC"]) {
+for try await event in await runtime.dispatchStream("search for available flights", args: ["destination": "NYC"]) {
     switch event {
     case .resolving(let intent):
-        print("🔍 Resolving: \(intent)")
-    case .toolStart(let name, let provider, let confidence, let selector):
-        print("🎯 Matched: \(name) via \(selector) (confidence: \(confidence))")
+        print("Resolving: \(intent)")
+    case .toolStart(let name, _, let confidence, let selector):
+        print("Matched: \(name) via \(selector) (confidence: \(confidence))")
     case .done(let result):
-        print("✅ Result: \(result.content ?? "nil")")
-    case .error(let msg, _):
-        print("❌ Error: \(msg)")
+        print("Result: \(result.content ?? "nil")")
+    case .error(let message, _):
+        print("Error: \(message)")
     default:
         break
     }
@@ -157,25 +155,14 @@ for try await event in runtime.dispatchStream("search flights", args: ["destinat
 
 ## Using the Compiler Instead
 
-For production use, you'll typically compile tools from manifests rather than registering them manually:
+For production use, compile tools from manifests into an artifact and load it:
 
 ```swift
-let compiler = ToolCompiler(
-    embedder: LocalEmbedder(),
-    vectorIndex: MemoryVectorIndex()
-)
-
-let manifests = [
-    ProviderManifest(providerId: "flights", tools: [...]),
-    ProviderManifest(providerId: "hotels", tools: [...]),
-]
-
-let result = try await compiler.compile(manifests)
-let classes = compiler.buildClasses(result)
-
-for toolClass in classes {
-    try await runtime.registerClass(toolClass)
-}
+let manifests: [ProviderManifest] = [/* flights, hotels, ... */]
+let result = try await ToolCompiler(embedder: embedder, vectorIndex: MemoryVectorIndex()).compile(manifests)
+let artifact = try ArtifactV1.build(result: result, manifests: manifests, embedder: embedder.fingerprint!)
+let toolkit = try await MCPToolkit.make(artifact: artifact)
+let resolution = try await toolkit.runtime.resolve("find flights to Tokyo")
 ```
 
 ## Next Steps
