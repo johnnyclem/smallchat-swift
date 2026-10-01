@@ -20,10 +20,12 @@ The channel protocol enables:
 ### CLI
 
 ```bash
-swift run smallchat channel
+swift run smallchat channel --name ci
 ```
 
-This starts a stdio JSON-RPC server that Claude Code can connect to.
+This starts a stdio JSON-RPC server that Claude Code can connect to. It exits when
+Claude Code closes its stdin. Add `--http-bridge` (with the shared secret in
+`SMALLCHAT_CHANNEL_SECRET`) to accept events over HTTP at `POST /event`.
 
 ### Programmatic
 
@@ -31,11 +33,14 @@ This starts a stdio JSON-RPC server that Claude Code can connect to.
 import SmallChatChannel
 
 let config = ChannelServerConfig(
-    // configuration options
+    channelName: "ci",
+    httpBridge: true,
+    httpBridgeSecret: secret
 )
 
 let server = ChannelServer(config: config)
-server.start()
+await server.start()
+try await server.startHTTPBridge()
 ```
 
 ## Architecture

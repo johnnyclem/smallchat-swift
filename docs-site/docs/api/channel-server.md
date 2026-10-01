@@ -47,12 +47,24 @@ Begin processing:
 func start()
 ```
 
-### shutdown
+### startHTTPBridge
 
-Stop the server:
+When `httpBridge` is configured, serve `POST /event` (authenticated with
+`X-Channel-Secret` or `Authorization: Bearer`; `httpBridgeSecret` is required) and
+`GET /health`. Each event is injected as if `injectEvent(_:)` were called; a rejected
+event gets `403`. Returns the bound port, or nil when the bridge is not configured.
 
 ```swift
-func shutdown()
+@discardableResult
+func startHTTPBridge() async throws -> Int?
+```
+
+### shutdown
+
+Stop the server and its HTTP bridge:
+
+```swift
+func shutdown() async
 ```
 
 ## Message Handling

@@ -7,7 +7,7 @@ title: MCPServer
 
 <span class="module-badge">SmallChatMCP</span>
 
-Production-ready MCP 2024-11-05 protocol server built on SwiftNIO.
+MCP server over Streamable HTTP (protocol 2025-11-25 and 2025-06-18), built on SwiftNIO. See the [MCP Server guide](/guides/mcp-server) for endpoints and behavior.
 
 ```swift
 actor MCPServer
@@ -17,15 +17,25 @@ actor MCPServer
 
 ```swift
 struct MCPServerConfig: Sendable {
-    var port: Int                // Default: 3000
-    var host: String             // Default: "127.0.0.1"
-    var sourcePath: String       // Tool manifest source path
-    var dbPath: String           // Default: "smallchat.db"
-    var enableAuth: Bool         // Default: false
-    var enableRateLimit: Bool    // Default: false
-    var rateLimitRPM: Int        // Default: 600
-    var enableAudit: Bool        // Default: false
-    var sessionTTLMs: Int        // Default: 86_400_000 (24h)
+    let port: Int                    // Default: 3000 (0 = any free port)
+    let host: String                 // Default: "127.0.0.1"
+    let sourcePath: String           // Manifests or compiled artifact ("" = none)
+    let dbPath: String               // Default: "smallchat.db"
+    let authToken: String?           // Bearer token; nil = no auth
+    let enableRateLimit: Bool        // Default: false
+    let rateLimitRPM: Int            // Default: 600
+    let enableAudit: Bool            // Default: false
+    let auditKey: Data?              // Audit chain key; nil = random per server
+    let sessionTTLMs: Int            // Default: 86_400_000 (24h)
+    let corsOrigin: String           // Default: "http://127.0.0.1"
+    let allowedOrigins: [String]     // Extra accepted Origin values
+    let maxConnections: Int          // Default: 1000 (0 = unlimited)
+    let maxRequestBodyBytes: Int     // Default: 1 MiB
+    let shutdownDrainSeconds: Int    // Default: 30
+    let toolNaming: MCPToolNaming    // .aggregate or .provider(id)
+    let semanticDispatch: Bool       // List smallchat_dispatch; default false
+
+    static func generateAuthToken() -> String
 }
 ```
 
@@ -41,70 +51,26 @@ init(config: MCPServerConfig) throws
 |----------|------|-------------|
 | `resources` | `ResourceRegistry` | MCP resource management |
 | `prompts` | `PromptRegistry` | MCP prompt templates |
-| `oauth` | `OAuthManager` | OAuth 2.1 authentication |
-| `sse` | `SSEBroker` | SSE message broadcasting |
-| `audit` | `AuditLog` | Compliance logging |
+| `audit` | `AuditLog` | In-memory, HMAC-chained request log |
+| `serverMetrics` | `ServerMetrics` | Request and connection counters |
+| `boundPort` | `Int?` | The listening port, once started |
+| `toolCatalog` | `MCPToolCatalog?` | The tools `tools/list` serves |
+
+## Tools
+
+```swift
+func setArtifact(_ artifact: SerializedArtifact) async
+func setToolExecutor(_ executor: @escaping MCPToolExecutor) async
+func setRuntime(_ runtime: ToolRuntime, semanticDispatch: Bool = false) async
+```
+
+`tools/call` runs exactly the listed tool through the executor (or, with `setRuntime`, the runtime's implementation of that provider's tool). `MCPToolkit.load(source:)` builds such a runtime from manifests or an artifact; `start()` does this itself when `sourcePath` is set.
 
 ## Lifecycle
 
-### start
-
-Start the HTTP server:
-
 ```swift
 func start() async throws
-```
-
-### stop
-
-Gracefully shut down:
-
-```swift
-func stop() async throws
-```
-
-## Request Processing
-
-### processJSONRPC
-
-Handle a JSON-RPC request:
-
-```swift
-func processJSONRPC(
-    body: String,
-    sessionId: String?,
-    clientAddress: String?,
-    authHeader: String?,
-    acceptsSSE: Bool
-) async -> (response: JSONRPCResponse?, headers: [String: String])
-```
-
-## Discovery & Health
-
-### discoveryDocument
-
-Return the MCP discovery document:
-
-```swift
-func discoveryDocument() -> [String: AnyCodableValue]
-```
-
-### healthResponse
-
-Return server health status:
-
-```swift
-func healthResponse() async -> [String: AnyCodableValue]
-```
-
-## Notifications
-
-### broadcastListChanged
-
-Notify connected SSE clients that a resource list changed:
-
-```swift
-func broadcastListChanged(type: String) async
+func stop() async throws   // drains in-flight requests, then closes connections
 ```
 
 ## Example
@@ -112,30 +78,21 @@ func broadcastListChanged(type: String) async
 ```swift
 import SmallChatMCP
 
-let config = MCPServerConfig(
+let server = try MCPServer(config: MCPServerConfig(
     port: 3001,
-    host: "127.0.0.1",
     sourcePath: "./manifests",
     dbPath: "data/smallchat.db",
-    enableAuth: true,
+    authToken: MCPServerConfig.generateAuthToken(),
     enableRateLimit: true,
-    rateLimitRPM: 600,
-    enableAudit: true,
-    sessionTTLMs: 86_400_000
-)
-
-let server = try MCPServer(config: config)
-
-// Start serving
+    enableAudit: true
+))
 try await server.start()
 
-// Server is now listening on http://127.0.0.1:3001
-// - POST /          → JSON-RPC 2.0
-// - GET /sse        → Server-Sent Events
-// - GET /health     → Health check
-// - GET /.well-known/mcp.json → Discovery
+// Listening on http://127.0.0.1:3001
+// - POST/DELETE /mcp → MCP (Streamable HTTP)
+// - GET /health      → Health check
+// - GET /metrics     → Counters
 
-// Later...
 try await server.stop()
 ```
 
@@ -143,47 +100,16 @@ try await server.stop()
 
 ### SessionStore
 
-SQLite-backed session persistence:
-
-```swift
-// Sessions are managed automatically by MCPServer
-// Persists across restarts, expired sessions cleaned up
-```
+SQLite-backed sessions, created by `initialize` and validated on every later request. Expired sessions are closed.
 
 ### RateLimiter
 
-Sliding-window rate limiting:
-
-```swift
-// Configured via MCPServerConfig.rateLimitRPM
-// Returns HTTP 429 with Retry-After header when exceeded
-```
-
-### SSEBroker
-
-Manages per-client SSE channels:
-
-```swift
-// Clients connect via GET /sse
-// Events are broadcast via broadcastListChanged()
-// Automatic cleanup on disconnect
-```
-
-### OAuthManager
-
-OAuth 2.1 authentication:
-
-```swift
-// Enabled via MCPServerConfig.enableAuth
-// Validates Bearer tokens in Authorization header
-// Supports client credentials flow
-```
+Sliding-window limiter, keyed by client address. Requests over the limit get HTTP `429`.
 
 ### AuditLog
 
-Compliance logging to SQLite:
-
 ```swift
-// Enabled via MCPServerConfig.enableAudit
-// Records all requests, auth events, rate limits
+AuditLog(maxEntries: 10_000, hmacKey: key)   // the key is required
 ```
+
+Every field of each entry is covered by an HMAC-SHA256 chain; `verifyChain()` checks the retained entries (also after eviction). In memory only.

@@ -48,7 +48,7 @@ swift run smallchat compile --source ./manifests/ -o my-tools.toolkit.json
 
 ### `serve`
 
-Start an MCP-compatible HTTP server.
+Serve a toolkit as an MCP server over Streamable HTTP (endpoint `/mcp`).
 
 ```bash
 swift run smallchat serve --source <path> [options]
@@ -56,14 +56,19 @@ swift run smallchat serve --source <path> [options]
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--source`, `-s` | Path to manifests or compiled artifact | Required |
-| `--port`, `-p` | Listen port | `3000` |
+| `--source`, `-s` | Manifest directory, manifest file, or compiled artifact | Required |
+| `--port`, `-p` | Listen port | `3001` |
 | `--host` | Bind address | `127.0.0.1` |
-| `--db` | SQLite database path | `smallchat.db` |
-| `--auth` | Enable OAuth 2.1 authentication | `false` |
-| `--rate-limit` | Enable rate limiting | `false` |
-| `--rpm` | Requests per minute limit | `600` |
-| `--audit` | Enable audit logging | `false` |
+| `--db-path` | SQLite database path for sessions | `smallchat.db` |
+| `--provider` | Serve one provider's tools under their upstream names | all, as `<provider>__<tool>` |
+| `--semantic-dispatch` | Also list the `smallchat_dispatch` meta-tool | `false` |
+| `--auth` | Require a bearer token (`SMALLCHAT_MCP_TOKEN` or the token file) | `false` |
+| `--auth-token-file` | Token file, created with a random token (mode 0600) if missing | `~/.smallchat/serve-token` |
+| `--rate-limit` | Enable per-address rate limiting | `false` |
+| `--rate-limit-rpm` | Requests per minute limit | `600` |
+| `--audit` | Enable the in-memory audit log | `false` |
+| `--max-connections` | Maximum concurrent connections | `1000` |
+| `--session-ttl` | Session TTL in hours | `24` |
 
 **Examples:**
 
@@ -71,23 +76,23 @@ swift run smallchat serve --source <path> [options]
 # Basic server
 swift run smallchat serve --source ./manifests --port 3001
 
-# Production server
+# Exposed beyond loopback: require a token
 swift run smallchat serve --source ./manifests \
   --port 8080 --host 0.0.0.0 \
-  --auth --rate-limit --rpm 1000 --audit
+  --auth --rate-limit --rate-limit-rpm 1000 --audit
 ```
 
 ---
 
 ### `channel`
 
-Start the Claude Code channel server (stdio JSON-RPC).
+Start a Claude Code channel server (stdio JSON-RPC).
 
 ```bash
-swift run smallchat channel
+swift run smallchat channel --name <name> [--two-way] [--permission-relay] [--http-bridge]
 ```
 
-This launches a stdio-based JSON-RPC server for bidirectional communication with Claude Code. It reads from stdin and writes to stdout.
+This launches a stdio-based JSON-RPC server for bidirectional communication with Claude Code. It reads from stdin, writes to stdout, and exits when stdin closes. With `--http-bridge` (and the shared secret in `SMALLCHAT_CHANNEL_SECRET`), `POST /event` on `--http-bridge-host`:`--http-bridge-port` (default `127.0.0.1:3002`) injects events into the channel.
 
 ---
 

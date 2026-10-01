@@ -49,22 +49,24 @@ SmallChat (umbrella)
 │   ├── Streaming/             SSE, NDJSON parsers
 │   └── Importers              OpenAPI, Postman
 │
-├── SmallChatMCP               → Core, Runtime, Transport, SQLite, NIO
-│   ├── MCPServer              NIO HTTP server
-│   ├── MCPRouter              JSON-RPC routing
-│   ├── MCPClientTransport     Client connections
+├── SmallChatMCP               → Core, Runtime, Transport, Compiler, Embedding, SQLite, NIO
+│   ├── MCPServer              Streamable HTTP server (NIO), endpoint /mcp
+│   ├── MCPRouter              JSON-RPC routing, exact tools/call
+│   ├── MCPTools               Tool catalog, CallToolResult shaping
+│   ├── MCPToolkit             Manifests/artifact → runtime of endpoint-backed tools
+│   ├── MCPClientTransport     Streamable HTTP client
 │   ├── SessionStore           SQLite persistence
-│   ├── OAuthManager           OAuth 2.1
 │   ├── RateLimiter            Sliding window
-│   ├── SSEBroker              Event broadcasting
+│   ├── SSEBroker              Event broadcasting helper (not served)
 │   ├── ResourceRegistry       MCP resources
 │   ├── PromptRegistry         MCP prompts
-│   ├── AuditLog               Compliance logging
-│   ├── JsonRPC                JSON-RPC 2.0 codec
+│   ├── AuditLog               HMAC-chained request log (in memory)
+│   ├── JsonRPC                JSON-RPC 2.0 codec, protocol versions
 │   └── Artifact               Compiled artifact I/O
 │
-├── SmallChatChannel           → Core, MCP
+├── SmallChatChannel           → Core, MCP, NIO
 │   ├── ChannelServer          Stdio JSON-RPC server
+│   ├── ChannelBridge          HTTP bridge (POST /event)
 │   ├── ChannelAdapter         MCP → Channel bridge
 │   ├── ChannelTypes           Message/event definitions
 │   ├── SenderGate             Permission relay

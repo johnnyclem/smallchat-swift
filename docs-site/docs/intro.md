@@ -63,7 +63,7 @@ swift run smallchat serve --source ./manifests --port 3001
 - **Audit log integrity** — HMAC-SHA256 hash chain on audit entries with `verifyChain()` tamper detection
 - **Server hardening** — Max connections, max request body size, graceful shutdown with drain timeout
 - **Server metrics** — `/metrics` endpoint tracking request counts, error rates, connections, uptime
-- **TLS configuration** — Certificate pinning, minimum TLS version, development/production presets
+- ~~**TLS configuration**~~ — removed in 1.0: no transport ever applied it, so pinning was never enforced
 - **Identity validation** — Sender format validation, max sender limits, constant-time pairing code verification
 - **Connection tracking** — Real-time active/peak connection monitoring in NIO handler
 

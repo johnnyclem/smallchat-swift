@@ -117,15 +117,9 @@ The `ChannelAdapter` strips sensitive metadata before forwarding events to exter
 
 ## Audit Logging
 
-The `AuditLog` (in SmallChatMCP) records all security-relevant events:
+With `enableAudit`, the MCP server's `AuditLog` (in SmallChatMCP) records each JSON-RPC request it answers: method, session, client address, outcome, duration and error. Entries form an HMAC-SHA256 chain over every field, under a key you supply (`MCPServerConfig.auditKey`; a random key per server otherwise). Editing a retained entry without the key breaks `verifyChain()`.
 
-- Authentication attempts (success/failure)
-- Rate limit triggers
-- Permission requests and verdicts
-- Selector shadowing attempts
-- Intent pin violations
-
-Logs are stored in SQLite for queryability and compliance.
+The log is in memory: it does not survive a restart, and it does not record channel permission verdicts, selector shadowing or intent pin violations.
 
 ## Best Practices
 
@@ -133,6 +127,6 @@ Logs are stored in SQLite for queryability and compliance.
 2. **Register core classes** — Use `registerCoreClass()` for system tools
 3. **Enable rate limiting** — Set appropriate thresholds for your workload
 4. **Enable audit logging** — For production deployments
-5. **Use OAuth** — For MCP server deployments exposed to networks
+5. **Require a bearer token** — `smallchat serve --auth` for MCP servers reachable beyond loopback (OAuth is not implemented)
 6. **Validate at boundaries** — Tool implementations should still validate arguments
 7. **Minimize plugin trust** — Don't grant plugins access to protected namespaces

@@ -27,7 +27,7 @@ const features = [
   {
     title: "MCP Server",
     description:
-      "Production-ready MCP 2024-11-05 server with SSE, OAuth 2.1, rate limiting, session persistence, and audit logging.",
+      "MCP server over Streamable HTTP (2025-11-25) that runs exactly the tool you call, with sessions, bearer-token auth, rate limiting, and an HMAC-chained audit log.",
     icon: "🌐",
   },
   {

@@ -108,11 +108,11 @@ Serve your compiled tools over HTTP:
 swift run smallchat serve --source ./manifests --port 3001
 ```
 
-This starts an MCP-compatible server with:
-- JSON-RPC endpoint at `POST /`
-- SSE streaming at `GET /sse`
+This starts an MCP server over Streamable HTTP with:
+- The MCP endpoint at `http://127.0.0.1:3001/mcp` (tools listed as `<provider>__<tool>`)
 - Health check at `GET /health`
-- Discovery at `GET /.well-known/mcp.json`
+
+Each tool runs at its provider manifest's `endpoint`; tools without one are listed but fail when called.
 
 ## Next Steps
 
