@@ -91,10 +91,11 @@ struct MessengerModelTests {
     }
 
     @Test("rename validates, updates the direct chat title, and persists")
-    func rename() throws {
+    func rename() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("messenger-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: url) }
-        let model = MessengerModel(store: MessengerStore(url: url), transport: MockAgentTransport(), scanner: nil)
+        let store = MessengerStore(url: url, secrets: InMemorySecretStore())
+        let model = MessengerModel(store: store, transport: MockAgentTransport(), scanner: nil)
         model.rebuildAgents(discovered: [
             DiscoveredSession(sessionId: "aaaa-1", cwd: "/r/instrument", gitBranch: nil, title: nil, lastActivity: Date(), transcriptPath: nil, live: nil),
             DiscoveredSession(sessionId: "bbbb-2", cwd: "/r/other", gitBranch: nil, title: nil, lastActivity: Date(), transcriptPath: nil, live: nil),
@@ -106,7 +107,8 @@ struct MessengerModelTests {
         #expect(throws: HandleError.taken("compat-guard")) { try model.rename(agentId: "bbbb-2", to: "compat-guard") }
 
         // A fresh model on the same store keeps the name.
-        let reloaded = MessengerModel(store: MessengerStore(url: url), transport: MockAgentTransport(), scanner: nil)
+        await model.flushPersistence()
+        let reloaded = MessengerModel(store: store, transport: MockAgentTransport(), scanner: nil)
         reloaded.rebuildAgents(discovered: [
             DiscoveredSession(sessionId: "aaaa-1", cwd: "/r/instrument", gitBranch: nil, title: nil, lastActivity: Date(), transcriptPath: nil, live: nil),
         ])

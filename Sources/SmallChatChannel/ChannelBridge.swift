@@ -43,7 +43,9 @@ public struct ChannelInboundEvent: Sendable, Equatable {
     public var isProposal: Bool { meta["kind"] == "proposal" }
     public var proposalId: String? { meta["proposal_id"].flatMap { $0.isEmpty ? nil : $0 } }
     public var draftedBy: String? { meta["drafted_by"] }
-    /// Where stenographer takes the approval (`POST …/proposals/:id/notarize`).
+    /// Where the poster says stenographer takes the approval
+    /// (`POST …/proposals/:id/notarize`). Untrusted event data: the messenger
+    /// ignores it and builds the URL from its own settings.
     public var notarizeURL: URL? { meta["notarize_url"].flatMap(URL.init(string:)) }
 
     func list(_ key: String) -> [String] {

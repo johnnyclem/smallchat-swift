@@ -12,7 +12,10 @@ import FoundationNetworking
 //   POST /proposals/:id/dismiss  {dismissedBy, reason}
 //
 // The POSTs need `X-Notary-Secret` (stenographer's STENOGRAPHER_NOTARY_SECRET).
-// The messenger uses its channel secret for both, and never hands it to agents.
+// The messenger keeps a notary secret of its own, separate from the channel
+// secret stenographer posts objections with, and never hands it to agents.
+// The URL is always built from the configured REST port, never taken from a
+// channel event, so a forged event can't collect the secret.
 
 public enum NotaryDecision: Sendable, Equatable {
     case approve(notary: String)
@@ -69,9 +72,19 @@ public enum NotaryClient {
         return json?["id"] as? String
     }
 
-    /// `restBase/proposals/:id/notarize`.
-    public static func notarizeURL(restBase: URL, proposalId: String) -> URL {
-        restBase.appendingPathComponent("proposals").appendingPathComponent(proposalId).appendingPathComponent("notarize")
+    /// `restBase/proposals/:id/notarize`, or nil when `proposalId` isn't a
+    /// plain id (see `isValidProposalId`).
+    public static func notarizeURL(restBase: URL, proposalId: String) -> URL? {
+        guard isValidProposalId(proposalId) else { return nil }
+        return restBase.appendingPathComponent("proposals").appendingPathComponent(proposalId).appendingPathComponent("notarize")
+    }
+
+    /// Stenographer's ids are ULIDs. Anything beyond letters, digits, `-`
+    /// and `_` (a `/`, `..`, `?`) could steer a request elsewhere.
+    public static func isValidProposalId(_ id: String) -> Bool {
+        !id.isEmpty && id.utf8.count <= 128 && id.unicodeScalars.allSatisfy {
+            $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_")
+        }
     }
 
     /// Open agent drafts in stenographer's inbox, for when the push was missed.
@@ -84,17 +97,17 @@ public enum NotaryClient {
         guard (200..<300).contains(status) else {
             throw NotaryError.rejected(status: status, message: HTTPURLResponse.localizedString(forStatusCode: status))
         }
-        return try parseInbox(data, restBase: restBase)
+        return try parseInbox(data)
     }
 
     /// The agent drafts in a `GET /proposals` response (other proposals are
     /// detector output the user signs elsewhere).
-    public static func parseInbox(_ data: Data, restBase: URL) throws -> [PendingProposal] {
+    public static func parseInbox(_ data: Data) throws -> [PendingProposal] {
         guard let entries = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             throw NotaryError.badResponse
         }
         return entries.compactMap { entry in
-            guard let id = entry["id"] as? String,
+            guard let id = entry["id"] as? String, isValidProposalId(id),
                   let body = entry["body"] as? [String: Any],
                   body["requiresNotary"] as? Bool == true,
                   body["status"] as? String == "open"
@@ -107,8 +120,7 @@ public enum NotaryClient {
                 id: id,
                 draftedBy: author,
                 sessionIds: (entry["agentSessionId"] as? String).map { [$0] } ?? [],
-                content: "\(author) drafted a tombstone for your approval (\(id)): \(claim)" + (why.map { "\nWhy: \($0)" } ?? ""),
-                notarizeURL: notarizeURL(restBase: restBase, proposalId: id)
+                content: "\(author) drafted a tombstone for your approval (\(id)): \(claim)" + (why.map { "\nWhy: \($0)" } ?? "")
             )
         }
     }

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Observation
 import SmallChatChannel
 import SmallChatTruth
@@ -36,6 +39,12 @@ public final class MessengerModel {
     /// Tombstones agents drafted for the user to notarize, newest first.
     public private(set) var pendingProposals: [PendingProposal] = []
     public private(set) var objectionChannelStatus: ObjectionChannelStatus = .off
+    /// Authenticates stenographer's posts to the objection channel bridge
+    /// (`SMALLCHAT_CHANNEL_SECRET`).
+    public private(set) var channelSecret: String
+    /// Authenticates the messenger's notarize and dismiss calls to
+    /// stenographer (`STENOGRAPHER_NOTARY_SECRET`). Never the channel secret.
+    public private(set) var notarySecret: String
     /// Last problem worth telling the user about.
     public var lastError: String?
 
@@ -58,6 +67,9 @@ public final class MessengerModel {
     private var activitySizes: [String: UInt64] = [:]
     /// Result of the last disk scan, reused when rebuilding after local changes.
     private var lastDiscovered: [DiscoveredSession] = []
+    /// Sends a notary decision to stenographer (replaced in tests).
+    @ObservationIgnored
+    var notarySender: @Sendable (URLRequest) async throws -> String? = { try await NotaryClient.send($0) }
 
     public init(store: MessengerStore, transport: any AgentTransport, scanner: ClaudeSessionScanner?) {
         let snapshot = store.load()
@@ -68,13 +80,40 @@ public final class MessengerModel {
         self.conversations = snapshot.conversations
         self.stenographerSessions = snapshot.stenographerSessions
         self.settings = snapshot.settings
-        if settings.objectionChannelSecret.isEmpty {
-            settings.objectionChannelSecret = ChannelBridgeProtocol.generateSecret()
+        let secrets = Self.ensureSecrets(in: store.secrets)
+        self.channelSecret = secrets.channel
+        self.notarySecret = secrets.notary
+        if let problem = secrets.problem { lastError = problem }
+        if settings.carriesLegacySecret {
+            // An older build kept the channel secret in messenger.json; the
+            // secrets above are new, and the file is rewritten without it.
+            settings.carriesLegacySecret = false
             persist()
         }
         rebuildAgents()
         listenForInbound()
         reloadLedger()
+    }
+
+    /// The stored channel and notary secrets, generated (distinct from each
+    /// other) when missing. A store that can't be written still yields
+    /// secrets for this session, with a problem to show.
+    static func ensureSecrets(in store: any MessengerSecretStore) -> (channel: String, notary: String, problem: String?) {
+        var problem: String?
+        func value(_ secret: MessengerSecret, distinctFrom other: String?) -> String {
+            if let existing = store.read(secret), !existing.isEmpty, existing != other { return existing }
+            var fresh = ChannelBridgeProtocol.generateSecret()
+            while fresh == other { fresh = ChannelBridgeProtocol.generateSecret() }
+            do {
+                try store.write(fresh, for: secret)
+            } catch {
+                problem = "Couldn't save the \(secret.label): \(error). It will change on the next launch."
+            }
+            return fresh
+        }
+        let channel = value(.channel, distinctFrom: nil)
+        let notary = value(.notary, distinctFrom: channel)
+        return (channel, notary, problem)
     }
 
     /// Swap the transport (e.g. after the `claude` path changes in Settings).
@@ -611,7 +650,7 @@ public final class MessengerModel {
         guard settings.objectionChannelEnabled else { return }
         let server = ChannelBridgeServer(
             port: settings.objectionChannelPort,
-            secret: settings.objectionChannelSecret
+            secret: channelSecret
         ) { [weak self] event in
             Task { @MainActor in self?.handleChannelEvent(event) }
         }
@@ -634,6 +673,21 @@ public final class MessengerModel {
     /// The `--objection-channel` URL to give stenographer.
     public var objectionChannelURL: String {
         "http://127.0.0.1:\(objectionChannelStatus.port ?? settings.objectionChannelPort)"
+    }
+
+    /// Shell command that starts stenographer delivering objections to this
+    /// app. Each secret is read where the messenger keeps it (the Keychain on
+    /// macOS) when the command runs, so neither value is in the command, the
+    /// clipboard or the shell history.
+    public var stenographerLaunchCommand: String {
+        let environment = MessengerSecret.allCases.compactMap { secret in
+            store.secrets.shellExpression(for: secret).map { "\(secret.environmentVariable)=\"\($0)\"" }
+        }
+        return (environment + [
+            "npx -y @stenographer/core start <log-or-dir>",
+            "--objections deliver --objection-channel \(objectionChannelURL)",
+            "--rest-port \(settings.stenographerRestPort) --require-notary",
+        ]).joined(separator: " ")
     }
 
     /// Route a bridge event to the agents it names (`meta.session_ids`).
@@ -706,13 +760,14 @@ public final class MessengerModel {
     /// An agent drafted a tombstone: queue it for the user and say so in the
     /// drafting agent's chat. The draft never reaches the agent as truth.
     private func receiveProposal(_ event: ChannelInboundEvent) {
-        guard let id = event.proposalId, !pendingProposals.contains(where: { $0.id == id }) else { return }
+        guard let id = event.proposalId, NotaryClient.isValidProposalId(id),
+              !pendingProposals.contains(where: { $0.id == id }) else { return }
+        // `event.notarizeURL` is ignored: decisions go to the configured REST port.
         pendingProposals.insert(PendingProposal(
             id: id,
             draftedBy: event.draftedBy ?? event.sender ?? "an agent",
             sessionIds: event.sessionIds,
-            content: event.content,
-            notarizeURL: event.notarizeURL ?? NotaryClient.notarizeURL(restBase: stenographerRestBase, proposalId: id)
+            content: event.content
         ), at: 0)
         for target in event.sessionIds.compactMap({ agent($0) }) {
             append(ChatMessage(
@@ -738,11 +793,11 @@ public final class MessengerModel {
     /// Notarize (sign as the user) or decline a draft.
     public func decide(proposalId: String, _ decision: NotaryDecision) async {
         guard let proposal = pendingProposals.first(where: { $0.id == proposalId }), proposal.state.isOpen else { return }
-        guard let url = proposal.notarizeURL else {
-            setProposalState(proposalId, .failed("Stenographer didn't say where to notarize this. Is its REST API on?"))
+        guard let url = NotaryClient.notarizeURL(restBase: stenographerRestBase, proposalId: proposal.id) else {
+            setProposalState(proposalId, .failed("“\(proposal.id)” isn't a stenographer proposal id."))
             return
         }
-        guard !settings.objectionChannelSecret.isEmpty else {
+        guard !notarySecret.isEmpty else {
             setProposalState(proposalId, .failed("No notary secret is set."))
             return
         }
@@ -752,8 +807,8 @@ public final class MessengerModel {
         }
         setProposalState(proposalId, .working)
         do {
-            let request = try NotaryClient.request(for: decision, notarizeURL: url, secret: settings.objectionChannelSecret)
-            let entryId = try await NotaryClient.send(request)
+            let request = try NotaryClient.request(for: decision, notarizeURL: url, secret: notarySecret)
+            let entryId = try await notarySender(request)
             switch decision {
             case .approve: setProposalState(proposalId, .notarized(entryId: entryId))
             case .decline: setProposalState(proposalId, .declined)
@@ -883,6 +938,11 @@ public final class MessengerModel {
         guard let c = conversations.firstIndex(where: { $0.id == conversationId }),
               let m = conversations[c].messages.firstIndex(where: { $0.id == messageId }) else { return }
         change(&conversations[c].messages[m])
+        persist()
+    }
+
+    /// Write any pending changes to the store now.
+    public func flushPersistence() async {
         persist()
     }
 

@@ -231,6 +231,28 @@ Update Claude Code if a launch fails with an unknown option.
 Custom transports must implement `func shutdown() async` (an empty body is fine
 when nothing keeps running).
 
+### Two secrets, kept out of `messenger.json`
+
+The objection channel secret and the new notary secret are generated on the first
+1.0 launch and kept in the Keychain on macOS (0600 files beside `messenger.json`
+elsewhere); the secret older builds stored in `messenger.json` is removed. To
+reconnect stenographer, stop it and start it again with **Settings → Objection
+channel → Copy stenographer command**. The command reads both secrets when it runs
+(`SMALLCHAT_CHANNEL_SECRET="$(security find-generic-password …)"`), so the first
+run asks you to let `security` read them. If an older command with a secret in it
+is in your shell history, delete that line.
+
+In code:
+
+- `settings.objectionChannelSecret` is gone: read `model.channelSecret`, and
+  `model.notarySecret` for stenographer's `STENOGRAPHER_NOTARY_SECRET`.
+- `MessengerStore(url:)` with a file uses the Keychain on macOS. Pass
+  `MessengerStore(url: url, secrets: InMemorySecretStore())` (or a
+  `FileSecretStore`) in tests and previews to keep them out of the Keychain.
+- `PendingProposal.notarizeURL` is gone. Build the URL with
+  `NotaryClient.notarizeURL(restBase:proposalId:)`, which now returns an optional,
+  and call `NotaryClient.parseInbox(_:)` without `restBase`.
+
 ### Live sessions without a known name
 
 Sending to a live session whose Claude Code name isn't known now fails with

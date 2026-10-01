@@ -7,16 +7,26 @@ import Testing
 import SmallChatChannel
 
 /// What stenographer's `raiseForNotarization` posts to the channel bridge.
-private func proposalEvent(_ id: String = "01PROP", sessions: String = "live-1") -> ChannelInboundEvent {
+private func proposalEvent(
+    _ id: String = "01PROP", sessions: String = "live-1", notarizeURL: String? = nil
+) -> ChannelInboundEvent {
     ChannelInboundEvent(
         channel: "stenographer",
         content: "✍️ claude-code:@app drafted a tombstone for your approval (\(id)): LOG_BUDGET 30 is dead",
         meta: [
             "kind": "proposal", "proposal_id": id, "drafted_by": "claude-code:@app",
-            "session_ids": sessions, "notarize_url": "http://127.0.0.1:8787/proposals/\(id)/notarize",
+            "session_ids": sessions, "notarize_url": notarizeURL ?? "http://127.0.0.1:8787/proposals/\(id)/notarize",
         ],
         sender: "stenographer"
     )
+}
+
+/// Requests a test's notary sender saw.
+private final class CapturedRequests: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requests: [URLRequest] = []
+    func add(_ request: URLRequest) { lock.withLock { requests.append(request) } }
+    var all: [URLRequest] { lock.withLock { requests } }
 }
 
 @Suite("Notary client")
@@ -62,13 +72,14 @@ struct NotaryClientTests {
         ]
         """#
         let base = URL(string: "http://127.0.0.1:8787")!
-        let drafts = try NotaryClient.parseInbox(Data(json.utf8), restBase: base)
+        let drafts = try NotaryClient.parseInbox(Data(json.utf8))
         #expect(drafts.map(\.id) == ["A"])
         #expect(drafts[0].draftedBy == "claude-code:@app")
         #expect(drafts[0].sessionIds == ["live-1"])
         #expect(drafts[0].content.contains("LOG_BUDGET 30 is dead"))
         #expect(drafts[0].content.contains("Why: bumped in a1b2c3"))
-        #expect(drafts[0].notarizeURL?.absoluteString == "http://127.0.0.1:8787/proposals/A/notarize")
+        #expect(NotaryClient.notarizeURL(restBase: base, proposalId: "A")?.absoluteString == "http://127.0.0.1:8787/proposals/A/notarize")
+        #expect(NotaryClient.notarizeURL(restBase: base, proposalId: "../A") == nil)
     }
 }
 
@@ -98,6 +109,39 @@ struct NotaryInboxTests {
         let chat = try #require(model.directConversation(with: "live-1"))
         #expect(chat.messages.contains { $0.author == .stenographer && $0.text.contains("Approve or decline") })
         #expect(transport.sent.isEmpty, "the drafting agent must not receive its own draft as a message")
+    }
+
+    @Test("decisions use the notary secret and the configured REST port, never the event's URL")
+    func notarySecretAndLocalURL() async throws {
+        let (model, _) = makeModel()
+        let captured = CapturedRequests()
+        model.notarySender = { request in
+            captured.add(request)
+            return "TB-NEW"
+        }
+        model.settings.stenographerRestPort = 8799
+        model.handleChannelEvent(proposalEvent(notarizeURL: "http://evil.example/steal"))
+        await model.decide(proposalId: "01PROP", .approve(notary: "johnny"))
+
+        let request = try #require(captured.all.first)
+        #expect(request.url?.absoluteString == "http://127.0.0.1:8799/proposals/01PROP/notarize")
+        #expect(request.value(forHTTPHeaderField: "X-Notary-Secret") == model.notarySecret)
+        #expect(request.value(forHTTPHeaderField: "X-Notary-Secret") != model.channelSecret)
+        #expect(model.pendingProposals.first?.state == .notarized(entryId: "TB-NEW"))
+    }
+
+    @Test("a proposal id that isn't a plain id is never put in a URL")
+    func oddProposalId() async {
+        let (model, _) = makeModel()
+        let captured = CapturedRequests()
+        model.notarySender = { request in
+            captured.add(request)
+            return nil
+        }
+        model.handleChannelEvent(proposalEvent("../../signers"))
+        #expect(model.pendingProposals.isEmpty)
+        await model.decide(proposalId: "../../signers", .approve(notary: "johnny"))
+        #expect(captured.all.isEmpty)
     }
 
     @Test("approving needs a signer identity")

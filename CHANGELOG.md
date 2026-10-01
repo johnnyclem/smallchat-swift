@@ -147,6 +147,22 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   `<Application Support>/SmallChat/switchboard`
   (`ClaudeCodeTransport.Configuration.switchboardDirectory`), not your home
   directory.
+- **The messenger keeps two secrets, outside `messenger.json`.**
+  `MessengerSettings.objectionChannelSecret` is removed. `MessengerModel.channelSecret`
+  authenticates stenographer to the objection-channel bridge
+  (`SMALLCHAT_CHANNEL_SECRET`) and the new `MessengerModel.notarySecret` authenticates
+  the messenger's notarize and dismiss calls (`X-Notary-Secret`,
+  `STENOGRAPHER_NOTARY_SECRET`). Both live in `MessengerStore.secrets`, a
+  `MessengerSecretStore`: the Keychain on macOS (`KeychainSecretStore`), 0600 files
+  in a 0700 directory elsewhere (`FileSecretStore`), or `InMemorySecretStore` for a
+  store without a file. `MessengerStore.init(url:secrets:)` picks the platform's
+  store when `secrets` is nil. Both secrets are generated anew on the first 1.0
+  launch, and the old one is removed from `messenger.json`.
+- **Notarize URLs come only from the messenger's settings.**
+  `PendingProposal.notarizeURL` is removed and `NotaryClient.parseInbox(_:)` no
+  longer takes `restBase`. `NotaryClient.notarizeURL(restBase:proposalId:)` returns
+  nil for an id other than letters, digits, `-` and `_`
+  (`NotaryClient.isValidProposalId(_:)`); such proposals are not queued.
 
 ### Fixed
 
@@ -270,6 +286,18 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   appended a divergent branch to the same transcript. Live sessions are only ever
   messaged, and headless turns of one session (agent or stenographer) now wait for
   each other.
+- **Notarization no longer rides on the channel secret.** The messenger signed its
+  notarize and dismiss calls with the objection-channel secret, so anything given
+  that secret to post events could also mint tombstones. The secret sat in
+  plaintext in `messenger.json`, where an agent's Read tool could reach it, and the
+  copyable stenographer command set it inline, so it also landed in shell history.
+  The notary secret is now separate, both are kept in the Keychain, and the copied
+  command (`npx -y @stenographer/core start …`) reads them with
+  `security find-generic-password` when it runs instead of containing them.
+- **A channel event can't redirect the notary secret.** The messenger posted
+  approvals to whatever `meta.notarize_url` a proposal event named, sending the
+  secret along. It now always posts to `http://127.0.0.1:<stenographer REST port>`
+  from its settings, and ignores proposal ids that could change the path.
 - **Changing the `claude` path stops the old switchboard.** The replaced transport
   was never shut down, so a second switchboard named `smallchat` kept running, and
   agents' replies could reach the one nobody listened to. A switchboard that ended
