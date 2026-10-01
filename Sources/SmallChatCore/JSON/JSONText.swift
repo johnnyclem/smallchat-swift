@@ -37,6 +37,9 @@ public enum LoneSurrogatePolicy: Sendable {
 /// Unlike Foundation's decoders this keeps every number exactly as a
 /// TypeScript peer sees it, which is what content hashes and call digests
 /// need. Duplicate object keys keep the last value (as `JSON.parse` does).
+/// Two member names that differ in code points but are canonically
+/// equivalent (`"\u00e9"` and `"e\u0301"`) are refused: `JSON.parse` and
+/// RFC 8785 keep both members, a Swift dictionary would silently keep one.
 /// A `\u` escape that leaves a lone UTF-16 surrogate is refused by
 /// default, since a Swift `String` cannot hold one (`LoneSurrogatePolicy`).
 public func parseJSON(_ text: String, loneSurrogates: LoneSurrogatePolicy = .reject) throws -> AnyCodableValue {
@@ -130,7 +133,14 @@ private struct JSONTextParser {
             guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") else {
                 throw error("expected an object key")
             }
+            let keyOffset = index
             let key = try parseString()
+            // Swift String keys compare by canonical equivalence: a different
+            // spelling of a name already present would replace that member.
+            if let existing = object.index(forKey: key),
+               !object[existing].key.unicodeScalars.elementsEqual(key.unicodeScalars) {
+                throw JSONParseError(offset: keyOffset, reason: "two member names are canonically equivalent but not identical; an object cannot hold both")
+            }
             skipWhitespace()
             guard index < bytes.count, bytes[index] == UInt8(ascii: ":") else { throw error("expected ':'") }
             index += 1

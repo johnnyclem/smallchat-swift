@@ -313,6 +313,32 @@ struct MCPHTTPServerTests {
         }
     }
 
+    @Test("JCS-CANONICAL-EQUIV-KEYS: a request whose member names are canonically equivalent is a parse error")
+    func canonicallyEquivalentKeys() async throws {
+        let server = try MCPServer(config: MCPServerConfig(sourcePath: "", dbPath: ":memory:"))
+        var headers = HTTPHeaders()
+        headers.add(name: "Host", value: "127.0.0.1:3001")
+        headers.add(name: "Content-Type", value: "application/json")
+        let body = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"arguments":{"é":1,"é":2}}}"#
+        let response = await server.handleHTTP(MCPHTTPRequest(method: .POST, uri: "/mcp", headers: headers, body: Array(body.utf8)))
+        #expect(response.status == .badRequest)
+        guard case .dict(let reply) = try parseJSON(response.body), case .dict(let error)? = reply["error"] else {
+            Issue.record("not a JSON-RPC error: \(String(decoding: response.body, as: UTF8.self))")
+            return
+        }
+        #expect(error["code"] == .int(MCPErrorCode.parseError.rawValue))
+
+        // Numbers read as JSON.parse reads them; an id written 1.0 is still the integer 1.
+        let integral = #"{"jsonrpc":"2.0","id":1.0,"method":"initialize","params":{}}"#
+        let ok = await server.handleHTTP(MCPHTTPRequest(method: .POST, uri: "/mcp", headers: headers, body: Array(integral.utf8)))
+        #expect(ok.status == .ok)
+        guard case .dict(let reply) = try parseJSON(ok.body) else {
+            Issue.record("not JSON")
+            return
+        }
+        #expect(reply["id"] == .int(1))
+    }
+
     @Test("SW-REV-01: only localhost, ::1 and IPv4 literals in 127.0.0.0/8 are loopback")
     func loopbackHostNames() {
         for host in ["localhost", "LOCALHOST", "::1", "[::1]", "0:0:0:0:0:0:0:1", "127.0.0.1", "127.0.0.2", "127.255.255.255"] {

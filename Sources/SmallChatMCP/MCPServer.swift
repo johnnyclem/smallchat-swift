@@ -480,13 +480,14 @@ public actor MCPServer {
             }
         }
 
-        // Parse one JSON-RPC message.
-        let json = try? JSONSerialization.jsonObject(with: Data(request.body), options: [.fragmentsAllowed])
-        if json is [Any] {
+        // Parse one JSON-RPC message with the reader call digests are computed
+        // from: numbers as JSON.parse reads them, and member names that only
+        // a Swift dictionary would merge (canonically equivalent) refused.
+        let json = try? parseJSON(request.body)
+        if case .array? = json {
             return .rpcError(.badRequest, code: .invalidRequest, "JSON-RPC batches are not supported")
         }
-        guard json is [String: Any],
-              let dict = try? JSONDecoder().decode([String: AnyCodableValue].self, from: Data(request.body)) else {
+        guard case .dict(let dict)? = json else {
             return .rpcError(.badRequest, code: .parseError, "Parse error")
         }
         // A client's response to a server request (the server sends none).

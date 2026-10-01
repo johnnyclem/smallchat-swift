@@ -360,6 +360,8 @@ public func validateRPCEnvelope(_ dict: [String: AnyCodableValue]) -> Result<JSO
         switch idValue {
         case .string(let s): id = .string(s)
         case .int(let i): id = .int(i)
+        // `1.0` (or 1e3) reads as a double, as JSON.parse would; its value is an integer.
+        case .double(let d) where d.rounded() == d && abs(d) <= 9_007_199_254_740_992: id = .int(Int(d))
         case .null: id = .null
         default:
             return .failure(JSONRPCError(
