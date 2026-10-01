@@ -239,6 +239,17 @@ struct LiveRefreshTests {
         #expect(model.agent("cccc-3")?.activity == .stopped)
     }
 
+    @Test("swapping the transport shuts the old one down")
+    func swapShutsDown() async {
+        let old = MockAgentTransport()
+        let model = MessengerModel(store: MessengerStore(url: nil), transport: old, scanner: nil)
+        let replacement = MockAgentTransport()
+        model.setTransport(replacement)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(old.shutdownCount == 1)
+        #expect(replacement.shutdownCount == 0)
+    }
+
     @Test("missing CLI fails sends with a helpful error")
     func unavailable() async {
         let model = MessengerModel(store: MessengerStore(url: nil), transport: UnavailableTransport(), scanner: nil)

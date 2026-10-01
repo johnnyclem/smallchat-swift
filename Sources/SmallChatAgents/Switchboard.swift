@@ -247,20 +247,23 @@ public actor Switchboard {
         }
     }
 
+    /// Stop the switchboard process (stdin closed, then SIGTERM) and fail
+    /// whatever was waiting on it. The next relay starts a new one.
     public func shutdown() {
         process?.closeInput()
         process?.terminate()
         process = nil
         readTask?.cancel()
+        readTask = nil
         failAll("switchboard stopped")
     }
 
     // MARK: Internals
 
-    private func awaitTicket(_ ticket: String, send: @Sendable () -> Void) async throws {
+    private func awaitTicket(_ ticket: String, send: @Sendable () -> Bool) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             pending[ticket] = cont
-            send()
+            if !send() { fail(ticket, reason: "the switchboard isn't reading its input") }
         }
     }
 
@@ -283,6 +286,11 @@ public actor Switchboard {
 
     private func ensureRunning() throws -> ClaudeProcess {
         if let process, process.isRunning { return process }
+        if let cwd {
+            try? FileManager.default.createDirectory(
+                atPath: cwd, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
+            )
+        }
         let invocation = ClaudeCommand.switchboard(
             executable: executable, name: name,
             systemPrompt: SwitchboardProtocol.systemPrompt(name: name, nonce: nonce),
@@ -296,15 +304,18 @@ public actor Switchboard {
                 for try await line in process.lines {
                     await self?.handle(line: line)
                 }
-                await self?.processEnded(reason: "switchboard exited")
+                await self?.processEnded(process, reason: "switchboard exited")
             } catch {
-                await self?.processEnded(reason: String(describing: error))
+                await self?.processEnded(process, reason: String(describing: error))
             }
         }
         return process
     }
 
-    private func processEnded(reason: String) {
+    /// Only the current process's end fails pending work: a switchboard
+    /// stopped or replaced earlier mustn't fail its successor's tickets.
+    private func processEnded(_ ended: ClaudeProcess, reason: String) {
+        guard process === ended else { return }
         process = nil
         failAll(reason)
     }

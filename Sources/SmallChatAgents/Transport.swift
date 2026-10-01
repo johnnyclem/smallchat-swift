@@ -38,6 +38,47 @@ public protocol AgentTransport: Sendable {
 
     /// Claude Code's own names for live sessions, when the transport can list them.
     func listLiveNames() async -> [(name: String, cwd: String)]
+
+    /// Stop any processes the transport keeps running (the switchboard).
+    /// Called when the messenger replaces the transport.
+    func shutdown() async
+}
+
+public enum AgentTransportError: Error, Equatable, CustomStringConvertible {
+    /// The session is running, but Claude Code hasn't reported its name, so
+    /// it can't be messaged; resuming it would run a second copy of it.
+    case liveSessionUnnamed(handle: String)
+
+    public var description: String {
+        switch self {
+        case .liveSessionUnnamed(let handle):
+            return "@\(handle) is running, but Claude Code hasn't reported its session name, so smallchat can't message it. "
+                + "It wasn't resumed: that would run a second copy of the session. Try again once its name shows, or after it stops."
+        }
+    }
+}
+
+/// One headless turn per session at a time. A second `--resume` of a session
+/// waits for the first to finish instead of appending a divergent branch to
+/// the same transcript.
+actor SessionTurnGate {
+    private var busy = Set<String>()
+    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func acquire(_ id: String) async {
+        if busy.insert(id).inserted { return }
+        await withCheckedContinuation { waiters[id, default: []].append($0) }
+    }
+
+    func release(_ id: String) {
+        if var queue = waiters[id], !queue.isEmpty {
+            let next = queue.removeFirst()
+            waiters[id] = queue.isEmpty ? nil : queue
+            next.resume()  // the turn passes to the next waiter; `id` stays busy
+        } else {
+            busy.remove(id)
+        }
+    }
 }
 
 // MARK: - Claude Code
@@ -50,13 +91,22 @@ public final class ClaudeCodeTransport: AgentTransport, @unchecked Sendable {
         public var stenographerModel: String = "sonnet"
         /// Fixed switchboard framing nonce, for tests. nil: a fresh random one.
         public var switchboardNonce: String?
+        /// The switchboard's working directory: one of its own, so no
+        /// project's settings or CLAUDE.md apply to it.
+        public var switchboardDirectory: String = ClaudeCodeTransport.defaultSwitchboardDirectory()
 
         public init(executable: String) { self.executable = executable }
     }
 
     private let config: Configuration
     private let switchboard: Switchboard
+    private let turns = SessionTurnGate()
     public let inbound: AsyncStream<InboundReply>
+
+    /// `<Application Support>/SmallChat/switchboard`.
+    public static func defaultSwitchboardDirectory() -> String {
+        MessengerStore.defaultURL().deletingLastPathComponent().appendingPathComponent("switchboard", isDirectory: true).path
+    }
 
     public init(config: Configuration) {
         self.config = config
@@ -64,7 +114,7 @@ public final class ClaudeCodeTransport: AgentTransport, @unchecked Sendable {
             executable: config.executable,
             name: config.switchboardName,
             model: config.switchboardModel,
-            cwd: FileManager.default.homeDirectoryForCurrentUser.path,
+            cwd: config.switchboardDirectory,
             nonce: config.switchboardNonce ?? SwitchboardProtocol.makeNonce()
         )
         self.switchboard = switchboard
@@ -80,7 +130,11 @@ public final class ClaudeCodeTransport: AgentTransport, @unchecked Sendable {
     }
 
     public func send(_ body: String, to agent: AgentSession, style: DeliveryStyle) -> AsyncThrowingStream<TransportEvent, Error> {
-        if agent.isLive, let name = agent.claudeName {
+        if agent.isLive {
+            // A running session is only ever messaged, never resumed.
+            guard let name = agent.claudeName else {
+                return AsyncThrowingStream { $0.finish(throwing: AgentTransportError.liveSessionUnnamed(handle: agent.handle)) }
+            }
             let switchboard = self.switchboard
             let hint = SwitchboardProtocol.replyHint(switchboardName: config.switchboardName)
             return AsyncThrowingStream { continuation in
@@ -96,11 +150,10 @@ public final class ClaudeCodeTransport: AgentTransport, @unchecked Sendable {
                 continuation.onTermination = { _ in task.cancel() }
             }
         }
-        // Not running anywhere: resume it headlessly for one turn. (A live
-        // session we can't name is also resumed rather than dropped.)
+        // Not running anywhere: resume it headlessly for one turn.
         return run(ClaudeCommand.resume(
             executable: config.executable, sessionId: agent.id, prompt: body, cwd: agent.cwd
-        ))
+        ), oneTurnAtATimeFor: agent.id)
     }
 
     public func startSession(name: String, cwd: String, prompt: String) -> AsyncThrowingStream<TransportEvent, Error> {
@@ -111,7 +164,7 @@ public final class ClaudeCodeTransport: AgentTransport, @unchecked Sendable {
         run(ClaudeCommand.stenographer(
             executable: config.executable, prompt: prompt, systemPrompt: brief,
             resumeSessionId: resumeSessionId, model: config.stenographerModel, cwd: cwd
-        ))
+        ), oneTurnAtATimeFor: resumeSessionId)
     }
 
     public func listLiveNames() async -> [(name: String, cwd: String)] {
@@ -123,47 +176,58 @@ public final class ClaudeCodeTransport: AgentTransport, @unchecked Sendable {
     }
 
     /// Run one headless turn and translate its stream into transport events.
-    private func run(_ invocation: ClaudeInvocation) -> AsyncThrowingStream<TransportEvent, Error> {
-        AsyncThrowingStream { continuation in
+    /// With `sessionId`, the turn waits until no other turn of that session
+    /// is running.
+    private func run(_ invocation: ClaudeInvocation, oneTurnAtATimeFor sessionId: String? = nil) -> AsyncThrowingStream<TransportEvent, Error> {
+        let turns = self.turns
+        return AsyncThrowingStream { continuation in
             let process = ClaudeProcess(invocation)
             let task = Task {
-                do {
-                    try process.start()
-                    process.closeInput()
-                    continuation.yield(.delivered)
-                    var lastText: String?
-                    var replied = false
-                    for try await line in process.lines {
-                        switch StreamJSON.parse(line: line) {
-                        case .initialized(let id, _):
-                            continuation.yield(.sessionStarted(id))
-                        case .toolUse(let name, let input):
-                            let summary = TranscriptActivity.summarize(tool: name, input: input)
-                            continuation.yield(.activity(summary.isEmpty ? name : "\(name) · \(summary)"))
-                        case .assistantText(let text):
-                            lastText = text
-                        case .result(let text, let isError, _, _):
-                            if isError {
-                                throw SwitchboardError(reason: text ?? "the turn failed")
-                            }
-                            if let reply = (text?.isEmpty == false ? text : lastText) {
-                                continuation.yield(.reply(reply))
-                                replied = true
-                            }
-                        default:
-                            break
-                        }
-                    }
-                    if !replied, let lastText { continuation.yield(.reply(lastText)) }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+                if let sessionId { await turns.acquire(sessionId) }
+                await Self.drive(process, into: continuation)
+                if let sessionId { await turns.release(sessionId) }
             }
             continuation.onTermination = { _ in
                 task.cancel()
                 process.terminate()
             }
+        }
+    }
+
+    private static func drive(_ process: ClaudeProcess, into continuation: AsyncThrowingStream<TransportEvent, Error>.Continuation) async {
+        do {
+            try Task.checkCancellation()
+            try process.start()
+            continuation.yield(.delivered)
+            var lastText: String?
+            var replied = false
+            for try await line in process.lines {
+                switch StreamJSON.parse(line: line) {
+                case .initialized(let id, _):
+                    continuation.yield(.sessionStarted(id))
+                case .toolUse(let name, let input):
+                    let summary = TranscriptActivity.summarize(tool: name, input: input)
+                    continuation.yield(.activity(summary.isEmpty ? name : "\(name) · \(summary)"))
+                case .assistantText(let text):
+                    lastText = text
+                case .result(let text, let isError, _, _):
+                    if isError {
+                        throw SwitchboardError(reason: text ?? "the turn failed")
+                    }
+                    if let reply = (text?.isEmpty == false ? text : lastText) {
+                        continuation.yield(.reply(reply))
+                        replied = true
+                    }
+                default:
+                    break
+                }
+            }
+            if Task.isCancelled { process.terminate() }
+            if !replied, let lastText { continuation.yield(.reply(lastText)) }
+            continuation.finish()
+        } catch {
+            process.terminate()
+            continuation.finish(throwing: error)
         }
     }
 }
@@ -185,6 +249,7 @@ public struct UnavailableTransport: AgentTransport {
     public func startSession(name: String, cwd: String, prompt: String) -> AsyncThrowingStream<TransportEvent, Error> { failing() }
     public func askStenographer(_ prompt: String, brief: String, resumeSessionId: String?, cwd: String?) -> AsyncThrowingStream<TransportEvent, Error> { failing() }
     public func listLiveNames() async -> [(name: String, cwd: String)] { [] }
+    public func shutdown() async {}
 }
 
 // MARK: - Factory
@@ -208,6 +273,7 @@ public enum AgentTransports {
 public final class MockAgentTransport: AgentTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var _sent: [(body: String, agentId: String, style: DeliveryStyle)] = []
+    private var _shutdownCount = 0
     private let inboundContinuation: AsyncStream<InboundReply>.Continuation
     public let inbound: AsyncStream<InboundReply>
     /// Builds each agent's reply; nil means "live agent — reply later via inbound".
@@ -225,6 +291,16 @@ public final class MockAgentTransport: AgentTransport, @unchecked Sendable {
     public var sent: [(body: String, agentId: String, style: DeliveryStyle)] {
         lock.lock(); defer { lock.unlock() }
         return _sent
+    }
+
+    /// How many times `shutdown()` was called.
+    public var shutdownCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _shutdownCount
+    }
+
+    public func shutdown() async {
+        lock.withLock { _shutdownCount += 1 }
     }
 
     /// Simulate a live agent replying via the switchboard.

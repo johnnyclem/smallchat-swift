@@ -78,9 +78,13 @@ public final class MessengerModel {
     }
 
     /// Swap the transport (e.g. after the `claude` path changes in Settings).
+    /// The old one is shut down, so its switchboard doesn't linger under the
+    /// same name and swallow replies nobody reads.
     public func setTransport(_ transport: any AgentTransport) {
+        let previous = self.transport
         self.transport = transport
         listenForInbound()
+        Task { await previous.shutdown() }
     }
 
     // MARK: Lookup

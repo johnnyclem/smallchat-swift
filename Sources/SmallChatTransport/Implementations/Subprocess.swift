@@ -19,14 +19,15 @@ final class UncheckedSendableBox<Value>: @unchecked Sendable {
 
 /// Low-level pipe I/O that never blocks a cooperative thread, never raises an
 /// Objective-C exception or traps on a broken pipe, and never lets SIGPIPE
-/// kill the process.
-enum PipeIO {
+/// kill the process. Package-visible so SmallChatAgents' `claude` launcher
+/// writes to its children the same way.
+package enum PipeIO {
 
     /// Write all of `data` to `handle`. Returns `false` if the read end is
     /// closed (EPIPE) or the write fails; the caller decides what that means.
     /// Blocks until the reader has taken everything, so call it off the
     /// cooperative pool (see `writeInBackground`).
-    static func writeAll(_ data: Data, to handle: FileHandle) -> Bool {
+    package static func writeAll(_ data: Data, to handle: FileHandle) -> Bool {
         let fd = handle.fileDescriptor
         #if canImport(Darwin)
         // Darwin: report EPIPE instead of raising SIGPIPE for this descriptor.
@@ -67,7 +68,7 @@ enum PipeIO {
 
     /// Write `data` to `handle` on a dedicated thread, optionally closing the
     /// handle afterwards, then call `completion` with the outcome.
-    static func writeInBackground(
+    package static func writeInBackground(
         _ data: Data,
         to handle: FileHandle,
         closeAfterwards: Bool,

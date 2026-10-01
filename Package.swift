@@ -160,6 +160,7 @@ let package = Package(
             dependencies: [
                 "SmallChatTruth",
                 "SmallChatChannel",
+                "SmallChatTransport",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),

@@ -129,6 +129,24 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   versions without a nonce; `makeNonce()` and `listCommand(nonce:)` are new, and
   `Switchboard.init` takes an optional `nonce` (for tests). `parse` ignores every
   line that doesn't carry the nonce.
+- **`claude` launches keep text off the command line and need a current Claude
+  Code CLI.** `ClaudeCommand` invocations use `--input-format stream-json` and carry
+  the prompt in the new `ClaudeInvocation.prompt` (written to stdin) and system
+  prompts in `ClaudeInvocation.appendSystemPrompt` (passed with
+  `--append-system-prompt-file`); `arguments` no longer contain either. The
+  switchboard and stenographer sessions add `--tools`, `--strict-mcp-config` and
+  `--setting-sources user`, so the `claude` binary must support those flags.
+- **`AgentTransport` requires `shutdown()`.** Conforming types must implement it
+  (stop any process they keep running); `MessengerModel.setTransport(_:)` calls it
+  on the transport it replaces.
+- **A running session is never resumed.** `ClaudeCodeTransport.send` to a live
+  session whose Claude Code name isn't known fails with the new
+  `AgentTransportError.liveSessionUnnamed` instead of starting `claude -p --resume`
+  on it.
+- **The switchboard runs in its own directory**,
+  `<Application Support>/SmallChat/switchboard`
+  (`ClaudeCodeTransport.Configuration.switchboardDirectory`), not your home
+  directory.
 
 ### Fixed
 
@@ -232,6 +250,31 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   handle now counts only for a live session whose Claude Code name isn't known yet,
   and a name two sessions share matches nobody (the reply shows as from an unknown
   session).
+- **The messenger's own headless sessions are least-privilege.** `--allowedTools`
+  only pre-approves tools; it never removed any, so under `dontAsk` the switchboard
+  could still use whatever the user's settings allowed (shell patterns, `WebFetch`,
+  MCP servers), and the stenographer, which reads untrusted chat transcripts, had
+  everything but a short denylist. The switchboard now has exactly `SendMessage` and
+  `ListAgents` and runs in an empty directory of its own; the stenographer has
+  `Read`, `Grep` and `Glob`, none pre-approved, so it can read the chat's working
+  directory and nothing else. Neither loads MCP servers or the working directory's
+  project and local settings.
+- **Prompts and the ledger brief no longer go through argv.** A first prompt
+  starting with `-` (`--help`) was parsed as a flag, a ledger brief over 128 KB
+  failed to launch on Linux (`E2BIG`; about 1 MB on macOS), and both were visible to
+  every local process in `ps`. Prompts go to stdin as stream-json, and system prompts
+  through a 0600 file in a private directory that is removed when `claude` exits.
+- **A session is resumed one turn at a time.** Messaging a live session that the
+  registry hadn't named started `claude -p --resume` on it next to the running
+  process, and two quick messages to a stopped session started two resumes; either
+  appended a divergent branch to the same transcript. Live sessions are only ever
+  messaged, and headless turns of one session (agent or stenographer) now wait for
+  each other.
+- **Changing the `claude` path stops the old switchboard.** The replaced transport
+  was never shut down, so a second switchboard named `smallchat` kept running, and
+  agents' replies could reach the one nobody listened to. A switchboard that ended
+  also no longer fails the tickets of the one that replaced it, and writes to a
+  `claude` that stopped reading its stdin fail instead of raising `SIGPIPE`.
 
 ### Added
 

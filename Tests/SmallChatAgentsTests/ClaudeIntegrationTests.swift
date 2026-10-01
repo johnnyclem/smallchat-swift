@@ -108,20 +108,56 @@ struct SwitchboardProtocolTests {
 
 @Suite("Claude invocations")
 struct ClaudeCommandTests {
-    @Test("resume is a documented headless turn")
+    static let streamIO = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+
+    @Test("resume is a documented headless turn; the prompt goes on stdin")
     func resume() {
-        let inv = ClaudeCommand.resume(executable: "/bin/claude", sessionId: "S", prompt: "hi", cwd: "/r")
-        #expect(inv.arguments == ["-p", "hi", "--resume", "S", "--output-format", "stream-json", "--verbose"])
+        let inv = ClaudeCommand.resume(executable: "/bin/claude", sessionId: "S", prompt: "--help", cwd: "/r")
+        #expect(inv.arguments == Self.streamIO + ["--resume", "S"])
+        #expect(inv.prompt == "--help")
         #expect(inv.workingDirectory == "/r")
     }
 
-    @Test("switchboard may only message and list")
+    @Test("a new session gets its first prompt on stdin")
+    func newSession() {
+        let inv = ClaudeCommand.newSession(executable: "c", name: "scout", prompt: "-rf everything", cwd: "/r", model: "sonnet")
+        #expect(inv.arguments == Self.streamIO + ["--name", "scout", "--model", "sonnet"])
+        #expect(inv.prompt == "-rf everything")
+    }
+
+    @Test("switchboard: a hard allowlist of SendMessage and ListAgents, no MCP, no project settings")
     func switchboard() {
-        let args = ClaudeCommand.switchboard(executable: "c", name: "smallchat", systemPrompt: "p", model: "haiku", cwd: nil).arguments
-        let allowed = args[args.firstIndex(of: "--allowedTools")! + 1]
-        #expect(allowed == "SendMessage,ListAgents")
-        #expect(args[args.firstIndex(of: "--permission-mode")! + 1] == "dontAsk")
-        #expect(args.contains("--input-format"))
+        let inv = ClaudeCommand.switchboard(executable: "c", name: "smallchat", systemPrompt: "nonce-1234", model: "haiku", cwd: "/sb")
+        #expect(inv.arguments == Self.streamIO + [
+            "--name", "smallchat", "--model", "haiku",
+            "--tools", "SendMessage,ListAgents",
+            "--allowedTools", "SendMessage,ListAgents",
+            "--permission-mode", "dontAsk",
+            "--strict-mcp-config",
+            "--setting-sources", "user",
+            "--settings", #"{"crossSessionInbound":"accept"}"#,
+        ])
+        #expect(!inv.arguments.joined(separator: " ").contains("nonce-1234"), "the system prompt stays off argv")
+        #expect(inv.appendSystemPrompt == "nonce-1234")
+        #expect(inv.prompt == nil, "stdin stays open for relay commands")
+        #expect(inv.workingDirectory == "/sb")
+    }
+
+    @Test("stenographer: read-only tools, no MCP, ledger and question off argv")
+    func stenographer() {
+        let inv = ClaudeCommand.stenographer(
+            executable: "c", prompt: "what's dead?", systemPrompt: "LEDGER", resumeSessionId: "ST1", model: "sonnet", cwd: "/r"
+        )
+        #expect(inv.arguments == Self.streamIO + [
+            "--model", "sonnet",
+            "--tools", "Read,Grep,Glob",
+            "--permission-mode", "dontAsk",
+            "--strict-mcp-config",
+            "--setting-sources", "user",
+            "--resume", "ST1",
+        ])
+        #expect(inv.appendSystemPrompt == "LEDGER")
+        #expect(inv.prompt == "what's dead?")
     }
 
     @Test("locates claude in known install dirs")
@@ -250,6 +286,7 @@ struct ProcessPlumbingTests {
         """#)
         var config = ClaudeCodeTransport.Configuration(executable: exe)
         config.switchboardNonce = "N0NCE"
+        config.switchboardDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("sb-\(UUID().uuidString)").path
         let transport = ClaudeCodeTransport(config: config)
         let agent = AgentSession(id: "L1", handle: "api", claudeName: "api", cwd: "/", lastActivity: Date(), activity: .idle)
         var events: [TransportEvent] = []
@@ -272,6 +309,79 @@ struct ProcessPlumbingTests {
         }
         #expect(ContinuousClock.now - started < .seconds(5))
         await switchboard.shutdown()
+    }
+
+    @Test("prompts reach claude on stdin, so a leading dash is just text")
+    func promptOnStdin() async throws {
+        let exe = try fakeClaude(#"""
+        for a in "$@"; do [ "$a" = "--help" ] && exit 9; done
+        IFS= read -r line
+        content=$(printf '%s' "$line" | sed 's/.*"content":\("[^"]*"\).*/\1/')
+        printf '{"type":"result","subtype":"success","is_error":false,"result":%s}\n' "$content"
+        """#)
+        let transport = ClaudeCodeTransport(config: .init(executable: exe))
+        var replies: [String] = []
+        for try await event in transport.startSession(name: "scout", cwd: FileManager.default.temporaryDirectory.path, prompt: "--help") {
+            if case .reply(let text) = event { replies.append(text) }
+        }
+        #expect(replies == ["--help"])
+    }
+
+    @Test("a ledger brief larger than argv allows reaches claude through a private file")
+    func briefInFile() async throws {
+        let exe = try fakeClaude(#"""
+        file=""
+        while [ $# -gt 0 ]; do
+          [ "$1" = "--append-system-prompt" ] && exit 9
+          [ "$1" = "--append-system-prompt-file" ] && file="$2"
+          shift
+        done
+        size=$(wc -c < "$file" | tr -d ' ')
+        mode=$(ls -l "$file" | cut -c1-10)
+        printf '{"type":"result","subtype":"success","is_error":false,"result":"%s %s %s"}\n' "$size" "$mode" "$file"
+        """#)
+        let brief = String(repeating: "TB-1 LOG_BUDGET is 100, not 30.\n", count: 40_000)  // 1.28 MB
+        let transport = ClaudeCodeTransport(config: .init(executable: exe))
+        var replies: [String] = []
+        for try await event in transport.askStenographer("q", brief: brief, resumeSessionId: nil, cwd: FileManager.default.temporaryDirectory.path) {
+            if case .reply(let text) = event { replies.append(text) }
+        }
+        let parts = try #require(replies.first).split(separator: " ")
+        #expect(parts.count == 3)
+        #expect(parts[0] == "\(brief.utf8.count)")
+        #expect(parts[1] == "-rw-------")
+        #expect(!FileManager.default.fileExists(atPath: String(parts[2])), "the prompt file is removed when claude exits")
+    }
+
+    @Test("a live session whose name isn't known is not resumed behind its back")
+    func liveUnnamedNotResumed() async throws {
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("spawned-\(UUID().uuidString)").path
+        let exe = try fakeClaude("touch '\(marker)'\n")
+        let transport = ClaudeCodeTransport(config: .init(executable: exe))
+        let agent = AgentSession(id: "L1", handle: "api", claudeName: nil, cwd: "/", lastActivity: Date(), activity: .busy)
+        await #expect(throws: AgentTransportError.liveSessionUnnamed(handle: "api")) {
+            for try await _ in transport.send("hi", to: agent, style: .prompt) {}
+        }
+        #expect(!FileManager.default.fileExists(atPath: marker))
+    }
+
+    @Test("two messages to a stopped session resume it one turn at a time")
+    func resumesSerialized() async throws {
+        let log = FileManager.default.temporaryDirectory.appendingPathComponent("turns-\(UUID().uuidString)").path
+        let exe = try fakeClaude("""
+        echo start >> '\(log)'
+        sleep 0.3
+        echo end >> '\(log)'
+        echo '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
+        """)
+        defer { try? FileManager.default.removeItem(atPath: log) }
+        let transport = ClaudeCodeTransport(config: .init(executable: exe))
+        let agent = AgentSession(id: "S1", handle: "a", cwd: FileManager.default.temporaryDirectory.path, lastActivity: Date())
+        async let first: Void = { for try await _ in transport.send("one", to: agent, style: .prompt) {} }()
+        async let second: Void = { for try await _ in transport.send("two", to: agent, style: .prompt) {} }()
+        _ = try await (first, second)
+        let turns = try String(contentsOfFile: log, encoding: .utf8).split(separator: "\n")
+        #expect(turns == ["start", "end", "start", "end"])
     }
 
     @Test("a body that contains the framing nonce is refused, not relayed")

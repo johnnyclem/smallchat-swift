@@ -213,6 +213,30 @@ The switchboard's commands and output lines now carry a framing nonce. If you ca
 switchboard session. `Switchboard` and `ClaudeCodeTransport` do this for you. A
 `Switchboard.relay` that times out now throws `SwitchboardError`.
 
+### `claude` invocations and the CLI version
+
+`ClaudeCommand` no longer puts prompts or system prompts in `arguments`. If you
+build a `ClaudeInvocation` yourself and run it with `ClaudeProcess`, set
+`prompt` (sent on stdin as one stream-json user message, then stdin closes) and
+`appendSystemPrompt` (passed as a private `--append-system-prompt-file`), and use
+`--input-format stream-json`. If you inspected `arguments` for the prompt, read
+`invocation.prompt` instead.
+
+The messenger now launches its switchboard and stenographer with `--tools`,
+`--strict-mcp-config`, `--setting-sources user` and `--append-system-prompt-file`.
+Update Claude Code if a launch fails with an unknown option.
+
+### `AgentTransport.shutdown()`
+
+Custom transports must implement `func shutdown() async` (an empty body is fine
+when nothing keeps running).
+
+### Live sessions without a known name
+
+Sending to a live session whose Claude Code name isn't known now fails with
+`AgentTransportError.liveSessionUnnamed` instead of resuming it. The message says
+to retry once the session's name shows or after it stops.
+
 ## Linux hashes
 
 On Linux, audit-log HMACs (`AuditLog`) and Dream artifact hashes
