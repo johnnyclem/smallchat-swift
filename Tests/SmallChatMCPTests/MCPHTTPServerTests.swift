@@ -290,6 +290,41 @@ struct MCPHTTPServerTests {
         #expect(allowed.status == .ok)
     }
 
+    @Test("SW-REV-01: DNS names that start with 127. are not loopback, in Host or Origin")
+    func rebindingNamesRefused() async throws {
+        let server = try MCPServer(config: MCPServerConfig(sourcePath: "", dbPath: ":memory:"))
+        func initialize(host: String, origin: String?) async -> MCPHTTPResponse {
+            var headers = HTTPHeaders()
+            headers.add(name: "Host", value: host)
+            headers.add(name: "Content-Type", value: "application/json")
+            if let origin { headers.add(name: "Origin", value: origin) }
+            return await server.handleHTTP(MCPHTTPRequest(
+                method: .POST, uri: "/mcp", headers: headers,
+                body: Array(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#.utf8)
+            ))
+        }
+        for name in ["127.attacker.example", "127.0.0.1.nip.io", "127.0.0.1.attacker.example", "127.1", "0x7f.0.0.1"] {
+            #expect(await initialize(host: "\(name):3001", origin: nil).status == .forbidden, "Host \(name)")
+            #expect(await initialize(host: "127.0.0.1:3001", origin: "http://\(name):3001").status == .forbidden, "Origin \(name)")
+            #expect(await initialize(host: "\(name):3001", origin: "http://\(name):3001").status == .forbidden, "Host and Origin \(name)")
+        }
+        for name in ["localhost", "127.0.0.1", "127.0.0.2", "127.255.255.254", "[::1]"] {
+            #expect(await initialize(host: "\(name):3001", origin: "http://\(name):3001").status == .ok, "\(name)")
+        }
+    }
+
+    @Test("SW-REV-01: only localhost, ::1 and IPv4 literals in 127.0.0.0/8 are loopback")
+    func loopbackHostNames() {
+        for host in ["localhost", "LOCALHOST", "::1", "[::1]", "0:0:0:0:0:0:0:1", "127.0.0.1", "127.0.0.2", "127.255.255.255"] {
+            #expect(MCPServer.isLoopbackHost(host), "\(host)")
+        }
+        for host in ["127.attacker.example", "127.0.0.1.nip.io", "127.", "127", "127.1", "127.0.0.256", "0127.0.0.1",
+                     "0x7f.0.0.1", "128.0.0.1", "10.0.0.1", "0.0.0.0", "::", "::ffff:8.8.8.8", "localhost.attacker.example",
+                     "attacker-localhost", "", " 127.0.0.1"] {
+            #expect(!MCPServer.isLoopbackHost(host), "\(host)")
+        }
+    }
+
     @Test("the audit log records each request and verifies")
     func auditLog() async throws {
         let (server, endpoint, _) = try await startTestServer()

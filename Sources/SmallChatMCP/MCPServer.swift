@@ -1,6 +1,11 @@
 // MARK: - MCPServer — NIO-based Streamable HTTP server for the MCP protocol
 
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 import NIOCore
 import NIOHTTP1
 import NIOPosix
@@ -575,10 +580,44 @@ public actor MCPServer {
         return Self.isLoopbackHost(host)
     }
 
-    /// Whether `host` names the loopback interface.
+    /// Whether `host` names the loopback interface: `localhost`, the IPv6
+    /// loopback address (`::1`, bracketed or not), or an IPv4 literal in
+    /// 127.0.0.0/8 written as four decimal octets. A DNS name never is, even
+    /// one that starts with `127.`: `127.attacker.example` resolves wherever
+    /// its owner wants (DNS rebinding).
     public static func isLoopbackHost(_ host: String) -> Bool {
-        let host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-        return host == "localhost" || host == "::1" || host == "127.0.0.1" || host.hasPrefix("127.")
+        var name = host.lowercased()
+        if name.hasPrefix("["), name.hasSuffix("]") { name = String(name.dropFirst().dropLast()) }
+        if name == "localhost" { return true }
+        if let octets = ipv4Octets(name) { return octets[0] == 127 }
+        return isIPv6Loopback(name)
+    }
+
+    /// The octets of a dotted-decimal IPv4 literal (four decimal octets, no
+    /// leading zeros), else nil. `127.1`, `0x7f.0.0.1` and `0127.0.0.1` are
+    /// not dotted-decimal.
+    static func ipv4Octets(_ text: String) -> [Int]? {
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return nil }
+        var octets: [Int] = []
+        for part in parts {
+            guard (1...3).contains(part.count),
+                  part.allSatisfy({ ("0"..."9").contains($0) }),
+                  part.count == 1 || part.first != "0",
+                  let value = Int(part), value <= 255 else { return nil }
+            octets.append(value)
+        }
+        return octets
+    }
+
+    /// Whether `text` is an IPv6 literal for `::1`.
+    static func isIPv6Loopback(_ text: String) -> Bool {
+        guard text.contains(":") else { return false }
+        var address = in6_addr()
+        guard inet_pton(AF_INET6, text, &address) == 1 else { return false }
+        return withUnsafeBytes(of: &address) { bytes in
+            bytes.count == 16 && bytes.prefix(15).allSatisfy { $0 == 0 } && bytes[15] == 1
+        }
     }
 
     /// `example.com:3001` → `example.com`; `[::1]:3001` → `::1`.

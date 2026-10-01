@@ -38,7 +38,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(help: "Require a bearer token (from SMALLCHAT_MCP_TOKEN, or --auth-token-file)")
     var auth: Bool = false
 
-    @Option(help: "File holding the bearer token; created with a random token (mode 0600) if missing")
+    @Option(help: "File holding the bearer token (mode 0600, refused if others can read it); created with a random token if missing")
     var authTokenFile: String = "~/.smallchat/serve-token"
 
     @Flag(help: "Enable rate limiting (per client address)")
@@ -131,27 +131,19 @@ struct ServeCommand: AsyncParsableCommand {
         try await server.stop()
     }
 
-    /// The bearer token: `SMALLCHAT_MCP_TOKEN`, else the token file (created
-    /// with a random token and mode 0600 when missing).
+    /// The bearer token: `SMALLCHAT_MCP_TOKEN`, else the token file (see
+    /// `MCPAuthTokenFile`: created 0600 when missing, refused when other
+    /// users can read it).
     private func resolveAuthToken() throws -> (value: String, origin: String) {
         if let env = ProcessInfo.processInfo.environment["SMALLCHAT_MCP_TOKEN"], !env.isEmpty {
             return (env, "SMALLCHAT_MCP_TOKEN")
         }
         let path = (authTokenFile as NSString).expandingTildeInPath
-        if let existing = try? String(contentsOfFile: path, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines), !existing.isEmpty {
-            return (existing, path)
+        do {
+            let file = try MCPAuthTokenFile.loadOrCreate(at: path)
+            return (file.token, file.created ? "new token in \(path)" : path)
+        } catch let error as MCPAuthTokenFileError {
+            throw ValidationError(error.description)
         }
-        let token = MCPServerConfig.generateAuthToken()
-        let directory = (path as NSString).deletingLastPathComponent
-        try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-        guard FileManager.default.createFile(
-            atPath: path,
-            contents: Data((token + "\n").utf8),
-            attributes: [.posixPermissions: 0o600]
-        ) else {
-            throw ValidationError("Could not write the token file \(path)")
-        }
-        return (token, "new token in \(path)")
     }
 }
