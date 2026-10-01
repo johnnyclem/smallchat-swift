@@ -1,11 +1,11 @@
 # Copied by Scripts/sync-truth-fixtures.sh. Do not edit these files by hand: re-run the script.
 repository: https://github.com/johnnyclem/stenographer
 path: spec/truth-format
-commit: 1defa734a120f9a03382e7141da8c6404c02571d
-spec-last-changed: 1defa734a120f9a03382e7141da8c6404c02571d
+commit: 5355264dd49324bff229a854e3d66d706da4f766
+spec-last-changed: 5355264dd49324bff229a854e3d66d706da4f766
 uncommitted-changes: no
 files:
-  d3c213c7bff1d6356293bedad7bc0b3277bb86f93cd993226cf82448db4dfc70  README.md
+  89b3e649aab3a9066d5294eac0fc7e00699ad9dab63eb380fef1bd065de64db6  README.md
   1b0aa09734cf40666d1c903589f4839261fa8b66394d0c7cf87bfe27d6c4c2f4  invalid/chain-fork.jsonl
   365570d5fbd0c7d11cd307b31f0ef5ba897cc08149cfbc72a70075e2806dab46  invalid/chain-gap.jsonl
   4a84ad7bc1a8c3aca734f7f35406765224450b135571e62503930156f9e3b31a  invalid/chain.expected.json
