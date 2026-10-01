@@ -119,12 +119,12 @@ export default function Home() {
               <code>
 {`// Package.swift
 dependencies: [
-    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "0.2.0"),
+    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "1.0.0"),
 ]`}
               </code>
             </pre>
             <p>
-              Requires Swift 6.0+, macOS 14+, or iOS 17+.{" "}
+              Requires Swift 6.1+ on macOS 14+, Linux, or iOS 17+ (libraries).{" "}
               <Link to="/getting-started/installation">Full installation guide →</Link>
             </p>
           </div>

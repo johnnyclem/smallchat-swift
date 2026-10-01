@@ -4,9 +4,10 @@
 
 **Object-oriented inference. A native Swift tool compiler for the age of agents.**
 
-[![Swift 6.0+](https://img.shields.io/badge/Swift-6.0+-F05138?logo=swift&logoColor=white)](https://swift.org)
+[![Swift 6.1+](https://img.shields.io/badge/Swift-6.1+-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![macOS 14+](https://img.shields.io/badge/macOS-14+-000000?logo=apple&logoColor=white)](https://developer.apple.com/macos/)
-[![iOS 17+](https://img.shields.io/badge/iOS-17+-000000?logo=apple&logoColor=white)](https://developer.apple.com/ios/)
+[![iOS 17+ (libraries)](https://img.shields.io/badge/iOS-17+_(libraries)-000000?logo=apple&logoColor=white)](#platforms)
+[![Linux](https://img.shields.io/badge/Linux-Swift_6.1+-FCC624?logo=linux&logoColor=black)](#platforms)
 [![MCP 2024-11-05](https://img.shields.io/badge/MCP-2024--11--05-6B4FBB)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -20,7 +21,7 @@ Your agent has 50 tools. The LLM sees all 50 in its context window every single 
 
 **smallchat compiles your tools into a dispatch table.** The LLM expresses intent. The runtime resolves it — semantically, deterministically, in microseconds. No prompt stuffing. No selection lottery.
 
-This is the **native Swift implementation** of [smallchat](https://github.com/johnnyclem/smallchat) — same architecture, same semantics, built for Apple platforms with Swift concurrency, actors, and the Swift type system.
+This is the **native Swift implementation** of [smallchat](https://github.com/johnnyclem/smallchat) — same architecture, same semantics, built for Apple platforms and Linux with Swift concurrency, actors, and the Swift type system.
 
 ```
                          ┌─────────────────────┐
@@ -66,11 +67,11 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/johnnyclem/smallchat-swift", branch: "main"),
+    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "1.0.0"),
 ]
 ```
 
-> This repo doesn't cut version tags yet, so pin to `branch: "main"` (or a specific commit/revision) rather than `from:` — a version requirement will fail to resolve.
+> Version tags start at `1.0.0`. Releases before 1.0 were never tagged, so an older checkout can only be pinned by `branch:` or `revision:`.
 
 Then add the module you need:
 
@@ -86,7 +87,33 @@ Then add the module you need:
 ),
 ```
 
-> Requires **Swift 6.0+**, **macOS 14+** (Sonoma), or **iOS 17+**
+> Requires **Swift 6.1+**. See [Platforms](#platforms) for what builds where.
+
+### Platforms
+
+CI builds every "yes" cell and runs the test suite on macOS and Linux (see `.github/workflows/swift.yml`).
+
+| Product | macOS 14+ | Linux (Swift 6.1+) | iOS 17+ |
+|---|---|---|---|
+| `SmallChatCore`, `SmallChatRuntime`, `SmallChatCompiler`, `SmallChatEmbedding` | yes | yes | yes |
+| `SmallChatShorthand`, `SmallChatImportance`, `SmallChatCRDT`, `SmallChatCompaction`, `SmallChatTruth`, `SmallChatMemex`, `SmallChatDream` | yes | yes | yes |
+| `SmallChatTransport`, `SmallChatMCP`, `SmallChatChannel` | yes | yes | yes, without subprocess APIs ¹ |
+| `SmallChat` (umbrella) | yes | yes, without `SmallChatUI` ² | yes |
+| `SmallChatUI` | yes | no (needs SwiftUI/WebKit) | yes |
+| `SmallChatAgents` | yes | yes | no (spawns the `claude` CLI) |
+| `smallchat` CLI | yes | yes | n/a |
+| `SmallChatApp` (messenger) | yes | no (AppKit) | no |
+
+¹ `MCPStdioTransport`, `LoomMCPClient` and `ContainerSandbox.spawnProcess` / `isDockerAvailable`
+need `Foundation.Process`, which iOS does not have, so they are compiled only on macOS and Linux.
+On iOS, `RtkTransport` passes bodies through uncompressed because the `rtk filter` subprocess cannot run.
+
+² `SmallChatUI` and `SmallChatApp` are declared only when the manifest is evaluated on macOS.
+On Linux, `import SmallChat` re-exports every other module.
+
+On Linux, SHA-256/HMAC come from [swift-crypto](https://github.com/apple/swift-crypto) (the
+same API as CryptoKit, which Apple platforms use), and streaming HTTP bodies are read through a
+`URLSessionDataDelegate`, because swift-corelibs-foundation has no `URLSession.bytes(for:)`.
 
 ### Compile Your Tools
 
@@ -399,6 +426,10 @@ swift test --filter "CanonicalizeTests"  # Run a specific test suite
 swift run smallchat                      # Show CLI help
 swift run smallchat doctor               # Diagnose your environment
 ```
+
+The same commands work on Linux, where the manifest leaves out the SwiftUI targets.
+CI runs them on macOS (Xcode 16.4 and the newest Xcode) and in `swift:6.1`,
+`swift:6.3` and `swift:6.4` Linux containers, and builds the `SmallChat` scheme for iOS.
 
 ### Project Structure
 

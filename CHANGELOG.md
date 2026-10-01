@@ -7,8 +7,68 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Breaking
+
+See [`MIGRATION.md`](MIGRATION.md) for how to update.
+
+- **Swift 6.1 is the toolchain floor.** The manifest is now
+  `swift-tools-version: 6.1`; Swift 6.0 was never tested and is no longer
+  accepted.
+- **Linux no longer exports `OSAllocatedUnfairLock`.** The Linux shim in
+  `SmallChatCore/Compat` was a public type named after Apple's lock, so any
+  module importing SmallChatCore saw it shadow the platform name. It is now
+  the package-scoped `PlatformLock` (a typealias for `OSAllocatedUnfairLock`
+  on Apple platforms), `Sendable` only when its state is, with Apple's
+  `@Sendable` requirements on `withLock`.
+- **Subprocess APIs are macOS/Linux only.** `MCPStdioTransport`,
+  `LoomMCPClient`, `ContainerSandbox.spawnProcess(...)` and
+  `ContainerSandbox.isDockerAvailable()` are no longer compiled for iOS (iOS
+  has no `Foundation.Process`, so these never built there). On iOS the
+  `rtk filter` subprocess is skipped and `RtkTransport` passes bodies through.
+- **`SmallChatUI` and `SmallChatApp` are declared only on Apple hosts**, and
+  the `SmallChat` umbrella re-exports `SmallChatUI` only on macOS and iOS.
+- **Every version string is `SmallChatVersion.current` (`1.0.0`).** MCP
+  `serverInfo.version` was `0.6.0`, the channel server's was `0.3.0`, and the
+  MCP clients sent `clientInfo.version` `0.1.0`, the REPL banner said `0.5.0`,
+  and `smallchat --version` and the `version` field of generated configs,
+  toolkit files and knowledge bases said `0.6.0`. The compiled-artifact format version (`ARTIFACT_FORMAT_VERSION`)
+  is unchanged.
+- **Linux uses real SHA-256 for audit-log HMACs and Dream artifact hashes.**
+  Without CryptoKit, `AuditLog` fell back to an FNV hash and Dream's artifact
+  versioning to djb2. Both now use swift-crypto's `HMAC<SHA256>`/`SHA256`, the
+  same values Apple platforms produce, so Linux chain heads and recorded artifact
+  hashes differ from those of earlier Linux builds.
+
+### Fixed
+
+- **Builds with Swift 6.2+ (Xcode 26, and Swift 6.3/6.4 on Linux).** `HTTPTransport`,
+  `LocalTransport`, `MCPSSETransport`, `MCPStdioTransport` and `RtkTransport`
+  each bumped a nonisolated `static var counter` to mint their ids, which newer
+  compilers reject as global mutable state. It was also a data race: transports
+  created concurrently could get the same id (which names their circuit
+  breaker). Ids now come from a lock-protected `TransportIDSequence`.
+- **Transport, MCP, Channel, the `SmallChat` umbrella and the CLI build and
+  pass their tests on Linux.** `FoundationNetworking` is imported where
+  `URLSession` is used; `URLSession.streamingBytes(for:)` replaces
+  `bytes(for:)`, which swift-corelibs-foundation lacks, with a delegate that
+  yields body chunks as they arrive (SSE and NDJSON keep streaming); OAuth
+  tokens come from `SystemRandomNumberGenerator` instead of `SecRandomCopyBytes`
+  (whose failure was ignored), and SHA-256/HMAC come from swift-crypto.
+- **Library products compile for iOS** (checked by the new iOS CI job).
+  Besides the subprocess guards above, Dream reads `NSHomeDirectory()`
+  instead of the macOS-only `FileManager.homeDirectoryForCurrentUser`.
+  `SmallChatAgents` stays macOS/Linux only, and the README's platform table
+  now says so.
+- **Added the MIT `LICENSE` file** the README badge has always linked to.
+
 ### Added
 
+- **CI on every supported platform.** Besides macOS 15 (Xcode 16.4, Swift
+  6.1), CI now builds and tests on the newest Xcode (`macos-26`), builds the
+  `SmallChat` scheme for iOS, and builds and tests in `swift:6.1`, `swift:6.3`
+  and `swift:6.4` Linux containers.
+- **`SmallChatVersion.current`** in `SmallChatCore`: the one place the package
+  version is spelled.
 - **Live tool activity on agent cards.** `TranscriptActivity` reads the
   tail of each live session's transcript. It pairs `tool_use` with
   `tool_result` by id, skips sidechains, and keeps the in-flight tool, the

@@ -154,21 +154,29 @@ SmallChatShorthand, SmallChatImportance, SmallChatCRDT, SmallChatCompaction, and
 
 ## Platform Support
 
-| Module | macOS 14+ | iOS 17+ | Notes |
-|--------|-----------|---------|-------|
-| SmallChatCore | Yes | Yes | Pure Swift + Accelerate |
-| SmallChatRuntime | Yes | Yes | |
-| SmallChatCompiler | Yes | Yes | |
-| SmallChatEmbedding | Yes | Yes | |
-| SmallChatTransport | Yes | Yes | NIO works on all Apple platforms |
-| SmallChatMCP | Yes | Limited | Server typically macOS only |
-| SmallChatChannel | Yes | No | Claude Code is desktop only |
-| SmallChatCLI | Yes | No | CLI tool |
-| SmallChatShorthand | Yes | Yes | Pure Swift, no dependencies |
-| SmallChatImportance | Yes | Yes | |
-| SmallChatCRDT | Yes | Yes | Pure Swift, no dependencies |
-| SmallChatCompaction | Yes | Yes | |
-| SmallChatMemex | Yes | Yes | Stage 3 (EMBED) requires caller to wire `SmallChatEmbedding` |
+"Builds" means the module compiles for that platform; CI builds every "Yes" cell and runs the
+tests on macOS and Linux.
+
+| Module | macOS 14+ | Linux (Swift 6.1+) | iOS 17+ | Notes |
+|--------|-----------|--------------------|---------|-------|
+| SmallChatCore | Yes | Yes | Yes | Accelerate on Apple platforms, scalar fallback elsewhere |
+| SmallChatRuntime | Yes | Yes | Yes | |
+| SmallChatCompiler | Yes | Yes | Yes | |
+| SmallChatEmbedding | Yes | Yes | Yes | |
+| SmallChatTransport | Yes | Yes | Yes | `MCPStdioTransport`, `LoomMCPClient` and container spawning are macOS/Linux only (no `Foundation.Process` on iOS) |
+| SmallChatMCP | Yes | Yes | Yes | swift-crypto provides SHA-256/HMAC on Linux |
+| SmallChatChannel | Yes | Yes | Yes | Claude Code itself runs on desktops |
+| SmallChatShorthand | Yes | Yes | Yes | Pure Swift, no dependencies |
+| SmallChatImportance | Yes | Yes | Yes | |
+| SmallChatCRDT | Yes | Yes | Yes | Pure Swift, no dependencies |
+| SmallChatCompaction | Yes | Yes | Yes | |
+| SmallChatTruth | Yes | Yes | Yes | |
+| SmallChatMemex | Yes | Yes | Yes | Stage 3 (EMBED) requires caller to wire `SmallChatEmbedding` |
+| SmallChatDream | Yes | Yes | Yes | |
+| SmallChatAgents | Yes | Yes | No | Spawns the `claude` CLI |
+| SmallChatUI | Yes | No | Yes | SwiftUI + WebKit; declared only on Apple hosts |
+| SmallChatCLI | Yes | Yes | n/a | CLI tool |
+| SmallChatApp | Yes | No | No | macOS messenger (AppKit) |
 
 ## Phase 4 Heuristic Algorithms
 

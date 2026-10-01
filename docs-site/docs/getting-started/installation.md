@@ -7,9 +7,9 @@ title: Installation
 
 ## Requirements
 
-- **Swift 6.0+**
-- **macOS 14+** or **iOS 17+**
-- Xcode 16+ (for development)
+- **Swift 6.1+** (Xcode 16.3+ on macOS)
+- **macOS 14+**, **Linux**, or **iOS 17+** (libraries only; see
+  [Platform Support](../modules/overview#platform-support) for what builds where)
 
 ## Swift Package Manager
 
@@ -17,7 +17,7 @@ Add smallchat-swift to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "0.3.0"),
+    .package(url: "https://github.com/johnnyclem/smallchat-swift", from: "1.0.0"),
 ]
 ```
 
