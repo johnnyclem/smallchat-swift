@@ -57,6 +57,21 @@ public enum RateLimitVerdict: Sendable, Equatable {
     public var isAllowed: Bool { self == .allowed }
 }
 
+/// A window slot held for one intent while it is embedded (`admit`). Fill
+/// it with `record(_:vector:)`, or give it back with `release(_:)` when
+/// embedding fails.
+public struct RateLimitReservation: Sendable, Hashable {
+    public let principal: String
+    let id: UInt64
+    let canonicalLength: Int
+}
+
+/// Whether an intent may be embedded; when it may, the slot it holds.
+public enum RateLimitAdmission: Sendable, Equatable {
+    case admitted(RateLimitReservation)
+    case denied(reason: String, retryAfterMs: Int)
+}
+
 /// The principal used when a caller does not identify itself.
 public let defaultPrincipal = "default"
 
@@ -73,11 +88,17 @@ public let defaultPrincipal = "default"
 /// Heuristics, per principal, over a sliding window of recent intent
 /// vectors: volume (novel intents), entropy (long canonical forms) and
 /// cross-similarity (random noise has low average pairwise similarity).
+///
+/// Admission is atomic: `admit` checks and takes a window slot in one step,
+/// so concurrent novel intents from one principal can't all pass the check
+/// before any of them is counted. `evaluate`/`check` only look.
 public actor SemanticRateLimiter {
     private struct WindowEntry {
         let timestamp: Date
-        let vector: [Float]
+        /// nil while the intent is still being embedded (a reserved slot)
+        var vector: [Float]?
         let canonicalLength: Int
+        var reservation: UInt64? = nil
     }
 
     private struct PrincipalWindow {
@@ -90,13 +111,56 @@ public actor SemanticRateLimiter {
     private let options: SemanticRateLimiterOptions
     private var windows: [String: PrincipalWindow] = [:]
     private let recomputeInterval: Int = 100
+    private var lastReservation: UInt64 = 0
 
     public init(options: SemanticRateLimiterOptions = .init()) {
         self.options = options
     }
 
+    /// Check and reserve in one step: when the intent may be embedded, it
+    /// takes a slot in `principal`'s window at once (counted by every
+    /// heuristic but similarity until its vector is recorded). Call before
+    /// embedding; then `record(_:vector:)` the vector, or `release(_:)` the
+    /// slot if embedding failed.
+    public func admit(_ canonical: String, principal: String = defaultPrincipal) -> RateLimitAdmission {
+        if case .denied(let reason, let retryAfterMs) = evaluate(canonical, principal: principal) {
+            return .denied(reason: reason, retryAfterMs: retryAfterMs)
+        }
+        lastReservation += 1
+        var window = self.window(principal, create: true)!
+        window.entries.append(WindowEntry(timestamp: Date(), vector: nil, canonicalLength: canonical.count, reservation: lastReservation))
+        windows[principal] = window
+        return .admitted(RateLimitReservation(principal: principal, id: lastReservation, canonicalLength: canonical.count))
+    }
+
+    /// Fill a reserved slot with the intent's vector. A slot that expired
+    /// while the intent was embedded is recorded as a new entry.
+    public func record(_ reservation: RateLimitReservation, vector: [Float]) {
+        var window = self.window(reservation.principal, create: true)!
+        for existing in window.entries {
+            if let similarity = Self.similarity(existing.vector, vector) {
+                window.pairwiseSimilaritySum += similarity
+                window.pairwiseCount += 1
+            }
+        }
+        if let index = window.entries.firstIndex(where: { $0.reservation == reservation.id }) {
+            window.entries[index].vector = vector
+            window.entries[index].reservation = nil
+        } else {
+            window.entries.append(WindowEntry(timestamp: Date(), vector: vector, canonicalLength: reservation.canonicalLength))
+        }
+        windows[reservation.principal] = window
+    }
+
+    /// Give back a reserved slot (the intent was not embedded).
+    public func release(_ reservation: RateLimitReservation) {
+        guard var window = windows[reservation.principal] else { return }
+        window.entries.removeAll { $0.reservation == reservation.id }
+        windows[reservation.principal] = window.entries.isEmpty ? nil : window
+    }
+
     /// Whether a new intent from `principal` may be embedded, and if not,
-    /// why and for how long. Call before embedding.
+    /// why and for how long. Only looks: it reserves nothing (see `admit`).
     public func evaluate(_ canonical: String, principal: String = defaultPrincipal) -> RateLimitVerdict {
         guard let window = window(principal, create: false) else { return .allowed }
         let entries = window.entries
@@ -127,9 +191,11 @@ public actor SemanticRateLimiter {
     /// Post-embedding record. Stores the vector in the principal's window.
     public func record(_ canonical: String, _ vector: [Float], principal: String = defaultPrincipal) {
         var window = self.window(principal, create: true)!
-        for existing in window.entries where existing.vector.count == vector.count {
-            window.pairwiseSimilaritySum += cosineSimilarity(vector, existing.vector)
-            window.pairwiseCount += 1
+        for existing in window.entries {
+            if let similarity = Self.similarity(existing.vector, vector) {
+                window.pairwiseSimilaritySum += similarity
+                window.pairwiseCount += 1
+            }
         }
         window.entries.append(WindowEntry(timestamp: Date(), vector: vector, canonicalLength: canonical.count))
         windows[principal] = window
@@ -177,6 +243,12 @@ public actor SemanticRateLimiter {
         if let principal { windows.removeValue(forKey: principal) } else { windows.removeAll() }
     }
 
+    /// Cosine similarity of two recorded vectors of the same length.
+    private static func similarity(_ a: [Float]?, _ b: [Float]?) -> Float? {
+        guard let a, let b, a.count == b.count else { return nil }
+        return cosineSimilarity(a, b)
+    }
+
     private func similarityHealthy(_ window: PrincipalWindow) -> Bool {
         let avgSimilarity: Float = window.pairwiseCount > 0
             ? window.pairwiseSimilaritySum / Float(window.pairwiseCount)
@@ -208,9 +280,11 @@ public actor SemanticRateLimiter {
         while let first = window.entries.first, first.timestamp < cutoff {
             let removed = window.entries.removeFirst()
             evictedAny = true
-            for remaining in window.entries where remaining.vector.count == removed.vector.count {
-                window.pairwiseSimilaritySum -= cosineSimilarity(removed.vector, remaining.vector)
-                window.pairwiseCount -= 1
+            for remaining in window.entries {
+                if let similarity = Self.similarity(removed.vector, remaining.vector) {
+                    window.pairwiseSimilaritySum -= similarity
+                    window.pairwiseCount -= 1
+                }
             }
             window.evictionsSinceRecompute += 1
         }
@@ -219,9 +293,11 @@ public actor SemanticRateLimiter {
             window.pairwiseSimilaritySum = 0
             window.pairwiseCount = 0
             for i in 0..<window.entries.count {
-                for j in (i + 1)..<window.entries.count where window.entries[i].vector.count == window.entries[j].vector.count {
-                    window.pairwiseSimilaritySum += cosineSimilarity(window.entries[i].vector, window.entries[j].vector)
-                    window.pairwiseCount += 1
+                for j in (i + 1)..<window.entries.count {
+                    if let similarity = Self.similarity(window.entries[i].vector, window.entries[j].vector) {
+                        window.pairwiseSimilaritySum += similarity
+                        window.pairwiseCount += 1
+                    }
                 }
             }
             window.evictionsSinceRecompute = 0

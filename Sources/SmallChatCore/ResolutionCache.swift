@@ -94,8 +94,9 @@ public actor ResolutionCache {
     /// should not shortcut next time.
     ///
     /// Tags the entry with current provider version, model version,
-    /// and schema fingerprint so future lookups can detect staleness.
-    public func store(_ selector: ToolSelector, imp: any ToolIMP, confidence: Double) {
+    /// and schema fingerprint so future lookups can detect staleness, and
+    /// with the caller's `registryGeneration` (see `ResolvedTool`).
+    public func store(_ selector: ToolSelector, imp: any ToolIMP, confidence: Double, registryGeneration: UInt64? = nil) {
         guard confidence >= minConfidence else { return }
 
         let key = Self.key(of: selector)
@@ -113,7 +114,8 @@ public actor ResolutionCache {
             hitCount: 1,
             providerVersion: versionContext.providerVersions[imp.providerId],
             modelVersion: versionContext.modelVersion.isEmpty ? nil : versionContext.modelVersion,
-            schemaFingerprint: versionContext.schemaFingerprints[imp.providerId]
+            schemaFingerprint: versionContext.schemaFingerprints[imp.providerId],
+            registryGeneration: registryGeneration
         )
     }
 

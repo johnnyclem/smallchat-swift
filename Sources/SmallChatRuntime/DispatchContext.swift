@@ -49,6 +49,16 @@ public actor DispatchContext {
     private var toolsById: [String: RegisteredTool] = [:]
     /// Ids claimed by two different IMPs; dispatch by such an id is refused.
     private var ambiguousIds: Set<String> = []
+    /// Every IMP the dispatch index reaches (by object identity).
+    private var registeredImps: Set<ObjectIdentifier> = []
+
+    /// Changes whenever the dispatch index does (register, unregister,
+    /// reindex). Resolution caches only what it decided under the current
+    /// generation, and a cached entry is used only while the generation it
+    /// was stamped with is current, so a resolution that raced a registry
+    /// change never leaves a stale decision behind. Starts at a random
+    /// value, so contexts sharing one cache don't take each other's entries.
+    public private(set) var registryGeneration = UInt64.random(in: 0...(UInt64.max / 2))
 
     public init(
         selectorTable: SelectorTable,
@@ -90,7 +100,8 @@ public actor DispatchContext {
     /// Register a provider (ToolClass). A class with the same name replaces
     /// the one registered before: its selectors and tool ids are re-indexed
     /// from scratch, so nothing of the old class stays reachable. Cached
-    /// resolutions are flushed either way.
+    /// resolutions are flushed either way, and a dispatch already in flight
+    /// does not run a tool the index no longer holds (see `dispatch`).
     ///
     /// Throws SelectorShadowingError if the class contains selectors that
     /// would shadow protected core selectors.
@@ -105,6 +116,7 @@ public actor DispatchContext {
         } else {
             classOrder.append(toolClass.name)
             indexClass(toolClass)
+            registryGeneration &+= 1
         }
         await cache.flush()
     }
@@ -127,9 +139,11 @@ public actor DispatchContext {
         selectorToClasses.removeAll()
         toolsById.removeAll()
         ambiguousIds.removeAll()
+        registeredImps.removeAll()
         for name in classOrder {
             if let toolClass = toolClasses[name] { indexClass(toolClass) }
         }
+        registryGeneration &+= 1
     }
 
     private func indexClass(_ toolClass: ToolClass) {
@@ -144,9 +158,20 @@ public actor DispatchContext {
         for (canonical, table) in toolClass.overloadTables.sorted(by: { $0.key < $1.key }) {
             for entry in table.allOverloads() { indexTool(entry.imp, selector: canonical) }
         }
+        // Overload resolution falls back to superclasses' tables; those
+        // variants are reachable (and runnable) through this class too.
+        var visited: Set<ObjectIdentifier> = [ObjectIdentifier(toolClass)]
+        var ancestor = toolClass.superclass
+        while let cls = ancestor, visited.insert(ObjectIdentifier(cls)).inserted {
+            for table in cls.overloadTables.values {
+                for entry in table.allOverloads() { registeredImps.insert(ObjectIdentifier(entry.imp)) }
+            }
+            ancestor = cls.superclass
+        }
     }
 
     private func indexTool(_ imp: any ToolIMP, selector: String) {
+        registeredImps.insert(ObjectIdentifier(imp))
         let id = imp.toolId
         if var existing = toolsById[id] {
             if existing.imp === imp {
@@ -178,6 +203,12 @@ public actor DispatchContext {
     /// different tools claim it). O(1); no embedding.
     public func getTool(_ toolId: String) -> RegisteredTool? {
         ambiguousIds.contains(toolId) ? nil : toolsById[toolId]
+    }
+
+    /// Whether the dispatch index still reaches this IMP. A tool whose class
+    /// was unregistered, replaced or swizzled away is not registered.
+    public func isRegistered(_ imp: any ToolIMP) -> Bool {
+        registeredImps.contains(ObjectIdentifier(imp))
     }
 
     /// Whether two different tools claim this id (dispatch by it is refused).

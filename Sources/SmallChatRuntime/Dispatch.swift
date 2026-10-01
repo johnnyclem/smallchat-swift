@@ -198,6 +198,9 @@ extension DispatchContext {
         let args = run.args
         let hasArgs = !(args?.isEmpty ?? true)
         let key = intentKey(intent)
+        // The registry this resolution decides against; it caches only if
+        // the registry is unchanged when it is done.
+        let generation = registryGeneration
 
         func embedOwn() async throws -> [Float] {
             if let vector = state.ownVector { return vector }
@@ -328,8 +331,21 @@ extension DispatchContext {
 
         // 2. CACHE -- a previous HIGH/EXACT resolution of this exact intent
         // text (no-argument calls only: with arguments, overload choice
-        // depends on them). Re-judged by the policy on every hit.
-        if run.learn && !hasArgs, let cached = await cache.lookup(key: key) {
+        // depends on them), stored under the current registry generation
+        // and of a tool the index still holds. Re-judged by the policy on
+        // every hit.
+        var cachedEntry: ResolvedTool?
+        if run.learn && !hasArgs { cachedEntry = await cache.lookup(key: key) }
+        if let stale = cachedEntry, stale.registryGeneration != registryGeneration || !isRegistered(stale.imp) {
+            // Decided before the registry last changed (a resolution that
+            // raced registerClass/unregisterClass/reindex), or stored by
+            // someone else: a miss.
+            await cache.flushSelector(stale.selector)
+            state.step(.cache, "Cached \(stale.imp.toolId) not used: it was not resolved against the current tool registry",
+                       ["toolId": .string(stale.imp.toolId)])
+            cachedEntry = nil
+        }
+        if let cached = cachedEntry {
             let id = cached.imp.toolId
             var selector = cached.selector
             if let primary = getTool(id)?.selectors.first, let toolSelector = await selectorTable.get(primary) {
@@ -347,19 +363,36 @@ extension DispatchContext {
         }
 
         // 3. RATE LIMIT (opt-in) -- a novel intent is about to be embedded.
+        // Admission takes the window slot at once, so concurrent intents
+        // from one principal can't all pass before any is counted.
         let principal = run.principal ?? defaultPrincipal
+        var reservation: RateLimitReservation?
         if let rateLimiter, state.ownVector == nil {
-            if case .denied(let reason, let retryAfterMs) = await rateLimiter.evaluate(key, principal: principal) {
+            switch await rateLimiter.admit(key, principal: principal) {
+            case .denied(let reason, let retryAfterMs):
                 state.step(.rateLimit, "Rate limit (\(reason)) reached for this principal; the intent was not embedded", ["reason": .string(reason)])
                 return finish(.throttled, .rateLimited, ranked: [], chosen: nil,
                               reason: "Too many novel intents (\(reason)); retry in \(Int((Double(retryAfterMs) / 1000).rounded(.up)))s",
                               retryAfterMs: retryAfterMs)
+            case .admitted(let slot):
+                reservation = slot
             }
         }
 
         // 4. EMBED the intent -- its own vector, never interned.
-        let selector = ToolSelector.intent(intent, vector: try await embedOwn())
-        await rateLimiter?.record(key, selector.vector, principal: principal)
+        let vector: [Float]
+        do {
+            vector = try await embedOwn()
+        } catch {
+            if let reservation { await rateLimiter?.release(reservation) }
+            throw error
+        }
+        let selector = ToolSelector.intent(intent, vector: vector)
+        if let reservation {
+            await rateLimiter?.record(reservation, vector: vector)
+        } else {
+            await rateLimiter?.record(key, vector, principal: principal)
+        }
 
         // 5. VECTOR SEARCH -- every match (and overload) becomes a ranked candidate.
         let floor = config.strict ? thresholds.medium : thresholds.low
@@ -514,9 +547,12 @@ extension DispatchContext {
 
         // Learn: cache plain vector resolutions of ordinary tools (never
         // pinned or destructive ones). Every later hit is judged again.
+        // Only a decision made against the registry as it still is: one that
+        // raced a registry change may hold a tool that is gone or outranked.
         if run.learn, pick.source == .vector, !isPinnedTool(pick.toolId, via: pick.selector.canonical),
-           !isDestructive(pick.imp.annotations, treatUnannotatedAsDestructive: config.treatUnannotatedAsDestructive) {
-            await cache.store(selector, imp: pick.imp, confidence: pick.score)
+           !isDestructive(pick.imp.annotations, treatUnannotatedAsDestructive: config.treatUnannotatedAsDestructive),
+           registryGeneration == generation, isRegistered(pick.imp) {
+            await cache.store(selector, imp: pick.imp, confidence: pick.score, registryGeneration: generation)
         }
 
         return finish(.resolved, decision, ranked: ranked, chosen: pick)
@@ -641,6 +677,23 @@ func abortedResult(toolId: String, proof: inout ResolutionProof) -> ToolResult {
     )
 }
 
+/// The result of a call whose tool left the dispatch index (its class was
+/// unregistered, replaced or swizzled) before the tool started. Nothing ran.
+func unregisteredResult(toolId: String, proof: inout ResolutionProof) -> ToolResult {
+    proof.ran = nil
+    proof.addStep(.execution, "\(toolId) left the tool registry (its class was unregistered or replaced) before it started; nothing executed")
+    proof.finalize()
+    return ToolResult(
+        content: AnyCodableValue.dict(["error": .string("\(toolId) was unregistered or replaced while the call was being prepared; nothing was executed.")]),
+        isError: true,
+        metadata: [
+            DispatchMetadataKey.outcome: DispatchOutcomeCode.unresolved.rawValue,
+            DispatchMetadataKey.toolId: toolId,
+            DispatchMetadataKey.proof: proof,
+        ]
+    )
+}
+
 /// The result of an intent that did not resolve to one tool. Nothing ran.
 func notExecutedResult(_ resolution: Resolution) -> ToolResult {
     let options = resolution.refinement?.nearMatches.map(\.toolId) ?? []
@@ -725,6 +778,9 @@ extension DispatchContext {
             if case .rejected(let errors) = prepared { return invalidArgumentsResult(toolId: toolId, errors: errors, proof: proof) }
             return invalidArgumentsResult(toolId: toolId, errors: [], proof: proof)
         }
+        // Checked on this actor with no suspension before the call starts:
+        // once unregisterClass/registerClass returns, the old tool never starts.
+        guard isRegistered(tool.imp) else { return unregisteredResult(toolId: toolId, proof: &proof) }
         let result = try await tool.imp.execute(args: call.args)
         return annotateExecuted(result, toolId: toolId, proof: proof)
     }
@@ -777,6 +833,9 @@ extension DispatchContext {
             if case .rejected(let errors) = prepared { return invalidArgumentsResult(toolId: toolId, errors: errors, proof: proof) }
             return invalidArgumentsResult(toolId: toolId, errors: [], proof: proof)
         }
+        // Resolution and validation can suspend; the registry may have
+        // changed since the tool was chosen.
+        guard isRegistered(imp) else { return unregisteredResult(toolId: toolId, proof: &proof) }
 
         var result = annotateExecuted(try await imp.execute(args: call.args), toolId: toolId, proof: proof)
         await observer?.record(.accepted(toolName: toolId, tier: resolution.tier, confidence: resolution.confidence ?? 0))
@@ -956,7 +1015,7 @@ public func smallchatDispatchStream(
                 }
                 let selector = r.resolution.candidates.first { $0.toolId == toolId }?.selector ?? ""
                 try await validateAndStream(
-                    imp: imp, toolId: toolId, args: args ?? [:], proof: r.resolution.proof,
+                    context: context, imp: imp, toolId: toolId, args: args ?? [:], proof: r.resolution.proof,
                     confidence: r.resolution.confidence ?? 0, selector: selector, continuation: continuation
                 )
             } catch {
@@ -985,7 +1044,7 @@ public func smallchatDispatchStreamById(
                 }
                 let proof = await context.exactIdProof(toolId, tool: tool, options: options)
                 try await validateAndStream(
-                    imp: tool.imp, toolId: toolId, args: args, proof: proof,
+                    context: context, imp: tool.imp, toolId: toolId, args: args, proof: proof,
                     confidence: 1, selector: tool.selectors.first ?? "", continuation: continuation
                 )
             } catch {
@@ -1006,7 +1065,11 @@ private func streamErrorMetadata(_ error: Error) -> [String: AnyCodableValue]? {
 
 /// Validate, then execute a tool and stream its result at the finest
 /// granularity the IMP supports (inference deltas, chunks, single shot).
+/// A tool that left the registry while the call was prepared does not
+/// start; the stream checks from outside the context's actor, so a
+/// registry change landing in that last hop is not seen.
 private func validateAndStream(
+    context: DispatchContext,
     imp: any ToolIMP,
     toolId: String,
     args: [String: any Sendable],
@@ -1030,6 +1093,10 @@ private func validateAndStream(
             message: "Invalid arguments for \(toolId); the tool was not called: \(errors.map(\.message).joined(separator: "; "))",
             metadata: ["toolId": .string(toolId), "validationErrors": .array(errors.map { .string($0.message) })]
         ))
+        return
+    }
+    guard await context.isRegistered(imp) else {
+        continuation.yield(.done(result: unregisteredResult(toolId: toolId, proof: &proof)))
         return
     }
 
