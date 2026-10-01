@@ -249,7 +249,9 @@ reconnect stenographer, stop it and start it again with **Settings → Objection
 channel → Copy stenographer command**. The command reads both secrets when it runs
 (`SMALLCHAT_CHANNEL_SECRET="$(security find-generic-password …)"`), so the first
 run asks you to let `security` read them. If an older command with a secret in it
-is in your shell history, delete that line.
+is in your shell history, delete that line. A locally built app is signed anew by
+each build, so macOS may also ask once per build before the app can read its own
+Keychain items.
 
 In code:
 
