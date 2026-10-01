@@ -15,14 +15,14 @@ let fileTools = ToolClass(name: "FileTools")
 
 ## Adding Methods
 
-Methods are added by mapping a `ToolSelector` to a `ToolIMP`:
+Methods are added by mapping a `ToolSelector` to a `ToolIMP`. Register the selector
+with the runtime's selector table, which also puts its vector in the vector index so
+intents can find it (`registerClass` does not index selectors):
 
 ```swift
-let readSelector = ToolSelector(
-    vector: try await embedder.embed("read file"),
-    canonical: "read:file",
-    parts: ["read", "file"],
-    arity: 2
+let readSelector = try await runtime.selectorTable.register(
+    embedding: try await embedder.embed("read file"),
+    canonical: "read:file"
 )
 
 fileTools.addMethod(readSelector, imp: ReadFileTool())
@@ -49,25 +49,26 @@ A single selector can have multiple implementations differentiated by argument t
 ```swift
 try fileTools.addOverload(
     readSelector,
-    signature: SCMethodSignature(params: [.init(name: "path", type: .string)]),
+    signature: SCMethodSignature(parameters: [param("path", 0, SCType.string())]),
     imp: ReadByPathTool(),
-    originalToolName: "read_by_path",
-    isSemanticOverload: false
+    originalToolName: "read_by_path"
 )
 
 try fileTools.addOverload(
     readSelector,
-    signature: SCMethodSignature(params: [
-        .init(name: "path", type: .string),
-        .init(name: "encoding", type: .string),
+    signature: SCMethodSignature(parameters: [
+        param("path", 0, SCType.string()),
+        param("encoding", 1, SCType.string()),
     ]),
     imp: ReadWithEncodingTool(),
-    originalToolName: "read_with_encoding",
-    isSemanticOverload: false
+    originalToolName: "read_with_encoding"
 )
 ```
 
-Resolution considers argument count and types to pick the best overload.
+Resolution considers argument count and types to pick the best overload. On a
+registered class, add overloads with `runtime.addOverload(_:selector:signature:imp:)`,
+which also checks protected selectors and flushes the cache. Every overload match is
+still judged by the dispatch policy before anything runs.
 
 ## Inheritance
 
@@ -85,35 +86,43 @@ When `fileTools` can't resolve a selector, it traverses up to `ioTools`. This mi
 
 ## Protocol Conformance
 
-Tool classes can declare protocol conformance:
+Tool classes can declare protocol conformance. A protocol names the selectors a
+conforming class is expected to answer; `conformsTo` reports what the class declared:
 
 ```swift
-let streamableProto = ToolProtocolDef(name: "Streamable", requiredSelectors: ["stream:output"])
+let readableProto = ToolProtocolDef(
+    name: "Readable",
+    embedding: try await embedder.embed("read"),
+    requiredSelectors: [readSelector]
+)
 
-fileTools.addProtocol(streamableProto)
+fileTools.addProtocol(readableProto)
 
-// Check conformance
-fileTools.conformsTo(streamableProto) // true
+// Conformance is what the class declared (by protocol name)
+fileTools.conformsTo(readableProto) // true
 ```
 
 ## Categories (Extensions)
 
-Extend existing tool classes with new methods without subclassing:
+Extend every registered class that conforms to a protocol with new methods, without
+subclassing:
 
 ```swift
 let compressionCategory = ToolCategory(
     name: "CompressionExtension",
-    targetClass: "FileTools",
+    extendsProtocol: "Readable",
     methods: [
-        (compressSelector, CompressFileTool()),
-        (decompressSelector, DecompressFileTool()),
+        ToolMethod(selector: compressSelector, imp: CompressFileTool()),
+        ToolMethod(selector: decompressSelector, imp: DecompressFileTool()),
     ]
 )
 
 try await runtime.loadCategory(compressionCategory)
 ```
 
-This is equivalent to Objective-C categories — adding methods to an existing class at runtime.
+This is the counterpart of an Objective-C category: methods added to existing classes
+at runtime. `loadCategory` re-indexes the runtime and flushes the resolution cache, and
+throws `SelectorShadowingError` if a method would take over a protected core selector.
 
 ## Querying a Tool Class
 
@@ -150,4 +159,7 @@ try await runtime.registerClass(fileTools)
 try await runtime.registerCoreClass(fileTools, swizzlable: false)
 ```
 
-Core classes have their selectors protected by the `SelectorNamespace`, preventing plugins from overriding critical system tools.
+A core class's selectors are recorded in the runtime's `SelectorNamespace`: another
+class's category, overload or swizzle that would take one over throws
+`SelectorShadowingError`, unless the core class was registered with `swizzlable: true`.
+`registerClass` does not check selectors against the namespace.

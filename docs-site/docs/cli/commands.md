@@ -95,10 +95,25 @@ swift run smallchat serve --source ./manifests \
 Start a Claude Code channel server (stdio JSON-RPC).
 
 ```bash
-swift run smallchat channel --name <name> [--two-way] [--permission-relay] [--http-bridge]
+swift run smallchat channel --name <name> [--two-way] [--reply-tool <name>] [--permission-relay] \
+  [--instructions <text>] [--sender-allowlist <a,b>] [--http-bridge] [--http-bridge-host <host>] [--http-bridge-port <port>]
 ```
 
-This launches a stdio-based JSON-RPC server for bidirectional communication with Claude Code. It reads from stdin, writes to stdout, and exits when stdin closes. With `--http-bridge` (and the shared secret in `SMALLCHAT_CHANNEL_SECRET`), `POST /event` on `--http-bridge-host`:`--http-bridge-port` (default `127.0.0.1:3002`) injects events into the channel.
+This launches a stdio MCP channel server that Claude Code starts: it pushes injected
+events into the session, reads from stdin, writes to stdout, and exits when stdin
+closes.
+
+| Option | Description |
+|--------|-------------|
+| `--two-way` | List a reply tool so Claude Code can answer on the channel |
+| `--reply-tool` | Name of the reply tool (default `reply`) |
+| `--permission-relay` | Receive Claude Code's permission requests (logged to stderr; verdicts are sent from code) |
+| `--instructions` | Instructions returned in `initialize` |
+| `--sender-allowlist` | Comma-separated senders whose events are accepted (default: everyone) |
+| `--http-bridge` | Serve `POST /event` and `GET /health`; needs the shared secret in `SMALLCHAT_CHANNEL_SECRET` |
+| `--http-bridge-host`, `--http-bridge-port` | Bridge address (default `127.0.0.1:3002`) |
+
+See [Claude Code Integration](../guides/claude-code-integration).
 
 ---
 
@@ -204,10 +219,10 @@ swift run smallchat init my-server --template server
 Generate Markdown documentation from a compiled artifact.
 
 ```bash
-swift run smallchat docs <artifact>
+swift run smallchat docs <artifact> [-o TOOLS.md]
 ```
 
-Produces a Markdown file documenting:
+Produces a Markdown file (`--output`, default `TOOLS.md`) documenting:
 - All registered tools with descriptions
 - Input schemas and parameter types
 - Provider groupings
@@ -267,11 +282,69 @@ REPL commands (prefixed with `:`):
 Run diagnostics to verify your environment.
 
 ```bash
-swift run smallchat doctor
+swift run smallchat doctor [--db-path smallchat.db]
 ```
 
 Checks:
-- Swift version compatibility
-- Required dependencies
-- Platform support
-- Build configuration
+- The Swift runtime and platform
+- `LocalEmbedder` produces a vector
+- `MemoryVectorIndex` finds an inserted vector
+- Cosine similarity (Accelerate on Apple platforms, scalar elsewhere)
+- Canonicalization
+- Whether the session database (`--db-path`, used by `serve`) exists
+
+---
+
+### `setup`
+
+Interactive wizard: finds your MCP servers, compiles them into a toolkit, and reports
+the bundled loom-mcp manifest.
+
+```bash
+swift run smallchat setup [--no-interactive] [-o tools.toolkit.json]
+```
+
+---
+
+### `install`
+
+Print the install plan for a registry entry or a bundle. It is a dry run: nothing is
+written and no install command runs.
+
+```bash
+swift run smallchat install examples/registry/github.json [--json]
+```
+
+---
+
+### `dream`
+
+Recompile a toolkit using what Claude session logs and memory files (`CLAUDE.md`) say
+about your tools: it scans memory for tool mentions, counts tool usage in session logs,
+prioritizes tools, compiles, and keeps earlier artifact versions for rollback.
+
+```bash
+swift run smallchat dream [--source <manifests>] [--output tools.toolkit.json] [--log-dir <dir>] \
+  [--config <file>] [--auto] [--dry-run] [--max-versions 5]
+```
+
+`--dry-run` only analyzes; `--auto` replaces the current artifact with the new one. The
+artifact is compiled with the built-in hash embedder whatever `--embedder` says.
+
+---
+
+### `memex`
+
+Compile text sources into a cross-referenced knowledge base (separate from tool
+dispatch).
+
+```bash
+swift run smallchat memex compile notes/*.md -o memex.json
+swift run smallchat memex query memex.json "deployment" [--limit 5]
+swift run smallchat memex lint memex.json
+swift run smallchat memex inspect memex.json
+swift run smallchat memex export memex.json -o memex-wiki
+```
+
+See [Phase 4 Algorithm Limitations](../guides/phase4-algorithms) for what the
+extraction heuristics catch and miss.

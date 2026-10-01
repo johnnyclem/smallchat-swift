@@ -7,21 +7,29 @@ title: Embedding
 
 <span class="module-badge">SmallChatEmbedding</span>
 
-The embedding module provides vector embedding and similarity search for semantic tool dispatch.
+The embedding module provides vector embedding and similarity search for semantic tool dispatch. The `Embedder` and `VectorIndex` protocols live in `SmallChatCore`.
 
 ## Embedder Protocol
 
 ```swift
 protocol Embedder: Sendable {
     var dimensions: Int { get }
+    var fingerprint: EmbedderFingerprint? { get }   // default: nil
     func embed(_ text: String) async throws -> [Float]
-    func embedBatch(_ texts: [String]) async throws -> [[Float]]
+    func embedBatch(_ texts: [String]) async throws -> [[Float]]   // default: embed each text
 }
 ```
 
+The `fingerprint` identifies what produced the vectors (kind, model, model hash,
+dimensions, max length, pooling, normalization). Artifact format 1.0 records the
+compiling embedder's fingerprint, and a runtime refuses an artifact whose fingerprint
+differs from its embedder's (`EmbedderMismatchError`). An embedder without a fingerprint
+cannot compile or load 1.0 artifacts.
+
 ## LocalEmbedder
 
-A fast, deterministic embedder using FNV-1a hashing with trigram decomposition. Suitable for development and testing.
+A fast hash embedder: FNV-1a over words and their character trigrams. It matches
+spelling, not meaning, so it suits development and tests.
 
 ```swift
 struct LocalEmbedder: Embedder, Sendable
@@ -32,6 +40,10 @@ struct LocalEmbedder: Embedder, Sendable
 ```swift
 init(dimensions: Int = 384)
 ```
+
+Its fingerprint is `EmbedderFingerprint.hash(dims: dimensions)` (`hash` /
+`smallchat-hash-v1`), the same as @smallchat/core's hash embedder, whose vectors it
+reproduces (checked by `LocalEmbedderParityTests` and the artifact golden fixture).
 
 ### Methods
 
@@ -51,7 +63,7 @@ let vector = try await embedder.embed("search flights")
 
 #### embedBatch
 
-Embed multiple strings efficiently:
+Embed multiple strings:
 
 ```swift
 func embedBatch(_ texts: [String]) async throws -> [[Float]]
@@ -67,36 +79,34 @@ let vectors = try await embedder.embedBatch([
 
 ### How It Works
 
-1. Tokenize input into trigrams: `"search"` → `["sea", "ear", "arc", "rch"]`
-2. Hash each trigram with FNV-1a
-3. Accumulate into a fixed-dimension vector
-4. L2-normalize the result
+1. Lower-case the text, keep only ASCII letters, digits and whitespace, and split it into words
+2. Hash each word with FNV-1a over its UTF-16 code units and add 1.0 at that index
+3. Hash each character trigram of the word (`"search"` → `sea`, `ear`, `arc`, `rch`) and add 0.5 at its index
+4. L2-normalize the result (the norm in double precision)
 
-This produces consistent embeddings where semantically similar inputs (sharing trigrams) have higher cosine similarity.
+Inputs that share words or trigrams get a higher cosine similarity. Characters outside
+ASCII are dropped, so text in other scripts embeds poorly.
 
 ### Custom Embedder
 
-For production, implement the `Embedder` protocol with a real model:
+For semantic matching, implement the `Embedder` protocol with a real model and give it
+a fingerprint:
 
 ```swift
-final class OpenAIEmbedder: Embedder, @unchecked Sendable {
+struct MyModelEmbedder: Embedder {
     let dimensions = 1536
+    let fingerprint: EmbedderFingerprint? = EmbedderFingerprint(
+        kind: "custom",
+        model: "text-embedding-3-small",
+        modelSha256: nil,
+        dims: 1536,
+        maxLength: nil,
+        pooling: "none",
+        normalize: true
+    )
 
     func embed(_ text: String) async throws -> [Float] {
-        // Call OpenAI embeddings API
-        let response = try await openai.embeddings.create(
-            model: "text-embedding-3-small",
-            input: text
-        )
-        return response.data[0].embedding
-    }
-
-    func embedBatch(_ texts: [String]) async throws -> [[Float]] {
-        let response = try await openai.embeddings.create(
-            model: "text-embedding-3-small",
-            input: texts
-        )
-        return response.data.map(\.embedding)
+        try await myModelClient.embed(text)   // your embedding API
     }
 }
 ```
@@ -105,29 +115,32 @@ final class OpenAIEmbedder: Embedder, @unchecked Sendable {
 
 ```swift
 protocol VectorIndex: Sendable {
-    func insert(id: String, vector: [Float]) async
-    func search(query: [Float], topK: Int, threshold: Float) async -> [SelectorMatch]
-    func remove(id: String) async
-    func size() async -> Int
+    func insert(id: String, vector: [Float]) async throws
+    func search(query: [Float], topK: Int, threshold: Float) async throws -> [SelectorMatch]
+    func remove(id: String) async throws
+    func size() async throws -> Int
 }
 ```
 
 ### SelectorMatch
 
 ```swift
-struct SelectorMatch {
+struct SelectorMatch: Sendable, Equatable {
     let id: String
-    let similarity: Float
+    let distance: Float   // 1 - cosine similarity
 }
 ```
 
 ## MemoryVectorIndex
 
-An in-memory brute-force cosine similarity index. Suitable for up to ~10,000 tools.
+An in-memory brute-force cosine similarity index, for registries of up to about 10,000 tools.
 
 ```swift
 actor MemoryVectorIndex: VectorIndex
 ```
+
+Similarities are computed in double precision from the stored float32 components, and
+equal similarities are ordered by id, so results never depend on insertion order.
 
 ### Initialization
 
@@ -139,7 +152,7 @@ init()
 
 #### insert
 
-Add a vector to the index:
+Add (or replace) a vector:
 
 ```swift
 func insert(id: String, vector: [Float])
@@ -147,7 +160,7 @@ func insert(id: String, vector: [Float])
 
 #### search
 
-Find the top-K most similar vectors above a threshold:
+Find the top-K most similar vectors whose cosine similarity is at least `threshold`:
 
 ```swift
 func search(query: [Float], topK: Int, threshold: Float) -> [SelectorMatch]
@@ -163,7 +176,7 @@ let matches = await index.search(
     topK: 5,
     threshold: 0.75
 )
-// [SelectorMatch(id: "search:flights", similarity: 0.94)]
+// [SelectorMatch(id: "search:flights", distance: 0.06)]   similarity 0.94
 ```
 
 #### remove
@@ -184,29 +197,22 @@ func size() -> Int
 
 ### Custom Vector Index
 
-For larger deployments, implement `VectorIndex` with an ANN library:
-
-```swift
-actor HNSWVectorIndex: VectorIndex {
-    // Use hnswlib or similar for approximate nearest neighbor search
-    // Scales to millions of vectors with sub-millisecond search
-
-    func search(query: [Float], topK: Int, threshold: Float) -> [SelectorMatch] {
-        // ANN search implementation
-    }
-}
-```
+For larger deployments, implement `VectorIndex` with an approximate nearest neighbor
+library. Return candidates with their distance (`1 - similarity`), drop those below the
+threshold, and order equal distances by id: resolution ranks what the index returns.
 
 ## VectorMath
 
-Low-level vector operations using Apple's Accelerate framework:
+Low-level vector operations (`SmallChatCore`): Accelerate on Apple platforms, a scalar
+loop elsewhere.
 
 ```swift
 // Cosine similarity between two vectors
 let similarity = cosineSimilarity(vectorA, vectorB)
 
-// L2 normalize a vector in-place
+// The same in double precision (what MemoryVectorIndex uses)
+let precise = cosineSimilarityDouble(vectorA, vectorB)
+
+// L2-normalize a vector in place
 l2Normalize(&vector)
 ```
-
-These are optimized via BLAS and run on the CPU's vector units.

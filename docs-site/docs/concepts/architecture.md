@@ -48,20 +48,30 @@ SmallChat (umbrella)
 ├── SmallChatTransport     ← HTTP, SSE, stdio, auth, middleware
 │   └── depends on Core, NIO
 ├── SmallChatMCP           ← MCP server, sessions, rate limiting
-│   └── depends on Core, Runtime, Transport, SQLite, NIO
+│   └── depends on Core, Runtime, Transport, Compiler, Embedding, SQLite, NIO
 ├── SmallChatChannel       ← Claude Code integration
 │   └── depends on Core, MCP
-└── SmallChatCLI           ← Command-line interface
-    └── depends on all modules
+├── SmallChatTruth         ← Stenographer's truth format v2
+│   └── depends on Core, Compaction
+└── SmallChatDream, SmallChatMemex, SmallChatShorthand, SmallChatImportance,
+    SmallChatCRDT, SmallChatCompaction, SmallChatUI (Apple only)
+
+SmallChatCLI               ← Command-line interface (depends on SmallChat)
+SmallChatAgents            ← Messenger core (macOS and Linux)
+SmallChatApp               ← macOS messenger (depends on SmallChat, SmallChatUI, SmallChatAgents)
 ```
+
+The [module overview](../modules/overview) lists every module and where it builds.
 
 ## Concurrency Model
 
-smallchat-swift uses Swift's structured concurrency throughout:
+smallchat-swift is built in the Swift 6 language mode, so the compiler checks actor
+isolation and `Sendable`:
 
 - **Actors** — `ToolRuntime`, `DispatchContext`, `ResolutionCache`, `SelectorTable`, `MemoryVectorIndex`, `MCPServer`, `ChannelServer` are all actors for thread-safe isolated state
 - **Sendable types** — All core value types (`ToolSelector`, `ToolResult`, `DispatchEvent`, `ToolSchema`) conform to `Sendable`
-- **Locks for hot paths** — `SelectorNamespace` and `IntentPinRegistry` use `OSAllocatedUnfairLock` for synchronous hot-path access where actor isolation would add unnecessary overhead
+- **Locks for hot paths** — `ToolClass`, `SelectorNamespace` and `IntentPinRegistry` keep their state behind a lock (`OSAllocatedUnfairLock` on Apple platforms, an `NSLock` on Linux) for synchronous hot-path access; `ToolClass` is `@unchecked Sendable`, the other two are checked `Sendable`
+- **Threads for blocking reads** — the stdio MCP transport, subprocesses and `smallchat channel`'s stdin are read on dedicated threads, so a blocking read never holds a cooperative-pool thread
 - **AsyncThrowingStream** — Streaming APIs use `AsyncThrowingStream` for backpressure-aware event delivery
 
 ## Data Flow

@@ -33,7 +33,7 @@ struct DreamCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Analyze only -- don't compile or write artifacts")
     var dryRun: Bool = false
 
-    @Option(name: .long, help: "Embedder type (local or onnx)")
+    @Option(name: .long, help: "Embedder type (local or onnx). Only the hash embedder is built in, so the artifact is always compiled with it")
     var embedder: String = "local"
 
     @Option(name: .long, help: "Maximum artifact versions to retain")

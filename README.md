@@ -21,7 +21,7 @@ Your agent has 50 tools. The LLM sees all 50 in its context window every single 
 
 **smallchat compiles your tools into a dispatch table.** The LLM expresses intent. The runtime resolves it to at most one tool, by embedding similarity, and runs that tool only when its dispatch policy allows; otherwise it asks. No prompt stuffing. No selection lottery.
 
-This is the **native Swift implementation** of [smallchat](https://github.com/johnnyclem/smallchat) — same architecture, same semantics, built for Apple platforms and Linux with Swift concurrency, actors, and the Swift type system.
+This is the **Swift implementation** of [smallchat](https://github.com/johnnyclem/smallchat), for Apple platforms and Linux. Version 1.0 follows @smallchat/core 1.0's dispatch rules and artifact format; [Parity with @smallchat/core](#parity-with-smallchatcore) says exactly what is checked.
 
 ```
                          ┌──────────────────────┐
@@ -34,30 +34,64 @@ This is the **native Swift implementation** of [smallchat](https://github.com/jo
                          └──────────────────────┘
 ```
 
-**Table of contents:** [What's New](#whats-new-in-060) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Streaming](#streaming) · [CLI Reference](#cli-reference) · [Architecture](#architecture) · [Security](#security) · [MCP Server](#mcp-server) · [Agent Messenger](#the-smallchat-app-agent-messenger) · [Claude Code Integration](#claude-code-integration) · [Dependencies](#dependencies) · [Ecosystem](#ecosystem) · [Development](#development)
+**Table of contents:** [What's New](#whats-new-in-100) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Streaming](#streaming) · [CLI Reference](#cli-reference) · [Architecture](#architecture) · [Security](#security) · [MCP Server](#mcp-server) · [Agent Messenger](#the-smallchat-app-agent-messenger) · [Claude Code Integration](#claude-code-integration) · [Dependencies](#dependencies) · [Ecosystem](#ecosystem) · [Development](#development)
 
-## What's New in 0.6.0
+## What's New in 1.0.0
 
-This release adds the **App/UI layer**, matching the TypeScript 0.6.0 feature
-set: apps are now first-class dispatch targets that expose HTML UI content
-via `ui://` URIs through the MCP `resources/read` endpoint.
+1.0.0 is a breaking release: see [`MIGRATION.md`](MIGRATION.md) for how to update from
+0.6 and [`CHANGELOG.md`](CHANGELOG.md) for every change. It is unreleased until the
+`1.0.0` tag is cut.
 
-- **App/UI layer** (`SmallChatCore`, `SmallChatCompiler`, `SmallChatRuntime`, `SmallChatMCP`). `ComponentSelector` and `AppManifest`/`ComponentDefinition` describe UI components alongside tools; `AppCompiler` runs the same 4-phase PARSE → EMBED → LINK → EMIT pipeline as `ToolCompiler` to produce an `AppArtifact`; `AppRuntime` mirrors `ToolRuntime` with a never-throwing `uiDispatch(intent:args:)`; `AppResourceHandler` serves the resolved HTML over MCP.
-- **`SmallChatUI`** — new SwiftUI library wrapping `WKWebView` (`AppWebView`) with a sandboxed configuration (`AppWebViewSandbox`) that enforces same-origin navigation and injects a CSP via `WKUserScript`, one `WKProcessPool` per view for process isolation.
-- **GUI**: the macOS app (`SmallChatApp`) gained an Apps sidebar section that lists registered apps and previews them inline via `AppWebView`.
+- **Resolve is separate from execute.** `resolve` proposes at most one tool and runs
+  nothing; `dispatchById` runs exactly the named tool; intent `dispatch` runs a match
+  only when the dispatch policy allows it. One policy covers every path that can run a
+  tool: below HIGH similarity only with an LLM verifier's approval, destructive tools
+  only at EXACT similarity or from a pinned phrase, and anything else comes back as
+  `needs-disambiguation` with the candidates.
+- **Checked inputs and pinned artifacts.** Arguments are validated against each tool's
+  JSON Schema before anything runs. Artifacts are @smallchat/core's format 1.0,
+  content-hashed and pinned to the embedder that produced their vectors. Every decision
+  carries a `ResolutionProof` with a canonical call digest.
+- **An MCP server that runs exactly the tool you call.** `smallchat serve` speaks
+  Streamable HTTP (2025-11-25 and 2025-06-18) on `/mcp`, lists tools as
+  `<provider>__<tool>`, runs them at their providers' endpoints, and offers the
+  read-only `smallchat_resolve` meta-tool. `--auth` is a bearer token; OAuth and the
+  TLS settings that nothing enforced are gone.
+- **Linux and iOS.** CI builds and tests on macOS (Xcode 16.4 and the newest Xcode)
+  and in Swift 6.1, 6.3 and 6.4 Linux containers, and builds the libraries for iOS.
+- **An agent messenger.** On macOS, `swift run SmallChatApp` is a messenger for your
+  Claude Code sessions, with a stenographer that objects when an agent asserts a
+  tombstoned value. Tombstones you sign go to Stenographer as proposals that you
+  notarize (see [the messenger](#the-smallchat-app-agent-messenger)).
+- **`SmallChatTruth`** reads Stenographer's truth format v2 (hash-chained TB/UV streams
+  with `TRANSITION` status lines), fails closed on anything unknown or unverifiable,
+  and runs Stenographer's golden fixtures in `swift test`.
+- Also since 0.6.0: `RtkTransport` (prefixes eligible shell commands with `rtk` and
+  pipes large response bodies through `rtk filter`), and the `DispatchConfig.miniLM`
+  threshold preset for lower-contrast sentence embedders.
 
-Since 0.6.0, `main` has also picked up:
+### Parity with @smallchat/core
 
-- **`SmallChatTruth`** — a reader for Stenographer's truth format v2 (the suite's truth streams; spec and golden fixtures in `Tests/Fixtures/truth-format`, checked by `swift test`): it verifies each line's `seq`/`prevHash`/`hash` chain (SHA-256 over RFC 8785 JCS), folds `TRANSITION` lines into each entry's status, merges one stream per writer on the status lattice (`TruthWiki.parseFiles`), and fails closed — an unknown or missing status, a struck TB, an unsigned or (by default) version 1 TB is never current truth, and a stream with a bad line or a broken chain is refused whole. Lines are written back byte for byte, unknown fields and values included. On top of that: the §7 consumption rules in code (active TB = ground truth, a TB with an open contest carries its disputing UVs, an open UV is flagged `UNVERIFIED` and never reads as proven), the suite's frozen markers with escaping of untrusted text (`TruthEscaping`), corpus items + a stock `CompactionVerifier` invariant (`TruthInvariants.preserved`) that fails any compaction which drops a truth entry or strips the UNVERIFIED marker, and a proposal-only write path (`TruthProposalEnvelope`, `InvariantProposal`) that refuses anonymous and reserved identities. The hash chain shows a stream wasn't edited between its first and last line; it doesn't show who wrote it (key signatures are planned for 1.x).
-- **`RtkTransport`** (`SmallChatTransport`) — a transport-wrapping actor that ports the TS `rtk-which` / `rtk-transport` integration: prefixes eligible shell commands with `rtk` and pipes response bodies ≥ 512 B through `rtk filter`, with metadata attached to every response for observability. Pure pass-through when disabled.
-- **`DispatchConfig.miniLM`** — a threshold preset recalibrated for lower-contrast sentence embedders (e.g. `all-MiniLM-L6-v2`), where correct-tool paraphrases commonly score 0.60–0.74 and land below HIGH under the library defaults.
-- **No intent interning** — `SelectorTable.resolve()` never inserts runtime intents into the tool-selector table or vector index (1.0 also dropped the intent side cache), so long-running processes can't dilute real tool candidates or accumulate state per intent.
-- **`LocalEmbedder`** is now byte/Float32-compatible with the TS reference implementation (UTF-16 hashing, ASCII tokenization rule, exact `ToInt32` fold), verified against golden vectors.
+smallchat-swift 1.0 adopts @smallchat/core 1.0's dispatch semantics. What `swift test`
+checks is the set of vectors in @smallchat/core's `spec/`, copied into
+`Tests/Fixtures/spec` by `Scripts/sync-spec.sh` (the source commit is in `SOURCE`):
 
-See [`CHANGELOG.md`](CHANGELOG.md) for the full history, including the 0.5.0
-confidence-tiered dispatch, loom-mcp, and Registry/Install release
-(`docs/0.5.0-roadmap.md` has the per-phase breakdown) and the earlier 0.3.0
-security-hardening release.
+- **Call digests:** RFC 8785 canonical JSON and the domain-separated SHA-256, including
+  the inputs that must be refused.
+- **Tool ids:** valid and invalid canonical ids (`<providerId>/<toolName>`).
+- **Ranking:** score quantization, candidate order and tier boundaries.
+- **Resolve:** for each case, the outcome, decision, tier, chosen tool, candidate order
+  and exclusions.
+- **Artifacts:** the golden artifact loads and round-trips, every invalid artifact and
+  embedder mismatch is refused, and compiling the golden manifest reproduces its
+  content hash.
+
+Outside those vectors the TypeScript runtime is the reference. Proof digests are per
+runtime (the proof step texts differ). Not ported yet: argument coercion, the semantic
+map (learned choices), observer feedback, the decision log, replay and explain. The only
+built-in embedder is the hash embedder (`LocalEmbedder`, the same vectors as
+@smallchat/core's hash embedder), so an artifact compiled by @smallchat/core with its
+default ONNX embedder needs an `Embedder` of yours that declares the same fingerprint.
 
 ## Quick Start
 
@@ -71,7 +105,7 @@ dependencies: [
 ]
 ```
 
-> Version tags start at `1.0.0`. Releases before 1.0 were never tagged, so an older checkout can only be pinned by `branch:` or `revision:`.
+> Version tags start at `1.0.0`, which is tagged when the release is published; until then, pin a commit with `revision:`. Releases before 1.0 were never tagged, so they too can only be pinned by `branch:` or `revision:`.
 
 Then add the module you need:
 
@@ -308,14 +342,14 @@ SmallChatAgents ─── Agent messenger core: session discovery, handles, @men
 | **SmallChatCore** | Type system, selectors, dispatch tables, resolution cache, overload tables, canonicalization, vector math, intent pinning, rate limiting, confidence tiers (`DispatchConfig`, incl. the `miniLM` preset), App/UI types (`ComponentSelector`, `AppManifest`, `AppArtifact`) |
 | **SmallChatRuntime** | `ToolRuntime` actor, `resolve` / `dispatchById` / intent dispatch, the dispatch policy, verification, decomposition, refinement, `DispatchBuilder` fluent API, streaming events, method swizzling, `AppRuntime` for UI dispatch |
 | **SmallChatCompiler** | 4-phase compilation pipeline: parse → embed → link → output, plus `AppCompiler` for the App/UI layer |
-| **SmallChatEmbedding** | `LocalEmbedder` (FNV-1a hash, 384 dims, TS-parity), `MemoryVectorIndex` for dev/test |
+| **SmallChatEmbedding** | `LocalEmbedder` (FNV-1a hash, 384 dims by default; the same vectors as @smallchat/core's hash embedder), `MemoryVectorIndex` for dev/test |
 | **SmallChatTransport** | Protocol-agnostic transport layer — HTTP, MCP stdio, MCP SSE, local — with auth, retry, timeout, and circuit breaker middleware; `LoomMCPClient` for loom-mcp; `RtkTransport` for `rtk`-based prefixing/filtering |
 | **SmallChatMCP** | MCP server over Streamable HTTP (protocol 2025-11-25 and 2025-06-18): exact tool calls through a runtime whose tools run at their providers' endpoints (`MCPToolkit`), sessions (SQLite), bearer-token auth, Host/Origin checks, rate limiting, connection cap, HMAC-chained audit log, `AppResourceHandler` for `ui://` resources; `MCPClientTransport` (Streamable HTTP client) |
 | **SmallChatChannel** | Claude Code integration: JSON-RPC 2.0 over stdio, sender gating, permission relay, and the channel HTTP bridge (`ChannelBridgeServer`: `POST /event`, mandatory shared secret) used by `smallchat channel --http-bridge` and the messenger's objection channel |
 | **SmallChatDream** | Memory-driven tool re-compilation: reads Claude session/memory logs to discover tool usage and recompile toolkits |
-| **SmallChatShorthand** | Text primitives shared by the modules below — tokenization, Jaccard/cosine similarity, FNV-1a content hashing |
+| **SmallChatShorthand** | Text primitives shared by the modules below — tokenization, Jaccard/cosine similarity, FNV-1a content hashing. Ported from smallchat's 0.4-era internal package, not from [@shorthand/core](https://github.com/johnnyclem/short-hand) |
 | **SmallChatImportance** | Three-signal importance detector (recency decay, co-mention centrality, novelty) with weighted ranking |
-| **SmallChatCRDT** | Conflict-free replicated types for multi-agent shared memory: `LWWMap`, `ORSet`, `GCounter`, `VectorClock` |
+| **SmallChatCRDT** | Replicated types for multi-agent shared memory: `LWWMap`, `ORSet`, `GCounter`, `VectorClock`. `LWWMap` merges are not commutative when two writes share a timestamp and replica (see the CHANGELOG's known issues) |
 | **SmallChatCompaction** | `CompactionVerifier` — three-strategy verification (resampling, contradiction detection, invariants) for safe history compaction |
 | **SmallChatTruth** | Truth format v2 reader (Stenographer's truth streams): hash-chain checks, TRANSITION fold, multi-file merge, fail-closed statuses, §7 consumption rules, marker escaping, truth-preserving compaction invariants, proposal-only write path |
 | **SmallChatAgents** | Agent messenger core: Claude Code session discovery (live registry + transcripts), durable renamable handles, `@mention` parsing, direct/group routing with private-until-shared replies, the switchboard relay over Claude Code inter-agent messaging, headless `claude -p --resume`, and the stenographer watcher |
@@ -326,24 +360,27 @@ SmallChatAgents ─── Agent messenger core: session discovery, handles, @men
 
 ## Security
 
-smallchat is designed to run in adversarial environments where untrusted inputs flow through the dispatch pipeline. v0.3.0 includes multiple hardening layers:
+Each control below says what it does and where it stops. None of them makes a model
+immune to instructions inside the text it reads.
 
-| Feature | Protection |
-|---------|------------|
-| **Intent Sanitization** | Strips null bytes, control characters, and enforces length limits before dispatch (v0.3.0). |
+| Control | What it does |
+|---------|--------------|
 | **Dispatch Policy** | One rule set on every path that can run a tool (pinned phrase, cache hit, vector and overload match, protocol conformance, decomposed sub-intent): below HIGH a tool runs only with an LLM verifier's approval, destructive tools (MCP annotations) run by intent only at EXACT similarity or from a pinned phrase, and nothing below LOW runs. A denial runs nothing and returns the candidates. |
 | **Intent Pinning** | Guards sensitive tools against semantic collisions. `exact` pins accept only their pinned phrases, compared as whole phrases (so "do not transfer funds" does not match "transfer funds"); `elevated` pins need a similarity of the intent's own embedding at or above their threshold (default 0.98). |
-| **Argument Validation** | Every call is validated against the tool's JSON Schema `inputSchema` before it runs; a schema the validator cannot evaluate makes the tool uncallable rather than unchecked. |
-| **Sender Gating** | Allowlist-based access control with identity validation, max sender limits, and constant-time pairing code verification (v0.3.0). |
+| **Argument Validation** | Every call is validated against the tool's JSON Schema `inputSchema` before it runs; a schema the validator cannot evaluate makes the tool uncallable rather than unchecked. `format` is not checked. |
+| **Intent Sanitization** | Before embedding, `resolve` strips NUL and the other C0 control characters, collapses whitespace and truncates the intent to 1,024 characters; an empty intent is refused. |
 | **Semantic Rate Limiting** | Opt-in (`RuntimeOptions.rateLimiter`): limits novel intents embedded per principal per time window; over the limit, resolution returns `throttled` without embedding. |
 | **No Intent Interning** | Intents are embedded on their own and never inserted into the tool-selector table or index, so long-running processes can't accumulate state per intent or dilute real tool candidates. |
-| **Selector Namespacing** | Core system selectors are protected and cannot be shadowed by user-registered tools. |
+| **Selector Namespacing** | Selectors of a class registered with `registerCoreClass` cannot be taken over by another class's category, overload or swizzle (`SelectorShadowingError`) unless marked swizzlable. `registerClass` itself does not check them. |
+| **Schema Fingerprinting** | After `updateSchemaFingerprint(_:)` records a provider's changed schemas, cached resolutions made under the old ones are dropped on their next lookup. Call it when a provider reloads; nothing calls it for you. |
 | **Bearer Token** | With `serve --auth`, every MCP request (all but `GET /health`) needs `Authorization: Bearer <token>`, compared in constant time. The token comes from `SMALLCHAT_MCP_TOKEN` or a file created with mode 0600. OAuth is not implemented. |
-| **Schema Fingerprinting** | Detects tool schema changes on hot-reload; invalidates stale cache entries automatically. |
-| **Structured Concurrency** | Actor-based isolation and `Sendable` conformance enforced at compile time. No raw threads. |
 | **Audit Log Integrity** | HMAC-SHA256 chain over every field of each entry, under a secret key (random per server unless you pass one; there is no built-in key). It detects edits to retained entries by anyone without the key, and still verifies after old entries are evicted. In memory only: it does not survive a restart. |
 | **Connection Limits** | The MCP server closes connections beyond `maxConnections` and rejects bodies over `maxRequestBodyBytes` (413). |
 | **DNS-Rebinding Protection** | A loopback-bound MCP server rejects non-loopback `Host` names and foreign `Origin`s (403). |
+| **Sender Gating** | The channel server's allowlist of event senders (`SenderGate`), with identity validation, a sender cap and 6-hex-digit pairing codes compared in constant time. An empty allowlist admits every sender. The HTTP bridge additionally requires the shared secret. |
+| **Truth Ledger Reading** | `SmallChatTruth` refuses a truth format v2 stream with an edited line or a broken hash chain, and never counts an entry with an unknown or missing status, a struck entry or an unsigned TB as current truth. The chain shows a stream wasn't edited between its first and last line; it doesn't show who wrote it (key signatures are planned for 1.x). |
+| **Messenger** | Separate channel, notary and REST secrets kept in the Keychain (0600 files outside macOS), headless sessions with an explicit tool list, a nonce-framed switchboard protocol, and escaping of truth markers inside untrusted text (see [the messenger](#the-smallchat-app-agent-messenger)). |
+| **Concurrency** | Built in the Swift 6 language mode, so actor isolation and `Sendable` are checked by the compiler. Types that share mutable state across threads outside actors (for example `ToolClass`) are `@unchecked Sendable` behind locks, and blocking pipe reads run on dedicated threads. |
 
 ## MCP Server
 
@@ -420,9 +457,14 @@ SMALLCHAT_CHANNEL_SECRET=... swift run smallchat channel --name ci --http-bridge
 ```
 
 The channel uses **JSON-RPC 2.0 over stdio** and supports:
-- **Bidirectional messaging** — Claude Code can invoke tools; tools can reply back
-- **Sender gating** — Allowlist-based access control with a secure pairing flow
-- **Permission relay** — Two-way channel for requesting and granting permissions
+- **Channel events** — each injected event reaches Claude Code as a
+  `notifications/claude/channel` notification; with `--two-way`, Claude Code can answer
+  through a `reply` tool (the only tool the channel lists)
+- **Sender gating** — an allowlist of event senders (`--sender-allowlist`); an empty
+  allowlist admits everyone
+- **Permission relay** (`--permission-relay`) — Claude Code's permission requests are
+  received and reported; verdicts are sent with `ChannelServer.sendPermissionVerdict(_:)`
+  from code (the CLI only logs the requests)
 - **MCP handshake** — `initialize` negotiates 2025-11-25, 2025-06-18 or 2024-11-05
 - **HTTP bridge** (`--http-bridge`) — `POST /event` (`{channel?, content, meta?, sender?}`,
   authenticated with `X-Channel-Secret` or `Authorization: Bearer`; the secret from
@@ -440,26 +482,38 @@ The command exits when Claude Code closes its stdin.
 |---------|---------|---------|
 | [swift-argument-parser](https://github.com/apple/swift-argument-parser) | 1.5.0+ | CLI command parsing |
 | [SQLite.swift](https://github.com/stephencelis/SQLite.swift) | 0.15.0+ | Session persistence |
-| [swift-nio](https://github.com/apple/swift-nio) | 2.70.0+ | HTTP/SSE async transport |
+| [swift-nio](https://github.com/apple/swift-nio) | 2.70.0+ | MCP server, channel bridge and messenger HTTP (NIO) |
 | [swift-collections](https://github.com/apple/swift-collections) | 1.1.0+ | `OrderedDictionary` for LRU cache |
+| [swift-crypto](https://github.com/apple/swift-crypto) | 3.0.0..<6.0.0 | SHA-256 and HMAC on Linux only (Apple platforms use CryptoKit) |
 
-No external embedding models are required. The built-in `LocalEmbedder` uses FNV-1a hash-based embeddings (384 dimensions) for development and testing. For production, provide a custom `Embedder` conformance backed by your embedding model of choice.
+No external embedding models are required. The built-in `LocalEmbedder` uses FNV-1a hash-based embeddings (384 dimensions by default): they match words and character trigrams, not meaning, so they suit development and tests. For semantic matching, provide an `Embedder` conformance backed by an embedding model, and give it a `fingerprint` so artifacts record which model produced their vectors.
 
 ## Ecosystem
 
-smallchat-swift is one of four sibling projects (AgentVault, SmallChat, Stenographer, Short-Hand)
-sharing a design philosophy for autonomous agent infrastructure. See
-[`docs/ecosystem/executive-summary.md`](docs/ecosystem/executive-summary.md) and
-[`docs/ecosystem/engineering-guide.md`](docs/ecosystem/engineering-guide.md) for a source-verified
-evaluation of how this repo fits into that stack, including a naming-collision gap between this
-repo's `SmallChatShorthand` module and the unrelated sibling "Short-Hand" project.
+smallchat-swift is part of the smallchat suite. It follows
+[@smallchat/core](https://github.com/johnnyclem/smallchat) (TypeScript) 1.0 and runs its
+`spec/` vectors, and it is wired to [Stenographer](https://github.com/johnnyclem/stenographer):
+`SmallChatTruth` reads Stenographer's truth format v2 and runs its golden fixtures, the
+messenger receives Stenographer's objections on its channel bridge and submits
+tombstones to Stenographer's REST API for a person to notarize, and the copied launch
+command runs `npx -y @stenographer/core`. None of these is a SwiftPM dependency: the
+contracts are the vendored fixtures.
+
+[@shorthand/core](https://github.com/johnnyclem/short-hand) is a separate TypeScript
+package. This repo's `SmallChatShorthand`, `SmallChatImportance`, `SmallChatCRDT` and
+`SmallChatCompaction` are ports of smallchat's 0.4-era modules (TS PRs #55–#58), which
+@shorthand/core 1.0 has since absorbed and changed; they are not a port of it.
+
+[`docs/ecosystem/`](docs/ecosystem/) holds an archived pre-1.0 evaluation of how this repo
+related to AgentVault, smallchat, Stenographer and Short-Hand; its findings about this repo
+(nothing wired, no CI, no LICENSE) are out of date.
 
 ## Development
 
 ```bash
 # Build
 swift build                              # Debug build
-swift build --release                    # Optimized release build
+swift build -c release                   # Optimized release build
 
 # Test
 swift test                               # Run full test suite
@@ -508,9 +562,11 @@ smallchat-swift/
 │   ├── SmallChatUI/                # WKWebView wrapper for App/UI surfaces
 │   ├── SmallChatCLI/               # CLI entry point + 13 commands (Commands/)
 │   └── SmallChatApp/               # macOS SwiftUI messenger (Messenger/) + Toolkit panels (Views/)
-├── Tests/                          # One *Tests target per module above
+├── Tests/                          # One *Tests target per module above, plus SmallChatConformanceTests
+│   └── Fixtures/                   # Vendored contracts: spec/ (@smallchat/core), truth-format/ (Stenographer)
+├── Scripts/                        # sync-spec.sh, sync-truth-fixtures.sh
 ├── examples/                       # loom-mcp manifest, registry entries (GitHub, Slack, Postgres, loom)
-├── docs/                           # Ecosystem positioning + 0.5.0 roadmap
+├── docs/                           # Archived: ecosystem evaluation, 0.5.0 roadmap
 └── docs-site/                      # Docusaurus documentation site
 ```
 

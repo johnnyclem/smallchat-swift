@@ -5,7 +5,7 @@ title: Security
 
 # Security
 
-smallchat-swift includes multiple security layers to protect against adversarial inputs, semantic collision attacks, and denial-of-service attempts.
+smallchat-swift includes several controls against adversarial inputs, semantic collision attacks and denial-of-service attempts. Each section says what the control does and where it stops; none of them makes a model immune to instructions inside the text it reads.
 
 ## Threat Model
 
@@ -64,21 +64,23 @@ Unicode NFKC normalization, lower-casing and whitespace collapsing.
 
 ## Selector Namespacing
 
-The `SelectorNamespace` prevents plugins from overriding core system selectors:
+The runtime's `SelectorNamespace` keeps other classes from taking over core selectors:
 
 ```swift
-let namespace = SelectorNamespace()
+// Every selector of SystemTools becomes a protected core selector
+try await runtime.registerCoreClass(systemTools)
 
-// Protect core selectors
-namespace.protect("tools:list")
-namespace.protect("health:check")
-namespace.protect("session:create")
+// Or protect selectors one by one
+await runtime.selectorNamespace.registerCore("tools:list", ownerClass: "SystemTools")
 
-// Later, if a plugin tries to register "tools:list":
-// → throws SelectorShadowingError
+// Later, a category, overload or swizzle from another class that would
+// take over "tools:list" throws SelectorShadowingError.
 ```
 
-Core classes registered via `registerCoreClass()` automatically have their selectors protected.
+The check runs in `loadCategory`, `addOverload` and `swizzle`. `registerClass` does not
+check selectors against the namespace, so register untrusted classes only after your
+core classes, and review what they declare. A core class registered with
+`swizzlable: true` can be swizzled.
 
 ## Semantic Rate Limiting
 
@@ -123,32 +125,24 @@ let result = try await runtime.dispatchById("search/search", args: ["limit": "te
 Overload resolution additionally matches argument types to overload signatures
 (`SignatureValidationError`).
 
-## Permission Gating
+## Channel Sender Gating and Permission Relay
 
-The `SenderGate` in the Channel module implements a permission relay:
+The channel server (`SmallChatChannel`) gates *who can push events* into a Claude Code
+session: `SenderGate` admits only allowlisted senders (an empty allowlist admits
+everyone), with 6-hex-digit pairing codes compared in constant time, and the HTTP bridge
+requires a shared secret. With permission relay, the server receives Claude Code's
+permission requests and sends back the verdicts your code gives
+(`sendPermissionVerdict(_:)`); `smallchat channel` only logs them.
 
-```swift
-// 1. Tool execution request arrives
-// 2. SenderGate creates a PermissionRequest
-// 3. Request is forwarded to the user (via Claude Code UI)
-// 4. User approves or denies
-// 5. Execution proceeds only if approved
-
-let gate = server.getSenderGate()
-// Pending permissions can be inspected
-let pending = await server.getPendingPermissions()
-```
-
-No tool executes without explicit user approval when the channel is active.
+Neither gates smallchat tool calls: `dispatchById` and `smallchat serve` run tools
+without asking anyone. Use the dispatch policy, intent pins and `serve --auth` for that.
 
 ## Metadata Filtering
 
-The `ChannelAdapter` strips sensitive metadata before forwarding events to external consumers:
-
-- Internal debugging fields
-- Stack traces
-- Provider credentials
-- Session tokens
+Before an event is pushed to Claude Code, `filterMetaKeys` drops `meta` keys that are not
+identifiers (letters, digits, `_`) and the keys `__proto__`, `constructor` and
+`prototype`; the values are passed on unchanged. Event content is XML-escaped inside the
+`<channel>` tag, so it cannot close the tag or open a forged one.
 
 ## Audit Logging
 

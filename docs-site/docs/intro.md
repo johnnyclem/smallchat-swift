@@ -11,15 +11,15 @@ Your agent has 50 tools. The LLM sees all 50 in its context window every single 
 
 **smallchat compiles your tools into a dispatch table.** The LLM expresses intent. The runtime resolves it to at most one tool, by embedding similarity, and runs that tool only when its dispatch policy allows; otherwise it asks. No prompt stuffing. No selection lottery.
 
-This is the **native Swift implementation** of [smallchat](https://github.com/johnnyclem/smallchat) — same architecture, same semantics, built for Apple platforms with Swift concurrency, actors, and the Swift type system.
+This is the **Swift implementation** of [smallchat](https://github.com/johnnyclem/smallchat), for Apple platforms and Linux. Version 1.0 follows @smallchat/core 1.0's dispatch rules and artifact format; [Parity with @smallchat/core](#parity-with-smallchatcore) below says exactly what is checked.
 
 ## Why smallchat-swift?
 
-- **Semantic resolution** — Vector similarity finds the right tool from natural language intent
-- **Swift 6 native** — Actors, structured concurrency, `Sendable` types throughout
-- **MCP compatible** — Compile and serve tools via the Model Context Protocol
-- **Production ready** — Rate limiting, circuit breakers, OAuth, audit logging
-- **Claude Code integration** — Bidirectional channel protocol for IDE tool dispatch
+- **Semantic resolution, separate from execution** — vector similarity proposes at most one tool for an intent; a tool runs only by exact id, or by intent when the dispatch policy allows it
+- **Checked calls** — arguments are validated against each tool's JSON Schema before anything runs
+- **Swift 6 language mode** — actors and structured concurrency, with `Sendable` checked by the compiler
+- **MCP** — compile MCP servers' tools into one artifact and serve them over Streamable HTTP, each call running exactly the named tool
+- **Claude Code integration** — a channel server for pushing events into Claude Code, and (on macOS) a messenger for your Claude Code sessions
 
 ## Quick Look
 
@@ -58,15 +58,39 @@ swift run smallchat resolve tools.toolkit.json "search for code"
 swift run smallchat serve --source ./manifests --port 3001
 ```
 
-## What's New in 0.3.0
+## What's New in 1.0
 
-- **Intent sanitization** — Null byte stripping, control character removal, length limits on dispatch pipeline inputs
-- **Audit log integrity** — HMAC-SHA256 hash chain on audit entries with `verifyChain()` tamper detection
-- **Server hardening** — Max connections, max request body size, graceful shutdown with drain timeout
-- **Server metrics** — `/metrics` endpoint tracking request counts, error rates, connections, uptime
-- ~~**TLS configuration**~~ — removed in 1.0: no transport ever applied it, so pinning was never enforced
-- **Identity validation** — Sender format validation, max sender limits, constant-time pairing code verification
-- **Connection tracking** — Real-time active/peak connection monitoring in NIO handler
+1.0 is a breaking release; the repository's `MIGRATION.md` says how to update from 0.6,
+and `CHANGELOG.md` lists every change.
+
+- **Resolve, then run by id.** `resolve` runs nothing; `dispatchById` runs exactly one
+  tool; intent `dispatch` runs a match only when the dispatch policy allows it (below
+  HIGH only with an LLM verifier's approval, destructive tools only at EXACT similarity
+  or from a pinned phrase).
+- **Artifact format 1.0**, @smallchat/core's: content-hashed and pinned to the embedder
+  that produced its vectors.
+- **An MCP server that runs exactly the tool you call**, over Streamable HTTP
+  (2025-11-25 and 2025-06-18), with the read-only `smallchat_resolve` meta-tool and an
+  optional bearer token. OAuth and the TLS settings that nothing enforced are gone.
+- **Linux and iOS.** CI builds and tests on macOS and Linux (Swift 6.1, 6.3, 6.4) and
+  builds the libraries for iOS.
+- **`SmallChatTruth`** reads Stenographer's truth format v2 and fails closed on anything
+  it cannot verify.
+
+## Parity with @smallchat/core
+
+What `swift test` checks is the set of vectors in @smallchat/core's `spec/`, copied into
+`Tests/Fixtures/spec`: canonical call digests (RFC 8785 JSON and the domain-separated
+SHA-256), canonical tool ids, score quantization, ranking and tier boundaries, the
+outcome, decision, tier, chosen tool and candidate order of each resolve case, and the
+artifact fixtures (the golden artifact, every invalid one, every embedder mismatch, and
+the golden manifest compiling to the golden content hash).
+
+Outside those vectors the TypeScript runtime is the reference. Proof digests are per
+runtime, and argument coercion, the semantic map, observer feedback, the decision log,
+replay and explain are not ported yet. The only built-in embedder is the hash embedder,
+so artifacts compiled by @smallchat/core with ONNX need an `Embedder` of yours that
+declares the same fingerprint.
 
 ## Next Steps
 

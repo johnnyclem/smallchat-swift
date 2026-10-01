@@ -7,7 +7,8 @@ import Foundation
 /// (`src/embedding/local-embedder.ts`) so that artifacts compiled by either
 /// implementation resolve identically. The algorithm is deliberately *not*
 /// semantically meaningful — it is a deterministic placeholder that lets the
-/// dispatch pipeline run end-to-end. For real semantic vectors use `ONNXEmbedder`.
+/// dispatch pipeline run end-to-end. For semantic vectors, conform an
+/// `Embedder` backed by a real model (smallchat-swift ships none).
 ///
 /// ## ABI notes
 /// The reference implementation hashes UTF-16 code units (`charCodeAt`) and folds

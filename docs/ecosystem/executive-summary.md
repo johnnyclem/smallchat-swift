@@ -1,5 +1,34 @@
 # The Agent Stack: Executive Summary (smallchat-swift vantage)
 
+> **Archived (pre-1.0 snapshot, July 2026).** This evaluation describes smallchat-swift as it
+> was before 1.0, and several of its findings about this repo are out of date:
+>
+> - **Wired: no longer nothing.** `SmallChatTruth` reads Stenographer's truth format v2 and runs
+>   Stenographer's golden fixtures (`Tests/Fixtures/truth-format`); the messenger
+>   (`SmallChatAgents`) receives Stenographer's objections on its channel bridge, submits
+>   tombstones to Stenographer's REST API (`POST /proposals`) for a person to notarize, and its
+>   copied launch command runs `npx -y @stenographer/core`. None of this is a SwiftPM dependency;
+>   the contracts are vendored fixtures.
+> - **Not a PR-for-PR port any more.** 1.0 adopts @smallchat/core 1.0's dispatch semantics and
+>   runs its `spec/` vectors (call digests, tool ids, ranking, resolve outcomes, artifacts). That
+>   is the parity that is tested; argument coercion, the semantic map, observer feedback, the
+>   decision log, replay and explain are not ported.
+> - **CI and LICENSE exist.** `.github/workflows/swift.yml` builds and tests on macOS and Linux
+>   and builds the libraries for iOS; the MIT `LICENSE` is at the repo root.
+> - **The pipeline changed.** Resolution runs nothing; a tool runs by exact id, or by intent only
+>   when the dispatch policy allows it (thresholds 0.95/0.85/0.75/0.60). There is no
+>   "Canonicalize → … → Cache & execute" chain and no `tool_refinement_needed` fallback.
+> - **`MCPClientTransport`** speaks MCP over Streamable HTTP (sessions, protocol version header,
+>   SSE answers) and calls REST providers' endpoints; gRPC is not implemented.
+> - **Short-Hand.** `@shorthand/core` is now the short-hand repo's package (it absorbed smallchat's
+>   vendored copy). This repo's `SmallChatShorthand`, `SmallChatImportance`, `SmallChatCRDT` and
+>   `SmallChatCompaction` are ports of smallchat's 0.4-era modules and are not a port of it.
+> - `swift-crypto` is a dependency on Linux.
+>
+> It is kept for its reasoning; see the [README](../../README.md) and
+> [CHANGELOG](../../CHANGELOG.md) for the current state. Claims about the other projects were
+> not re-verified.
+
 ## Sourcing note
 
 This document was produced from a session scoped to `github.com/johnnyclem/smallchat-swift`

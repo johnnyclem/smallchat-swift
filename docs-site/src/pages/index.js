@@ -9,19 +9,19 @@ const features = [
   {
     title: "Semantic Dispatch",
     description:
-      "The LLM expresses intent. The runtime resolves it — using vector similarity, resolution caching, and superclass traversal. No routing code. No tool selection prompts.",
+      "The LLM expresses intent. The runtime proposes at most one tool by vector similarity, and runs it only when its dispatch policy allows; otherwise it returns the candidates. No routing code. No tool selection prompts.",
     icon: "🎯",
   },
   {
     title: "Swift 6 Native",
     description:
-      "Built with actors, structured concurrency, and Sendable types. Full thread safety with zero data races, leveraging the Swift type system.",
+      "Built in the Swift 6 language mode with actors and structured concurrency, so the compiler checks isolation and Sendable. Builds and tests on macOS and Linux; the libraries build for iOS.",
     icon: "🔷",
   },
   {
     title: "4-Phase Compiler",
     description:
-      "Parse manifests, embed selectors, link dispatch tables, output artifacts. One command compiles your MCP config into an optimized dispatch table.",
+      "Parse manifests, embed selectors, link dispatch tables, output artifacts. One command compiles your MCP config into a content-hashed artifact (@smallchat/core format 1.0) pinned to its embedder.",
     icon: "⚡",
   },
   {
@@ -37,9 +37,9 @@ const features = [
     icon: "📡",
   },
   {
-    title: "Security First",
+    title: "Guarded Dispatch",
     description:
-      "Intent pinning, selector namespacing, semantic rate limiting, type validation, and permission gating protect against adversarial inputs.",
+      "One dispatch policy on every path, intent pinning, JSON Schema argument validation and opt-in semantic rate limiting. Each control is documented with where it stops.",
     icon: "🔒",
   },
 ];
@@ -79,11 +79,8 @@ function HeroSection() {
         <div className={styles.codePreview}>
           <pre>
             <code>
-{`let runtime = ToolRuntime(
-    vectorIndex: MemoryVectorIndex(),
-    embedder: LocalEmbedder()
-)
-
+{`let runtime = try await MCPToolkit.load(source: "tools.toolkit.json").runtime
+let resolution = try await runtime.resolve("find flights")   // runs nothing
 let result = try await runtime.dispatch("find flights", args: ["to": "NYC"])`}
             </code>
           </pre>
