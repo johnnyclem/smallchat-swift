@@ -64,6 +64,45 @@ If you matched on any of these strings (in an allowlist, a test, or a log query)
 match on `SmallChatVersion.current` or the new value. `ARTIFACT_FORMAT_VERSION` is a
 separate value and did not change.
 
+## Transports
+
+### `TLSConfig` and its types are removed
+
+`TLSConfig`, `CertificatePinningMode`, `TLSVersion` and `TLSError` were never
+consumed by any transport, so pinning and minimum TLS versions configured with them
+were not enforced. Delete the values. To pin certificates today, give
+`HTTPTransport` traffic a `URLSession` you control (for example behind your own
+`Transport` implementation) whose delegate checks the server trust.
+
+### `HTTPTransport` follows the route
+
+Requests are now built from the route the way OpenAPI and Postman importers
+describe it:
+
+| Call | 0.6.x | 1.0 |
+|---|---|---|
+| `GET /pets/{petId}` with `petId: 42` | `GET /pets/%7BpetId%7D` | `GET /pets/42` |
+| `queryParams: ["verbose"]` with `verbose: true` | dropped | `?verbose=true` |
+| `GET` without declared query params, args `limit: 5` | dropped | `?limit=5` |
+| `POST /pets/{petId}/name` with `petId`, `name` | both in the body | `petId` in the path, `name` in the body |
+| placeholder with no argument | sent literally | `TransportError.invalidRequest`, nothing sent |
+
+If a server relied on the old body (for example reading a path parameter from
+the JSON body), declare `bodyParams` on the route. `TransportSerialization.serializeInput`
+now `throws`; add `try`.
+
+### `TransportError.invalidRequest`
+
+Add a case for `.invalidRequest(message:)` to exhaustive `switch`es over
+`TransportError`. It is not retryable.
+
+### `MCPStdioTransport` protocol versions
+
+The client now asks for MCP `2025-11-25` and accepts `2025-11-25`, `2025-06-18`,
+`2025-03-26` or `2024-11-05` from the server. A server that answers anything else
+fails `connect()` with `TransportError.connectionFailed`. Servers built on an
+official MCP SDK negotiate one of these.
+
 ## Linux hashes
 
 On Linux, audit-log HMACs (`AuditLog`) and Dream artifact hashes

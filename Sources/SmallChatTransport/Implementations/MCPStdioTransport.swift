@@ -9,21 +9,44 @@ import SmallChatCore
 /// Spawns a child process using `Foundation.Process`, sends JSON-RPC requests
 /// to its stdin, and reads JSON-RPC responses from its stdout.
 ///
+/// stdout is read on its own thread as raw bytes and split into lines on
+/// `\n` before any UTF-8 decoding, so output split across pipe reads (inside a
+/// multibyte character, too) arrives intact and in order. stderr is drained so
+/// a chatty server cannot block on it. Every request is cancellable: a timeout
+/// or a cancelled caller removes it, tells the server
+/// (`notifications/cancelled`), and returns at once. A server that exits or
+/// closes stdout fails every pending request.
+///
 /// Actor-isolated for state management of the process lifecycle and pending requests.
 ///
 /// Mirrors the TypeScript `McpStdioTransport` class.
 public actor MCPStdioTransport: Transport {
 
+    /// The MCP protocol version this client asks for, and the versions it
+    /// accepts from a server. Every one of them carries `tools/list` and
+    /// `tools/call` the way this client uses them.
+    public static let requestedProtocolVersion = "2025-11-25"
+    public static let acceptedProtocolVersions: Set<String> = [
+        "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05",
+    ]
+
     public nonisolated let id: String
 
     private let config: MCPStdioConfig
     private var process: Process?
-    private var stdinPipe: Pipe?
-    private var stdoutPipe: Pipe?
-    private var buffer: String = ""
+    private var stdinHandle: FileHandle?
+    private var lineBuffer = Data()
     private var pendingRequests: [Int: CheckedContinuation<JsonRpcResponse, any Error>] = [:]
     private var initialized: Bool = false
+    private var connecting: Task<Void, Error>?
     private var requestIdCounter: Int = 0
+    /// Bumped for every spawned process, so output from an old one is ignored.
+    private var generation: Int = 0
+    private var stderrTail = Data()
+    private let writeQueue = DispatchQueue(label: "smallchat.mcp-stdio.stdin")
+
+    /// The protocol version the server agreed to, once connected.
+    public private(set) var negotiatedProtocolVersion: String?
 
     private static let ids = TransportIDSequence(prefix: "mcp-stdio")
 
@@ -57,8 +80,7 @@ public actor MCPStdioTransport: Transport {
     /// List available tools from the MCP server.
     public func listTools() async throws -> sending [[String: Any]] {
         try await ensureInitialized()
-        let request = buildRequest(method: "tools/list")
-        let response = try await sendRequest(id: request.id, payload: request.encoded)
+        let response = try await request(method: "tools/list", params: nil, timeout: 30)
         guard let result = response.result as? [String: Any],
               let tools = result["tools"] as? [[String: Any]] else {
             throw TransportError.invalidResponse(message: "Invalid tools/list response")
@@ -71,27 +93,13 @@ public actor MCPStdioTransport: Transport {
     private func performExecute(_ input: TransportInput) async throws -> TransportOutput {
         try await ensureInitialized()
 
-        var params: [String: Any] = [
-            "name": input.toolName,
-        ]
         var arguments: [String: Any] = [:]
         for (key, value) in input.args {
-            arguments[key] = value.value
+            arguments[key] = TransportSerialization.jsonCompatible(value.value)
         }
-        params["arguments"] = arguments
+        let params: [String: Any] = ["name": input.toolName, "arguments": arguments]
 
-        let request = buildRequest(method: "tools/call", params: params)
-        let timeoutSeconds = input.timeout ?? 30
-
-        let response: JsonRpcResponse
-        if timeoutSeconds > 0 {
-            let middleware = TimeoutMiddleware(timeout: timeoutSeconds)
-            response = try await middleware.execute {
-                try await self.sendRequest(id: request.id, payload: request.encoded)
-            }
-        } else {
-            response = try await sendRequest(id: request.id, payload: request.encoded)
-        }
+        let response = try await request(method: "tools/call", params: params, timeout: input.timeout ?? 30)
 
         if let error = response.error {
             throw TransportError.fromJsonRpcError(code: error.code, message: error.message)
@@ -112,9 +120,25 @@ public actor MCPStdioTransport: Transport {
         )
     }
 
+    /// Send a request and wait for its response, for at most `timeout`
+    /// seconds (not positive: no deadline).
+    private func request(method: String, params: [String: Any]?, timeout: TimeInterval) async throws -> JsonRpcResponse {
+        let built = try buildRequest(method: method, params: params)
+        let id = built.id, payload = built.encoded
+        return try await withTimeout(seconds: timeout) {
+            try await self.sendRequest(id: id, payload: payload)
+        }
+    }
+
     private func ensureInitialized() async throws {
         if initialized { return }
-        try await initialize()
+        if let connecting {
+            return try await connecting.value
+        }
+        let task = Task { try await self.initialize() }
+        connecting = task
+        defer { connecting = nil }
+        try await task.value
     }
 
     private func initialize() async throws {
@@ -145,98 +169,158 @@ public actor MCPStdioTransport: Transport {
         proc.standardOutput = stdout
         proc.standardError = stderr
 
+        generation += 1
+        let generation = self.generation
+        lineBuffer = Data()
+        stderrTail = Data()
+
+        proc.terminationHandler = { [weak self] finished in
+            let status = finished.terminationStatus
+            Task { await self?.connectionLost(generation: generation, reason: "MCP server exited with status \(status)") }
+        }
+
         self.process = proc
-        self.stdinPipe = stdin
-        self.stdoutPipe = stdout
+        self.stdinHandle = stdin.fileHandleForWriting
 
         try proc.run()
 
-        // Set up stdout reading
-        let readHandle = stdout.fileHandleForReading
-        readHandle.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            let text = String(data: data, encoding: .utf8) ?? ""
-            Task { [weak self] in
-                await self?.processStdoutData(text)
+        // stdout: raw byte chunks, in order, through one consumer.
+        let (chunks, chunkSink) = AsyncStream<Data>.makeStream()
+        PipeIO.readUntilEOF(stdout.fileHandleForReading, onChunk: { chunkSink.yield($0) }, onEOF: { chunkSink.finish() })
+        Task { [weak self] in
+            for await chunk in chunks {
+                await self?.ingest(chunk, generation: generation)
             }
+            await self?.connectionLost(generation: generation, reason: "MCP server closed its output")
+        }
+        // stderr: drained, last few KB kept for error messages.
+        PipeIO.readUntilEOF(stderr.fileHandleForReading, onChunk: { [weak self] chunk in
+            Task { await self?.appendStderr(chunk, generation: generation) }
+        }, onEOF: {})
+
+        let response: JsonRpcResponse
+        do {
+            response = try await request(method: "initialize", params: [
+                "protocolVersion": Self.requestedProtocolVersion,
+                "capabilities": [String: Any](),
+                "clientInfo": [
+                    "name": "smallchat",
+                    "version": SmallChatVersion.current,
+                ] as [String: Any],
+            ], timeout: config.initTimeout)
+        } catch {
+            performDispose()
+            throw error
         }
 
-        // Send initialize request
-        let initRequest = buildRequest(method: "initialize", params: [
-            "protocolVersion": "2024-11-05",
-            "capabilities": [String: Any](),
-            "clientInfo": [
-                "name": "smallchat",
-                "version": SmallChatVersion.current,
-            ] as [String: Any],
-        ] as [String: Any])
-
-        let timeoutMiddleware = TimeoutMiddleware(timeout: config.initTimeout)
-        let initResponse = try await timeoutMiddleware.execute {
-            try await self.sendRequest(id: initRequest.id, payload: initRequest.encoded)
-        }
-
-        if let error = initResponse.error {
+        if let error = response.error {
+            performDispose()
             throw TransportError.connectionFailed(
                 message: "MCP initialize failed: \(error.message)"
             )
         }
-
-        // Send initialized notification
-        let notification = JsonRpcNotification(method: "notifications/initialized")
-        if let data = try? JSONSerialization.data(withJSONObject: notification.toDictionary()) {
-            let line = String(data: data, encoding: .utf8)! + "\n"
-            stdinPipe?.fileHandleForWriting.write(Data(line.utf8))
+        let version = (response.result as? [String: Any])?["protocolVersion"] as? String
+        guard let version, Self.acceptedProtocolVersions.contains(version) else {
+            performDispose()
+            throw TransportError.connectionFailed(
+                message: "MCP server answered initialize with unsupported protocol version \(version ?? "(none)")"
+            )
         }
+        negotiatedProtocolVersion = version
 
+        writeLine(["jsonrpc": "2.0", "method": "notifications/initialized"])
         initialized = true
     }
 
     private func sendRequest(id: Int, payload: Data) async throws -> JsonRpcResponse {
-        guard let stdinPipe, process?.isRunning == true else {
-            throw TransportError.connectionFailed(message: "MCP server stdin not writable")
+        guard stdinHandle != nil, process?.isRunning == true else {
+            throw TransportError.connectionFailed(message: "MCP server stdin not writable\(stderrSuffix())")
         }
-
-        let line = String(data: payload, encoding: .utf8)! + "\n"
-        stdinPipe.fileHandleForWriting.write(Data(line.utf8))
-
-        return try await withCheckedThrowingContinuation { continuation in
-            self.pendingRequests[id] = continuation
+        try Task.checkCancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                self.pendingRequests[id] = continuation
+                self.write(payload, forRequest: id)
+            }
+        } onCancel: {
+            Task { await self.cancelRequest(id) }
         }
     }
 
-    private func processStdoutData(_ text: String) {
-        buffer += text
-        let lines = buffer.split(separator: "\n", omittingEmptySubsequences: false)
+    /// Fail a pending request because its caller gave up (timeout or task
+    /// cancellation), and tell the server.
+    private func cancelRequest(_ id: Int) {
+        guard let continuation = pendingRequests.removeValue(forKey: id) else { return }
+        continuation.resume(throwing: CancellationError())
+        writeLine([
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": ["requestId": id, "reason": "request timed out or was cancelled"] as [String: Any],
+        ])
+    }
 
-        if !buffer.hasSuffix("\n") {
-            buffer = String(lines.last ?? "")
-            for line in lines.dropLast() {
-                processLine(String(line))
-            }
-        } else {
-            buffer = ""
-            for line in lines {
-                let s = String(line).trimmingCharacters(in: .whitespaces)
-                if !s.isEmpty {
-                    processLine(s)
-                }
+    private func failRequest(_ id: Int, _ error: Error) {
+        pendingRequests.removeValue(forKey: id)?.resume(throwing: error)
+    }
+
+    // MARK: - stdin
+
+    /// Queue `payload` + newline for stdin. Writes happen in order on a
+    /// background queue, so a server that is slow to read cannot block the
+    /// actor; a failed write fails `requestId`'s request.
+    private func write(_ payload: Data, forRequest requestId: Int?) {
+        guard let stdinHandle else {
+            if let requestId { failRequest(requestId, TransportError.connectionFailed(message: "MCP server stdin not writable")) }
+            return
+        }
+        var newlineTerminated = payload
+        newlineTerminated.append(0x0A)
+        let line = newlineTerminated
+        let handle = UncheckedSendableBox(stdinHandle)
+        let generation = self.generation
+        writeQueue.async { [weak self] in
+            let ok = PipeIO.writeAll(line, to: handle.value)
+            if !ok {
+                Task { await self?.connectionLost(generation: generation, reason: "MCP server stopped reading its input") }
             }
         }
     }
 
-    private func processLine(_ line: String) {
-        guard let data = line.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    private func writeLine(_ message: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
+        write(data, forRequest: nil)
+    }
+
+    // MARK: - stdout
+
+    private func ingest(_ chunk: Data, generation: Int) {
+        guard generation == self.generation else { return }
+        lineBuffer.append(chunk)
+        var lineStart = lineBuffer.startIndex
+        while let newline = lineBuffer[lineStart...].firstIndex(of: 0x0A) {
+            processLine(lineBuffer[lineStart..<newline])
+            lineStart = lineBuffer.index(after: newline)
+        }
+        if lineStart != lineBuffer.startIndex {
+            lineBuffer = Data(lineBuffer[lineStart...])
+        }
+    }
+
+    private func processLine(_ line: Data) {
+        guard let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
               json["jsonrpc"] as? String == "2.0" else {
             return
         }
 
-        guard let id = json["id"] as? Int else {
-            // Notification — ignore for now
-            return
+        // A request from the server (it has both a method and an id).
+        if let method = json["method"] as? String {
+            if let requestId = json["id"] {
+                answerServerRequest(id: requestId, method: method)
+            }
+            return // notifications are ignored
         }
+
+        guard let id = json["id"] as? Int else { return }
 
         let response = JsonRpcResponse(
             id: id,
@@ -253,31 +337,71 @@ public actor MCPStdioTransport: Transport {
         }
     }
 
-    private func performDispose() {
-        if let process, process.isRunning {
-            stdinPipe?.fileHandleForWriting.closeFile()
-            process.terminate()
-
-            // Give it a moment, then force kill
-            Task { [weak process] in
-                try? await Task.sleep(for: .seconds(3))
-                if let process, process.isRunning {
-                    process.terminate()
-                }
-            }
+    /// Answer server-to-client requests: `ping` succeeds, anything else is
+    /// not supported by this client.
+    private func answerServerRequest(id: Any, method: String) {
+        if method == "ping" {
+            writeLine(["jsonrpc": "2.0", "id": id, "result": [String: Any]()])
+        } else {
+            writeLine([
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": ["code": -32601, "message": "Method not found: \(method)"] as [String: Any],
+            ])
         }
+    }
 
-        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
-
-        // Reject all pending requests
-        for (_, continuation) in pendingRequests {
-            continuation.resume(throwing: TransportError.disposed)
+    private func appendStderr(_ chunk: Data, generation: Int) {
+        guard generation == self.generation else { return }
+        stderrTail.append(chunk)
+        if stderrTail.count > 4096 {
+            stderrTail = Data(stderrTail.suffix(4096))
         }
+    }
+
+    private func stderrSuffix() -> String {
+        let text = String(decoding: stderrTail, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? "" : " (stderr: \(text))"
+    }
+
+    // MARK: - Lifecycle
+
+    /// The process exited, closed stdout, or stopped reading stdin: fail
+    /// everything in flight and forget the process.
+    private func connectionLost(generation: Int, reason: String) {
+        guard generation == self.generation, process != nil else { return }
+        let error = TransportError.connectionFailed(message: reason + stderrSuffix())
+        let pending = pendingRequests
         pendingRequests.removeAll()
+        for (_, continuation) in pending {
+            continuation.resume(throwing: error)
+        }
+        if let process { PipeIO.stop(process) }
         initialized = false
         process = nil
-        stdinPipe = nil
-        stdoutPipe = nil
+        stdinHandle = nil
+    }
+
+    private func performDispose() {
+        generation += 1
+        if let stdinHandle {
+            let handle = UncheckedSendableBox(stdinHandle)
+            writeQueue.async { try? handle.value.close() }
+        }
+        if let process {
+            PipeIO.stop(process, grace: 3)
+        }
+
+        // Reject all pending requests
+        let pending = pendingRequests
+        pendingRequests.removeAll()
+        for (_, continuation) in pending {
+            continuation.resume(throwing: TransportError.disposed)
+        }
+        initialized = false
+        negotiatedProtocolVersion = nil
+        process = nil
+        stdinHandle = nil
     }
 
     // MARK: - Request Building
@@ -287,7 +411,7 @@ public actor MCPStdioTransport: Transport {
         let encoded: Data
     }
 
-    private func buildRequest(method: String, params: [String: Any]? = nil) -> BuiltRequest {
+    private func buildRequest(method: String, params: [String: Any]? = nil) throws -> BuiltRequest {
         requestIdCounter += 1
         let id = requestIdCounter
 
@@ -300,7 +424,10 @@ public actor MCPStdioTransport: Transport {
             dict["params"] = params
         }
 
-        let data = try! JSONSerialization.data(withJSONObject: dict)
+        guard JSONSerialization.isValidJSONObject(dict) else {
+            throw TransportError.invalidResponse(message: "\(method) arguments are not representable as JSON")
+        }
+        let data = try JSONSerialization.data(withJSONObject: dict)
         return BuiltRequest(id: id, encoded: data)
     }
 
@@ -363,26 +490,5 @@ struct JsonRpcResponseError: @unchecked Sendable {
         self.code = code
         self.message = message
         self.data = data
-    }
-}
-
-struct JsonRpcNotification: @unchecked Sendable {
-    let method: String
-    let params: [String: Any]?
-
-    init(method: String, params: [String: Any]? = nil) {
-        self.method = method
-        self.params = params
-    }
-
-    func toDictionary() -> [String: Any] {
-        var dict: [String: Any] = [
-            "jsonrpc": "2.0",
-            "method": method,
-        ]
-        if let params {
-            dict["params"] = params
-        }
-        return dict
     }
 }

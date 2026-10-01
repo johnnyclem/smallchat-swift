@@ -253,11 +253,17 @@ public actor HTTPTransport: Transport {
         let method = input.method ?? route?.method ?? config.defaultMethod
         let path = input.url ?? route?.path ?? input.toolName
 
-        // Build URL
-        let base = config.baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        guard let url = URL(string: "\(base)/\(cleanPath)") else {
-            throw TransportError.connectionFailed(message: "Invalid URL: \(base)/\(cleanPath)")
+        // Fill `{param}` placeholders, put query (and, for GET, undeclared)
+        // params in the query string, and the rest in a JSON body.
+        let serialized = try TransportSerialization.serializeInput(
+            baseURL: config.baseURL.absoluteString,
+            path: path,
+            method: method,
+            args: input.args,
+            route: route
+        )
+        guard let url = URL(string: serialized.url) else {
+            throw TransportError.invalidRequest(message: "Invalid URL: \(serialized.url)")
         }
 
         var request = URLRequest(url: url)
@@ -267,31 +273,15 @@ public actor HTTPTransport: Transport {
         for (key, value) in config.headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        if let routeHeaders = route?.headers {
-            for (key, value) in routeHeaders {
-                request.setValue(value, forHTTPHeaderField: key)
-            }
+        for (key, value) in serialized.headers {
+            request.setValue(value, forHTTPHeaderField: key)
         }
         for (key, value) in input.headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        // Apply body
-        if let body = input.body {
-            request.httpBody = body
-        } else if method != .GET && method != .HEAD {
-            // Serialize args as JSON body
-            if !input.args.isEmpty {
-                var jsonDict: [String: Any] = [:]
-                for (key, value) in input.args {
-                    jsonDict[key] = value.value
-                }
-                request.httpBody = try JSONSerialization.data(withJSONObject: jsonDict)
-                if request.value(forHTTPHeaderField: "Content-Type") == nil {
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                }
-            }
-        }
+        // A pre-serialized body wins over the arguments.
+        request.httpBody = input.body ?? serialized.body
 
         // Apply auth
         if let auth = config.auth {

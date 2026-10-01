@@ -38,6 +38,26 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   versioning to djb2. Both now use swift-crypto's `HMAC<SHA256>`/`SHA256`, the
   same values Apple platforms produce, so Linux chain heads and recorded artifact
   hashes differ from those of earlier Linux builds.
+- **`TLSConfig`, `CertificatePinningMode`, `TLSVersion` and `TLSError` are
+  removed.** No transport, `TransportConfig` or `URLSession` delegate ever read
+  them, so the certificate pinning and minimum TLS version they described were
+  never enforced. The README's "TLS Configuration" claim is gone with them.
+- **`HTTPTransport` builds requests from the route.** `{name}` placeholders in a
+  route path are filled with the argument of that name, percent-encoded as one
+  path segment (they used to be sent literally, as `%7Bname%7D`); a placeholder
+  without an argument fails the call with the new `TransportError.invalidRequest`
+  and sends nothing. Declared `queryParams` go in the query string. GET, HEAD and
+  DELETE calls without declared query params put their arguments in the query
+  string (they used to be dropped). Other methods send the arguments not used in
+  the path or query as the JSON body (path params used to be duplicated there).
+  `TransportSerialization.serializeInput` throws, and percent-encodes everything
+  but RFC 3986 unreserved characters.
+- **`TransportError` has a new case, `invalidRequest(message:)`.** Exhaustive
+  `switch`es over `TransportError` need to handle it.
+- **`MCPStdioTransport` negotiates the protocol version.** It asks for
+  `2025-11-25` (it sent `2024-11-05`) and accepts a server that answers
+  `2025-11-25`, `2025-06-18`, `2025-03-26` or `2024-11-05`; any other answer
+  fails `connect()`. The agreed version is `negotiatedProtocolVersion`.
 
 ### Fixed
 
@@ -60,6 +80,28 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   `SmallChatAgents` stays macOS/Linux only, and the README's platform table
   now says so.
 - **Added the MIT `LICENSE` file** the README badge has always linked to.
+- **Timeouts fire on time.** `TimeoutMiddleware` raced the operation in a task
+  group, so when the deadline passed it still waited for an operation that
+  ignored cancellation (every continuation-based transport call did): stdio MCP
+  calls and the rtk filter hung past their timeouts. The new
+  `withTimeout(seconds:_:)`, which `TimeoutMiddleware` now uses, resumes exactly
+  once, cancels the operation and returns at once.
+- **`MCPStdioTransport` no longer corrupts or loses output, and never hangs on a
+  dead server.** stdout is read as bytes on its own thread and split into lines
+  before UTF-8 decoding, in order; each pipe read used to be decoded on its own,
+  so a read ending inside a multibyte character was dropped (a 210 KB result of
+  "€" arrived as 4,464 characters) and chunks were handed on through unordered
+  tasks. A call that times out or whose task is cancelled is removed and the
+  server is sent `notifications/cancelled`. A server that exits, closes stdout
+  or stops reading stdin fails every pending call with its stderr tail (calls
+  used to wait forever). stderr is drained, so a chatty server cannot block.
+  Writes no longer crash the process on a broken pipe (Linux `FileHandle.write`
+  traps on `EPIPE`, and SIGPIPE killed the process); concurrent first calls
+  start one server, not two; the server's `ping` requests are answered.
+- **The rtk filter no longer deadlocks on large output.** It wrote the whole body
+  to stdin before reading stdout, so a filter whose output filled the pipe
+  buffer (about 64 KB) blocked forever. stdin is now written while stdout and
+  stderr are read, and on `timeoutMs` the process is stopped.
 
 ### Added
 

@@ -327,7 +327,6 @@ smallchat is designed to run in adversarial environments where untrusted inputs 
 | **Structured Concurrency** | Actor-based isolation and `Sendable` conformance enforced at compile time. No raw threads. |
 | **Audit Log Integrity** | HMAC-SHA256 hash chain on audit entries for tamper detection (v0.3.0). |
 | **Connection Limits** | Configurable max concurrent connections and request body size limits on MCP server (v0.3.0). |
-| **TLS Configuration** | Certificate pinning, minimum TLS version enforcement, and secure transport defaults (v0.3.0). |
 
 ## MCP Server
 
