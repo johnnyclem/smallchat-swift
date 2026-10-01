@@ -20,7 +20,7 @@ public struct AppExtension: Sendable {
 /// Maps component selector canonicals to `ui://` URIs, supports superclass
 /// ISA-chain traversal, and accepts extensions that bolt in additional components.
 ///
-/// All mutable state is protected by `OSAllocatedUnfairLock` matching the
+/// All mutable state is protected by `PlatformLock` matching the
 /// thread-safety model of `ToolClass`.
 public final class AppClass: @unchecked Sendable {
     public let appId: String
@@ -32,7 +32,7 @@ public final class AppClass: @unchecked Sendable {
         var superclass: AppClass?
     }
 
-    private let lock = OSAllocatedUnfairLock(initialState: State())
+    private let lock = PlatformLock(initialState: State())
 
     public init(appId: String, name: String, uiResourceUri: String? = nil) {
         self.appId = appId

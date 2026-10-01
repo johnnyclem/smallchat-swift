@@ -1,6 +1,9 @@
 // MARK: - MCPClientTransport — MCP client-side transport
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import SmallChatCore
 
 // MARK: - Transport Options

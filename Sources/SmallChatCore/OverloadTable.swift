@@ -52,11 +52,11 @@ public struct OverloadResolutionResult: @unchecked Sendable {
 ///   - Higher arity match preferred when scores are equal
 ///   - Ambiguous matches (equal score, same arity) reported as errors
 ///
-/// All mutable state is protected by an `OSAllocatedUnfairLock` to prevent
+/// All mutable state is protected by a `PlatformLock` to prevent
 /// data races when accessed concurrently.
 public final class OverloadTable: @unchecked Sendable {
     public let selectorCanonical: String
-    private let lock = OSAllocatedUnfairLock(initialState: [OverloadEntry]())
+    private let lock = PlatformLock(initialState: [OverloadEntry]())
 
     public init(selectorCanonical: String) {
         self.selectorCanonical = selectorCanonical

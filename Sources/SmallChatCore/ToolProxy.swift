@@ -6,7 +6,7 @@ import os
 /// ToolProxy -- lazy-loaded tool that loads its full schema only on first dispatch.
 /// Equivalent to NSProxy: exists as lightweight stand-in until first message.
 ///
-/// Mutable state is protected by an `OSAllocatedUnfairLock` so the proxy can
+/// Mutable state is protected by a `PlatformLock` so the proxy can
 /// satisfy `ToolIMP`'s nonisolated, synchronous `schema` requirement without
 /// crossing into actor-isolated code.
 public final class ToolProxy: ToolIMP, @unchecked Sendable {
@@ -19,7 +19,7 @@ public final class ToolProxy: ToolIMP, @unchecked Sendable {
         var realized: Bool = false
     }
 
-    private let lock = OSAllocatedUnfairLock(initialState: State())
+    private let lock = PlatformLock(initialState: State())
     private let schemaLoader: @Sendable () async throws -> ToolSchema
 
     public var schema: ToolSchema? { lock.withLock { $0.schema } }

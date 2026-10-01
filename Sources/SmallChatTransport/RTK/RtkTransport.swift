@@ -79,11 +79,10 @@ public actor RtkTransport: Transport {
     private let config: RtkConfig
     private var binaryResolution: BinaryResolution = .unresolved
 
-    private static var counter: Int = 0
+    private static let ids = TransportIDSequence(prefix: "rtk")
 
     public init(wrapping inner: any Transport, config: RtkConfig = RtkConfig()) {
-        RtkTransport.counter += 1
-        self.id = "rtk-\(RtkTransport.counter)"
+        self.id = Self.ids.next()
         self.transportType = inner.transportType
         self.inner = inner
         self.config = config
@@ -286,13 +285,16 @@ public func filterContentWithRtk(
 /// Spawn `rtk filter [--aggressive]`, pipe `content` to stdin, collect stdout.
 ///
 /// Rejects on non-zero exit code or `timeoutMs` expiry. Shared by
-/// `RtkTransport` and `filterContentWithRtk`.
+/// `RtkTransport` and `filterContentWithRtk`. On platforms without
+/// subprocesses (iOS) it always throws, so callers fall back to the
+/// uncompressed body.
 func runRtkFilter(
     binary: String,
     content: Data,
     level: RtkFilterLevel,
     timeoutMs: Int
 ) async throws -> Data {
+    #if os(macOS) || os(Linux)
     try await withThrowingTaskGroup(of: Data.self) { group in
         group.addTask {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
@@ -336,4 +338,7 @@ func runRtkFilter(
         group.cancelAll()
         return data
     }
+    #else
+    throw TransportError.unknown(message: "rtk filter needs a subprocess, which this platform does not support")
+    #endif
 }

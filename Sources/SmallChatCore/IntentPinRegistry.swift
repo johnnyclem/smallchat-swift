@@ -60,7 +60,7 @@ private let defaultElevatedThreshold: Double = 0.98
 /// Guards sensitive selectors against semantic collision attacks.
 /// Lock-based for synchronous reads on the dispatch hot path.
 public final class IntentPinRegistry: Sendable {
-    private let lock: OSAllocatedUnfairLock<State>
+    private let lock: PlatformLock<State>
 
     struct State: Sendable {
         var pins: [String: IntentPin] = [:]
@@ -68,7 +68,7 @@ public final class IntentPinRegistry: Sendable {
     }
 
     public init() {
-        self.lock = OSAllocatedUnfairLock(initialState: State())
+        self.lock = PlatformLock(initialState: State())
     }
 
     /// Pin a selector with a given policy.

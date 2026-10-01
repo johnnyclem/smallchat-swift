@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// HTTP transport implementation using URLSession.
 ///
@@ -7,7 +10,7 @@ import Foundation
 ///   - Retry with exponential backoff
 ///   - Circuit breaker
 ///   - Configurable timeouts
-///   - Streaming (SSE, NDJSON) via URLSession bytes API
+///   - Streaming (SSE, NDJSON) via `URLSession.streamingBytes(for:)`
 ///   - Connection pooling
 ///
 /// Mirrors the TypeScript `HttpTransport` class.
@@ -26,11 +29,11 @@ public actor HTTPTransport: Transport {
     private var routes: [String: HTTPTransportRoute] = [:]
     private var connected: Bool = true
 
-    private static var counter = 0
+    private static let ids = TransportIDSequence(prefix: "http")
 
     public init(config: TransportConfig) {
-        Self.counter += 1
-        self.id = "http-\(Self.counter)"
+        let id = Self.ids.next()
+        self.id = id
         self.config = config
 
         let sessionConfig = URLSessionConfiguration.default
@@ -40,7 +43,7 @@ public actor HTTPTransport: Transport {
 
         self.retryMiddleware = config.retryConfig.map { RetryMiddleware(config: $0) }
         self.circuitBreaker = config.circuitBreakerConfig.map {
-            CircuitBreaker(transportId: "http-\(Self.counter)", config: $0)
+            CircuitBreaker(transportId: id, config: $0)
         }
         self.timeoutMiddleware = TimeoutMiddleware(timeout: config.timeout)
         self.pool = ConnectionPool(maxConnections: config.poolSize)
@@ -105,7 +108,7 @@ public actor HTTPTransport: Transport {
                     var mutRequest = request
                     mutRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 
-                    let (bytes, response) = try await self.session.bytes(for: mutRequest)
+                    let (bytes, response) = try await self.session.streamingBytes(for: mutRequest)
 
                     guard let httpResponse = response as? HTTPURLResponse else {
                         continuation.yield(errorToTransportOutput(

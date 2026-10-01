@@ -1,6 +1,10 @@
 // MARK: - OAuthManager — OAuth 2.1 flow management
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 
 // MARK: - Token Types
@@ -356,8 +360,10 @@ public actor OAuthManager {
 // MARK: - Helpers
 
 private func generateToken() -> String {
-    var bytes = [UInt8](repeating: 0, count: 32)
-    _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+    // SystemRandomNumberGenerator is a CSPRNG on every supported platform
+    // (arc4random_buf on Apple platforms, getrandom on Linux).
+    var rng = SystemRandomNumberGenerator()
+    let bytes = (0..<32).map { _ in UInt8.random(in: .min ... .max, using: &rng) }
     return Data(bytes).map { String(format: "%02x", $0) }.joined()
 }
 

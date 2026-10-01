@@ -8,7 +8,7 @@ public func discoverLogFiles(_ logDir: String) -> [String] {
     let fm = FileManager.default
     let searchDir: String
     if logDir.isEmpty {
-        searchDir = fm.homeDirectoryForCurrentUser.path + "/.claude/projects"
+        searchDir = NSHomeDirectory() + "/.claude/projects"
     } else {
         searchDir = logDir
     }

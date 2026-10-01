@@ -3,6 +3,8 @@
 import Foundation
 #if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
 #endif
 
 // MARK: - Audit Entry
@@ -168,18 +170,7 @@ public actor AuditLog {
 private func computeHMACSHA256(_ message: String, key: Data) -> String {
     let messageData = Data(message.utf8)
 
-    #if canImport(CryptoKit)
     let symmetricKey = SymmetricKey(data: key)
     let mac = HMAC<SHA256>.authenticationCode(for: messageData, using: symmetricKey)
     return mac.map { String(format: "%02x", $0) }.joined()
-    #else
-    // Fallback: simple hash for platforms without CryptoKit
-    // This is a non-cryptographic fallback; CryptoKit should always be preferred.
-    var hash: UInt64 = 14695981039346656037 // FNV offset
-    for byte in key + messageData {
-        hash ^= UInt64(byte)
-        hash &*= 1099511628211 // FNV prime
-    }
-    return String(format: "%016x%016x%016x%016x", hash, hash &* 31, hash &* 37, hash &* 41)
-    #endif
 }

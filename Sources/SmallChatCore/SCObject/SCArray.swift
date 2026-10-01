@@ -9,12 +9,12 @@ public final class SCArray: SCObject, @unchecked Sendable {
         return true
     }()
 
-    private let storage: OSAllocatedUnfairLock<[SCObject]>
+    private let storage: PlatformLock<[SCObject]>
 
     override public var isa: String { "SCArray" }
 
     public init(items: [SCObject] = []) {
-        self.storage = OSAllocatedUnfairLock(initialState: items)
+        self.storage = PlatformLock(initialState: items)
         super.init()
         _ = Self.registered
     }

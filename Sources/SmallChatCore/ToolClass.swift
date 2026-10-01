@@ -6,7 +6,7 @@ import os
 /// ToolClass -- a group of related tools from one provider.
 /// Equivalent to an Objective-C class with dispatch table, protocols, superclass chain, and overload tables.
 ///
-/// All mutable state is protected by an `OSAllocatedUnfairLock` to prevent data races
+/// All mutable state is protected by a `PlatformLock` to prevent data races
 /// when accessed concurrently from the actor-based runtime.
 public final class ToolClass: @unchecked Sendable {
     public let name: String
@@ -18,7 +18,7 @@ public final class ToolClass: @unchecked Sendable {
         var superclass: ToolClass?
     }
 
-    private let lock = OSAllocatedUnfairLock(initialState: State())
+    private let lock = PlatformLock(initialState: State())
 
     public init(name: String) { self.name = name }
 

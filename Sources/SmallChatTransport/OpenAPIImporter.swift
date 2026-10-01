@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import SmallChatCore
 
 /// Generates HTTP transport configurations and tool definitions from OpenAPI 3.x specs.

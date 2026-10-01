@@ -1,5 +1,8 @@
 import Foundation
 
+// Spawns a subprocess, which iOS does not allow (no Foundation.Process).
+#if os(macOS) || os(Linux)
+
 /// MCP Stdio Transport — communicates with MCP servers via JSON-RPC over stdin/stdout.
 ///
 /// Spawns a child process using `Foundation.Process`, sends JSON-RPC requests
@@ -21,11 +24,10 @@ public actor MCPStdioTransport: Transport {
     private var initialized: Bool = false
     private var requestIdCounter: Int = 0
 
-    private static var counter = 0
+    private static let ids = TransportIDSequence(prefix: "mcp-stdio")
 
     public init(config: MCPStdioConfig) {
-        Self.counter += 1
-        self.id = "mcp-stdio-\(Self.counter)"
+        self.id = Self.ids.next()
         self.config = config
     }
 
@@ -332,6 +334,7 @@ public actor MCPStdioTransport: Transport {
         return args
     }
 }
+#endif // os(macOS) || os(Linux)
 
 // MARK: - JSON-RPC Helper Types
 

@@ -1,6 +1,8 @@
 import Foundation
 #if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
 #endif
 
 // MARK: - Paths
@@ -228,15 +230,6 @@ public func listArtifactVersions(_ projectDir: String) -> [ArtifactVersion] {
 // MARK: - Helpers
 
 private func sha256Hex(_ data: Data) -> String {
-    #if canImport(CryptoKit)
     let digest = SHA256.hash(data: data)
     return digest.map { String(format: "%02x", $0) }.joined()
-    #else
-    // Fallback: simple hash for platforms without CryptoKit
-    var hash: UInt64 = 5381
-    for byte in data {
-        hash = ((hash &<< 5) &+ hash) &+ UInt64(byte)
-    }
-    return String(format: "%016x", hash)
-    #endif
 }

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// MCP SSE Transport — communicates with MCP servers via Server-Sent Events over HTTP.
 ///
@@ -17,11 +20,10 @@ public actor MCPSSETransport: Transport {
     private var connected: Bool = false
     private var requestIdCounter: Int = 0
 
-    private static var counter = 0
+    private static let ids = TransportIDSequence(prefix: "mcp-sse")
 
     public init(config: MCPSSEConfig) {
-        Self.counter += 1
-        self.id = "mcp-sse-\(Self.counter)"
+        self.id = Self.ids.next()
         self.config = config
         self.session = URLSession(configuration: .default)
     }
@@ -126,7 +128,7 @@ public actor MCPSSETransport: Transport {
         var request = try await buildRequest(input: input)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 
-        let (bytes, response) = try await session.bytes(for: request)
+        let (bytes, response) = try await session.streamingBytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             continuation.yield(errorToTransportOutput(
