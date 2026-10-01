@@ -50,10 +50,10 @@ public struct MCPServerConfig: Sendable {
     public let shutdownDrainSeconds: Int
     /// How tools are named in `tools/list` and `tools/call`.
     public let toolNaming: MCPToolNaming
-    /// List the `smallchat_dispatch` meta-tool (semantic dispatch through the
-    /// runtime) when a runtime is wired. Off by default: every other call
-    /// runs exactly the named tool.
-    public let semanticDispatch: Bool
+    /// List the read-only `smallchat_resolve` meta-tool when a runtime is
+    /// wired (default on). It proposes a tool for an intent and never runs
+    /// anything; every `tools/call` runs exactly the named tool.
+    public let resolveTool: Bool
 
     public init(
         port: Int = 3000,
@@ -72,7 +72,7 @@ public struct MCPServerConfig: Sendable {
         maxRequestBodyBytes: Int = 1_048_576,
         shutdownDrainSeconds: Int = 30,
         toolNaming: MCPToolNaming = .aggregate,
-        semanticDispatch: Bool = false
+        resolveTool: Bool = true
     ) {
         self.port = port
         self.host = host
@@ -90,7 +90,7 @@ public struct MCPServerConfig: Sendable {
         self.maxRequestBodyBytes = maxRequestBodyBytes
         self.shutdownDrainSeconds = shutdownDrainSeconds
         self.toolNaming = toolNaming
-        self.semanticDispatch = semanticDispatch
+        self.resolveTool = resolveTool
     }
 
     /// A fresh random bearer token (64 hex characters).
@@ -209,7 +209,7 @@ struct MCPHTTPResponse: Sendable {
 /// rate limiting (`429`), and a connection cap.
 ///
 /// `tools/call` runs exactly the named tool through the wired runtime (see
-/// `setRuntime(_:semanticDispatch:)`). Built on SwiftNIO; request work runs
+/// `setRuntime(_:resolveTool:)`). Built on SwiftNIO; request work runs
 /// in Swift tasks and every write hops back to the connection's event loop.
 public actor MCPServer {
 
@@ -285,27 +285,19 @@ public actor MCPServer {
 
     /// Wire a `ToolRuntime` so `tools/call` runs tools.
     ///
-    /// A call runs exactly the listed tool: the runtime's class named after the
-    /// tool's provider, and that class's implementation with the tool's
-    /// upstream name. There is no semantic fallback on `tools/call`. With
-    /// `semanticDispatch`, the `smallchat_dispatch` meta-tool is listed and
-    /// resolves intents through `tieredDispatch`.
-    public func setRuntime(_ runtime: ToolRuntime, semanticDispatch: Bool = false) async {
+    /// A call runs exactly the listed tool, by its canonical id
+    /// (`ToolRuntime.dispatchById`): its arguments are validated against the
+    /// tool's inputSchema first, and invalid arguments run nothing. There is
+    /// no semantic fallback on `tools/call`. With `resolveTool`, the read-only
+    /// `smallchat_resolve` meta-tool is listed: it proposes a tool for an
+    /// intent and never executes.
+    public func setRuntime(_ runtime: ToolRuntime, resolveTool: Bool = true) async {
         await router.setToolExecutor { [runtime] tool, arguments in
-            let classes = await runtime.context.getClasses()
-            guard let toolClass = classes.first(where: { $0.name == tool.providerId }),
-                  let imp = toolClass.dispatchTable.values.first(where: { $0.toolName == tool.toolName }) else {
-                throw MCPToolUnavailableError(toolId: tool.toolId, reason: "the runtime has no implementation for it")
-            }
-            return try await imp.execute(args: arguments.mapValues { $0 as any Sendable })
+            try await runtime.dispatchById(tool.toolId, args: arguments.mapValues { $0 as any Sendable })
         }
-        if semanticDispatch {
-            await router.setSemanticDispatchHandler { [runtime] intent, arguments in
-                try await tieredDispatch(
-                    context: runtime.context,
-                    intent: intent,
-                    args: arguments.mapValues { $0 as any Sendable }
-                )
+        if resolveTool {
+            await router.setResolveHandler { [runtime] intent, arguments in
+                try await runtime.resolve(intent, options: ResolveOptions(args: arguments?.mapValues { $0 as any Sendable }))
             }
         }
     }
@@ -320,7 +312,7 @@ public actor MCPServer {
         if artifact == nil, !config.sourcePath.isEmpty {
             let toolkit = try await MCPToolkit.load(source: config.sourcePath)
             await setArtifact(toolkit.artifact)
-            await setRuntime(toolkit.runtime, semanticDispatch: config.semanticDispatch)
+            await setRuntime(toolkit.runtime, resolveTool: config.resolveTool)
         }
 
         // Prune expired sessions

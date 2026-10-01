@@ -47,12 +47,32 @@ public struct FloodingMetrics: Sendable {
     }
 }
 
+/// Why an intent may or may not be embedded.
+public enum RateLimitVerdict: Sendable, Equatable {
+    case allowed
+    /// `reason` is the heuristic that tripped (`volume`, `entropy` or
+    /// `similarity`); `retryAfterMs` is when the oldest window entry expires.
+    case denied(reason: String, retryAfterMs: Int)
+
+    public var isAllowed: Bool { self == .allowed }
+}
+
+/// The principal used when a caller does not identify itself.
+public let defaultPrincipal = "default"
+
 /// Prevents "Vector Flooding" DoS attacks on the embedder.
 ///
-/// Monitors the stream of intents flowing through the Resolution Cache.
-/// When it detects a burst of high-entropy, low-similarity intents -- the
-/// signature of an attacker probing random garbage to exhaust the embedder
-/// -- it throttles further embedding requests.
+/// Opt-in: a runtime has one only when `RuntimeOptions.rateLimiter` is set.
+/// State is kept per principal (the caller identity passed to resolve and
+/// dispatch, e.g. an MCP session; callers that pass none share
+/// `defaultPrincipal`), so one client cannot exhaust another's budget. A
+/// throttled intent resolves to outcome `throttled` with a retry-after;
+/// nothing is thrown. Only novel intents count: a cached resolution or a
+/// pinned phrase is never embedded and never consulted here.
+///
+/// Heuristics, per principal, over a sliding window of recent intent
+/// vectors: volume (novel intents), entropy (long canonical forms) and
+/// cross-similarity (random noise has low average pairwise similarity).
 public actor SemanticRateLimiter {
     private struct WindowEntry {
         let timestamp: Date
@@ -60,167 +80,151 @@ public actor SemanticRateLimiter {
         let canonicalLength: Int
     }
 
+    private struct PrincipalWindow {
+        var entries: [WindowEntry] = []
+        var pairwiseSimilaritySum: Float = 0
+        var pairwiseCount: Int = 0
+        var evictionsSinceRecompute: Int = 0
+    }
+
     private let options: SemanticRateLimiterOptions
-    private var window: [WindowEntry] = []
-    private var pairwiseSimilaritySum: Float = 0
-    private var pairwiseCount: Int = 0
-    private var evictionsSinceRecompute: Int = 0
+    private var windows: [String: PrincipalWindow] = [:]
     private let recomputeInterval: Int = 100
 
     public init(options: SemanticRateLimiterOptions = .init()) {
         self.options = options
     }
 
+    /// Whether a new intent from `principal` may be embedded, and if not,
+    /// why and for how long. Call before embedding.
+    public func evaluate(_ canonical: String, principal: String = defaultPrincipal) -> RateLimitVerdict {
+        guard let window = window(principal, create: false) else { return .allowed }
+        let entries = window.entries
+        func deny(_ reason: String) -> RateLimitVerdict {
+            let oldest = entries.first?.timestamp ?? Date()
+            let retry = oldest.timeIntervalSinceNow * 1000 + Double(options.windowMs)
+            return .denied(reason: reason, retryAfterMs: max(0, Int(retry.rounded(.up))))
+        }
+
+        // Volume cap -- too many novel intents from this principal
+        if entries.count >= options.maxNovelIntents { return deny("volume") }
+
+        if entries.count >= options.minSamplesForSimilarity {
+            // Entropy -- too many recent intents look like gibberish
+            let highEntropyCount = entries.filter { $0.canonicalLength > options.maxCanonicalLength }.count
+            if Double(highEntropyCount) / Double(entries.count) >= options.entropyFraction { return deny("entropy") }
+            // Similarity -- recent intents are incoherent noise
+            if !similarityHealthy(window) { return deny("similarity") }
+        }
+        return .allowed
+    }
+
     /// Pre-embedding check. Returns true if allowed, false if throttled.
-    public func check(_ canonical: String) -> Bool {
-        evictStale()
-
-        // Hard volume cap -- too many novel intents regardless of similarity
-        if window.count >= options.maxNovelIntents {
-            return false
-        }
-
-        // Entropy check -- if too many recent intents look like gibberish, throttle
-        if window.count >= options.minSamplesForSimilarity {
-            let highEntropyCount = window.filter {
-                $0.canonicalLength > options.maxCanonicalLength
-            }.count
-            let fraction = Double(highEntropyCount) / Double(window.count)
-            if fraction >= options.entropyFraction {
-                return false
-            }
-        }
-
-        return true
+    public func check(_ canonical: String, principal: String = defaultPrincipal) -> Bool {
+        evaluate(canonical, principal: principal).isAllowed
     }
 
-    /// Post-embedding record. Stores vector for similarity analysis.
-    public func record(_ canonical: String, _ vector: [Float]) {
-        evictStale()
-
-        let entry = WindowEntry(
-            timestamp: Date(),
-            vector: vector,
-            canonicalLength: canonical.count
-        )
-
-        // Update incremental pairwise similarity with all existing entries
-        for existing in window {
-            let sim = cosineSimilarity(vector, existing.vector)
-            pairwiseSimilaritySum += sim
-            pairwiseCount += 1
+    /// Post-embedding record. Stores the vector in the principal's window.
+    public func record(_ canonical: String, _ vector: [Float], principal: String = defaultPrincipal) {
+        var window = self.window(principal, create: true)!
+        for existing in window.entries where existing.vector.count == vector.count {
+            window.pairwiseSimilaritySum += cosineSimilarity(vector, existing.vector)
+            window.pairwiseCount += 1
         }
-
-        window.append(entry)
+        window.entries.append(WindowEntry(timestamp: Date(), vector: vector, canonicalLength: canonical.count))
+        windows[principal] = window
     }
 
-    /// Post-embedding similarity check. Returns true if traffic looks healthy.
-    public func checkSimilarity() -> Bool {
-        if window.count < options.minSamplesForSimilarity {
-            return true  // Not enough data to judge
-        }
+    /// Whether the principal's recent traffic is coherent enough. True until
+    /// there are `minSamplesForSimilarity` samples.
+    public func checkSimilarity(principal: String = defaultPrincipal) -> Bool {
+        guard let window = window(principal, create: false),
+              window.entries.count >= options.minSamplesForSimilarity else { return true }
+        return similarityHealthy(window)
+    }
 
-        let avgSimilarity: Float = pairwiseCount > 0
-            ? pairwiseSimilaritySum / Float(pairwiseCount)
+    /// Current flooding metrics for one principal.
+    public func getMetrics(principal: String = defaultPrincipal) -> FloodingMetrics {
+        let window = self.window(principal, create: false)
+        let entries = window?.entries ?? []
+        let avgSimilarity: Float = (window?.pairwiseCount ?? 0) > 0
+            ? window!.pairwiseSimilaritySum / Float(window!.pairwiseCount)
             : 1.0
-
-        return avgSimilarity >= options.similarityFloor
-    }
-
-    /// Get current flooding metrics.
-    public func getMetrics() -> FloodingMetrics {
-        evictStale()
-
-        let avgSimilarity: Float = pairwiseCount > 0
-            ? pairwiseSimilaritySum / Float(pairwiseCount)
-            : 1.0
-
-        let highEntropyCount = window.filter {
-            $0.canonicalLength > options.maxCanonicalLength
-        }.count
-
+        let highEntropyCount = entries.filter { $0.canonicalLength > options.maxCanonicalLength }.count
         let now = Date()
-        let oldestTimestamp = window.first?.timestamp ?? now
+        let oldestTimestamp = entries.first?.timestamp ?? now
         let windowResetsIn = max(
             0,
             Int((oldestTimestamp.timeIntervalSince1970 + Double(options.windowMs) / 1000.0 - now.timeIntervalSince1970) * 1000)
         )
-
-        let throttled = !checkAllowed() || !checkSimilarity()
-
         return FloodingMetrics(
-            novelCount: window.count,
+            novelCount: entries.count,
             averageSimilarity: avgSimilarity,
-            highEntropyFraction: window.count > 0
-                ? Double(highEntropyCount) / Double(window.count)
-                : 0,
-            throttled: throttled,
+            highEntropyFraction: entries.isEmpty ? 0 : Double(highEntropyCount) / Double(entries.count),
+            throttled: !evaluate("", principal: principal).isAllowed,
             windowResetsIn: windowResetsIn
         )
     }
 
-    /// Reset all state.
-    public func reset() {
-        window = []
-        pairwiseSimilaritySum = 0
-        pairwiseCount = 0
-        evictionsSinceRecompute = 0
+    /// Principals with entries in the current window.
+    public func principals() -> [String] {
+        for principal in Array(windows.keys) { _ = window(principal, create: false) }
+        return Array(windows.keys)
     }
 
-    /// Internal check for getMetrics to avoid side effects from check(_:) which calls evictStale.
-    private func checkAllowed() -> Bool {
-        if window.count >= options.maxNovelIntents {
-            return false
-        }
+    /// Clear one principal's state, or everyone's.
+    public func reset(principal: String? = nil) {
+        if let principal { windows.removeValue(forKey: principal) } else { windows.removeAll() }
+    }
 
-        if window.count >= options.minSamplesForSimilarity {
-            let highEntropyCount = window.filter {
-                $0.canonicalLength > options.maxCanonicalLength
-            }.count
-            let fraction = Double(highEntropyCount) / Double(window.count)
-            if fraction >= options.entropyFraction {
-                return false
+    private func similarityHealthy(_ window: PrincipalWindow) -> Bool {
+        let avgSimilarity: Float = window.pairwiseCount > 0
+            ? window.pairwiseSimilaritySum / Float(window.pairwiseCount)
+            : 1.0
+        return avgSimilarity >= options.similarityFloor
+    }
+
+    /// A principal's window with stale entries evicted (created on demand).
+    private func window(_ principal: String, create: Bool) -> PrincipalWindow? {
+        if var window = windows[principal] {
+            evictStale(&window)
+            if window.entries.isEmpty && !create {
+                windows.removeValue(forKey: principal)
+                return nil
             }
+            windows[principal] = window
+            return window
         }
-
-        return true
+        guard create else { return nil }
+        let window = PrincipalWindow()
+        windows[principal] = window
+        return window
     }
 
     /// Evict entries older than the sliding window.
-    private func evictStale() {
+    private func evictStale(_ window: inout PrincipalWindow) {
         let cutoff = Date().addingTimeInterval(-Double(options.windowMs) / 1000.0)
-
         var evictedAny = false
-        while !window.isEmpty && window[0].timestamp < cutoff {
-            let removed = window.removeFirst()
+        while let first = window.entries.first, first.timestamp < cutoff {
+            let removed = window.entries.removeFirst()
             evictedAny = true
-
-            // Subtract pairwise similarities involving the evicted entry
-            for remaining in window {
-                let sim = cosineSimilarity(removed.vector, remaining.vector)
-                pairwiseSimilaritySum -= sim
-                pairwiseCount -= 1
+            for remaining in window.entries where remaining.vector.count == removed.vector.count {
+                window.pairwiseSimilaritySum -= cosineSimilarity(removed.vector, remaining.vector)
+                window.pairwiseCount -= 1
             }
-
-            evictionsSinceRecompute += 1
+            window.evictionsSinceRecompute += 1
         }
-
         // Periodically recompute from scratch to correct floating-point drift
-        if evictedAny && evictionsSinceRecompute >= recomputeInterval {
-            recomputePairwiseSimilarity()
-        }
-    }
-
-    /// Recompute pairwiseSimilaritySum and pairwiseCount from scratch.
-    private func recomputePairwiseSimilarity() {
-        pairwiseSimilaritySum = 0
-        pairwiseCount = 0
-        for i in 0..<window.count {
-            for j in (i + 1)..<window.count {
-                pairwiseSimilaritySum += cosineSimilarity(window[i].vector, window[j].vector)
-                pairwiseCount += 1
+        if evictedAny && window.evictionsSinceRecompute >= recomputeInterval {
+            window.pairwiseSimilaritySum = 0
+            window.pairwiseCount = 0
+            for i in 0..<window.entries.count {
+                for j in (i + 1)..<window.entries.count where window.entries[i].vector.count == window.entries[j].vector.count {
+                    window.pairwiseSimilaritySum += cosineSimilarity(window.entries[i].vector, window.entries[j].vector)
+                    window.pairwiseCount += 1
+                }
             }
+            window.evictionsSinceRecompute = 0
         }
-        evictionsSinceRecompute = 0
     }
 }

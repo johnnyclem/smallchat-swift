@@ -26,7 +26,7 @@ struct IntentPinRegistryTests {
         #expect(match == nil)
     }
 
-    @Test("Exact policy rejects similarity match for non-exact canonical")
+    @Test("Exact policy rejects similarity match for an intent that is not a pinned phrase")
     func exactPolicyRejectsSimilarityNonExact() {
         let registry = IntentPinRegistry()
         registry.pin(IntentPin(canonical: "delete:account", policy: .exact))
@@ -34,7 +34,7 @@ struct IntentPinRegistryTests {
         let match = registry.checkSimilarity(
             candidateCanonical: "delete:account",
             similarity: 0.99,
-            intentCanonical: "remove:account"
+            intent: "remove account"
         )
         #expect(match != nil)
         #expect(match?.verdict == .reject)
@@ -49,7 +49,7 @@ struct IntentPinRegistryTests {
         let match = registry.checkSimilarity(
             candidateCanonical: "delete:account",
             similarity: 0.95,
-            intentCanonical: "delete:account"
+            intent: "delete:account"
         )
         #expect(match != nil)
         #expect(match?.verdict == .accept)
@@ -65,7 +65,7 @@ struct IntentPinRegistryTests {
         let match = registry.checkSimilarity(
             candidateCanonical: "transfer:funds",
             similarity: 0.99,
-            intentCanonical: "send:money"
+            intent: "send:money"
         )
         #expect(match != nil)
         #expect(match?.verdict == .accept)
@@ -81,7 +81,7 @@ struct IntentPinRegistryTests {
         let match = registry.checkSimilarity(
             candidateCanonical: "transfer:funds",
             similarity: 0.90,
-            intentCanonical: "send:money"
+            intent: "send:money"
         )
         #expect(match != nil)
         #expect(match?.verdict == .reject)
@@ -96,7 +96,7 @@ struct IntentPinRegistryTests {
         let accept = registry.checkSimilarity(
             candidateCanonical: "transfer:funds",
             similarity: 0.96,
-            intentCanonical: "send:money"
+            intent: "send:money"
         )
         #expect(accept?.verdict == .accept)
         #expect(accept?.requiredThreshold == 0.95)
@@ -104,14 +104,14 @@ struct IntentPinRegistryTests {
         let reject = registry.checkSimilarity(
             candidateCanonical: "transfer:funds",
             similarity: 0.94,
-            intentCanonical: "send:money"
+            intent: "send:money"
         )
         #expect(reject?.verdict == .reject)
     }
 
     // MARK: - Alias resolution
 
-    @Test("Alias resolves to pinned canonical via checkExact")
+    @Test("Alias resolves to pinned canonical via checkExact, as a whole phrase")
     func aliasResolution() {
         let registry = IntentPinRegistry()
         registry.pin(IntentPin(
@@ -120,11 +120,13 @@ struct IntentPinRegistryTests {
             aliases: ["remove account", "destroy my account"]
         ))
 
-        // "remove account" canonicalizes to "remove:account"
-        let match = registry.checkExact("remove:account")
+        // Compared with normalizePinPhrase: case and spacing fold, words do not.
+        let match = registry.checkExact("  Remove   ACCOUNT ")
         #expect(match != nil)
         #expect(match?.canonical == "delete:account")
         #expect(match?.verdict == .accept)
+        #expect(registry.checkExact("destroy the account") == nil)
+        #expect(registry.checkExact("do not remove account") == nil)
     }
 
     @Test("Alias resolves via similarity check for exact policy")
@@ -139,7 +141,7 @@ struct IntentPinRegistryTests {
         let match = registry.checkSimilarity(
             candidateCanonical: "delete:account",
             similarity: 0.97,
-            intentCanonical: "remove:account"
+            intent: "remove account"
         )
         #expect(match?.verdict == .accept)
     }
@@ -152,7 +154,7 @@ struct IntentPinRegistryTests {
         let match = registry.checkSimilarity(
             candidateCanonical: "unknown:selector",
             similarity: 1.0,
-            intentCanonical: "unknown:selector"
+            intent: "unknown:selector"
         )
         #expect(match == nil)
     }
@@ -172,7 +174,7 @@ struct IntentPinRegistryTests {
         #expect(!registry.isPinned("test:selector"))
         #expect(registry.size == 0)
         // Alias should also be cleaned up
-        #expect(registry.checkExact("test:alias") == nil)
+        #expect(registry.checkExact("test alias") == nil)
     }
 
     @Test("pinnedCanonicals returns all pinned names")

@@ -38,5 +38,6 @@ struct RankingVectorTests {
         let score = try #require(v["score"]?.doubleValue)
         let expected = try #require(v["expected"]?.stringValue)
         #expect(computeTier(quantizeScore(score)).rawValue == expected, "tier(\(score))")
+        #expect(DispatchConfig().tier(for: score).rawValue == expected, "DispatchConfig().tier(for: \(score))")
     }
 }

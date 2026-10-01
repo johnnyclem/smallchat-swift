@@ -42,9 +42,10 @@ public struct RouterOptions: Sendable {
 ///
 /// `tools/call` runs exactly the named tool through the wired
 /// `MCPToolExecutor`; nothing is resolved fuzzily. Without an executor the
-/// call is a JSON-RPC error, never a placeholder success. Semantic dispatch
-/// is only available through the explicit `smallchat_dispatch` meta-tool,
-/// and only when a `MCPSemanticDispatchHandler` is wired.
+/// call is a JSON-RPC error, never a placeholder success. Semantic
+/// resolution is only available through the read-only `smallchat_resolve`
+/// meta-tool (when a `MCPResolveHandler` is wired): it proposes a tool name
+/// and never executes anything.
 public actor MCPRouter {
 
     private let sessionStore: SessionStore
@@ -53,7 +54,7 @@ public actor MCPRouter {
     private let opts: RouterOptions
     private var catalog: MCPToolCatalog?
     private var toolExecutor: MCPToolExecutor?
-    private var semanticDispatch: MCPSemanticDispatchHandler?
+    private var resolveHandler: MCPResolveHandler?
 
     public init(
         sessionStore: SessionStore,
@@ -80,14 +81,12 @@ public actor MCPRouter {
         self.toolExecutor = executor
     }
 
-    /// Wire semantic dispatch and list the `smallchat_dispatch` meta-tool.
-    ///
-    /// The handler's `TieredDispatchResult` maps to a `CallToolResult`:
-    /// `.dispatched` carries the tool's result, `.decomposed` lists sub-intents,
-    /// `.refinement` asks for a clearer intent (nothing ran), and
-    /// `.strictAmbiguityError` is `isError: true`.
-    public func setSemanticDispatchHandler(_ handler: @escaping MCPSemanticDispatchHandler) {
-        self.semanticDispatch = handler
+    /// Wire semantic resolution and list the read-only `smallchat_resolve`
+    /// meta-tool. Its result proposes a tool (name, canonical id, tier,
+    /// candidates, proof digest); nothing runs until the client calls the
+    /// proposed tool by name.
+    public func setResolveHandler(_ handler: @escaping MCPResolveHandler) {
+        self.resolveHandler = handler
     }
 
     // MARK: - Main Dispatch
@@ -183,8 +182,8 @@ public actor MCPRouter {
 
     private func handleToolsList(id: JSONRPCId, params: [String: AnyCodableValue]) -> JSONRPCResponse {
         var allTools = (catalog?.tools ?? []).map { $0.listEntry }
-        if semanticDispatch != nil, catalog?.tool(named: MCPSemanticDispatchTool.name) == nil {
-            allTools.append(MCPSemanticDispatchTool.listEntry)
+        if resolveHandler != nil, catalog?.tool(named: MCPResolveTool.name) == nil {
+            allTools.append(MCPResolveTool.listEntry)
         }
 
         let cursor: Int
@@ -224,16 +223,17 @@ public actor MCPRouter {
             return .error(id, code: MCPErrorCode.invalidParams.rawValue, message: "arguments must be an object")
         }
 
-        // The explicit semantic meta-tool (a real tool of the same name wins).
-        if name == MCPSemanticDispatchTool.name,
-           let semanticDispatch,
+        // The read-only resolve meta-tool (a real tool of the same name wins).
+        if name == MCPResolveTool.name,
+           let resolveHandler,
            catalog?.tool(named: name) == nil {
-            return .ok(id, await runSemanticDispatch(semanticDispatch, arguments: arguments))
+            return .ok(id, await runResolve(resolveHandler, arguments: arguments))
         }
 
         // Exactly the named tool, or an error. Never a near match.
         guard let tool = catalog?.tool(named: name) else {
-            return .error(id, code: MCPErrorCode.invalidParams.rawValue, message: "Unknown tool: \(name)")
+            let hint = resolveHandler != nil ? " To find a tool from a description, call \(MCPResolveTool.name)." : ""
+            return .error(id, code: MCPErrorCode.invalidParams.rawValue, message: "Unknown tool: \(name); nothing was executed.\(hint)")
         }
         guard let toolExecutor else {
             return .error(id, code: MCPErrorCode.internalError.rawValue,
@@ -250,62 +250,66 @@ public actor MCPRouter {
         }
     }
 
-    private func runSemanticDispatch(
-        _ handler: MCPSemanticDispatchHandler,
+    private func runResolve(
+        _ handler: MCPResolveHandler,
         arguments: [String: AnyCodableValue]
     ) async -> AnyCodableValue {
-        guard case .string(let intent)? = arguments["intent"], !intent.isEmpty else {
-            return mcpErrorResult("\(MCPSemanticDispatchTool.name) needs an \"intent\" string")
+        guard case .string(let intent)? = arguments["intent"],
+              !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return mcpErrorResult("\(MCPResolveTool.name) needs an \"intent\" string.")
         }
-        var toolArguments: [String: AnyCodableValue] = [:]
-        if case .dict(let args)? = arguments["arguments"] { toolArguments = args }
+        var callArgs: [String: AnyCodableValue]?
+        switch arguments["args"] {
+        case nil, .null?: callArgs = nil
+        case .dict(let args)?: callArgs = args
+        default: return mcpErrorResult("\(MCPResolveTool.name): \"args\" must be an object.")
+        }
 
-        let outcome: TieredDispatchResult
+        let resolution: Resolution
         do {
-            outcome = try await handler(intent, toolArguments)
+            resolution = try await handler(intent, callArgs)
         } catch {
-            return mcpErrorResult("Semantic dispatch failed: \(describeError(error))")
+            return mcpErrorResult("\(MCPResolveTool.name) failed: \(describeError(error))")
         }
 
-        switch outcome {
-        case .dispatched(let result, let tier, let proof):
-            return mcpCallToolResult(result, meta: [
-                "dev.smallchat/resolution": .dict([
-                    "status": .string("dispatched"),
-                    "tier": .string(tier.rawValue),
-                    "proof": encodeAsValue(proof),
-                ]),
-            ])
-
-        case .decomposed(let subIntents, let proof):
-            let text = "No tool was run. The intent decomposes into: " + subIntents.joined(separator: "; ")
-            return .dict([
-                "content": .array([.dict(["type": .string("text"), "text": .string(text)])]),
-                "structuredContent": .dict([
-                    "status": .string("decomposed"),
-                    "subIntents": .array(subIntents.map { .string($0) }),
-                ]),
-                "isError": .bool(false),
-                "_meta": .dict(["dev.smallchat/resolution": .dict(["status": .string("decomposed"), "proof": encodeAsValue(proof)])]),
-            ])
-
-        case .refinement(let refinement):
-            var text = "No tool was run: \(refinement.reason)"
-            if !refinement.clarifyingQuestions.isEmpty {
-                text += "\n" + refinement.clarifyingQuestions.map { "- \($0)" }.joined(separator: "\n")
-            }
-            return .dict([
-                "content": .array([.dict(["type": .string("text"), "text": .string(text)])]),
-                "structuredContent": encodeAsValue(refinement),
-                "isError": .bool(false),
-                "_meta": .dict(["dev.smallchat/resolution": .dict(["status": .string(ToolRefinement.mcpResultType)])]),
-            ])
-
-        case .strictAmbiguityError(let reason, let proof):
-            return mcpErrorResult("No tool was run: \(reason)", meta: [
-                "dev.smallchat/resolution": .dict(["status": .string("ambiguous"), "proof": encodeAsValue(proof)]),
-            ])
+        func nameOf(_ toolId: String) -> AnyCodableValue {
+            catalog?.tools.first { $0.toolId == toolId }.map { .string($0.name) } ?? .null
         }
+        func optional(_ s: String?) -> AnyCodableValue { s.map { .string($0) } ?? .null }
+        var proposal: [String: AnyCodableValue] = [
+            "outcome": .string(resolution.outcome.rawValue),
+            "intent": .string(intent),
+            "toolId": optional(resolution.chosen),
+            "name": resolution.chosen.map(nameOf) ?? .null,
+            "tier": .string(resolution.tier.rawValue),
+            "confidence": resolution.confidence.map { .double($0) } ?? .null,
+            "reason": optional(resolution.reason),
+            "candidates": .array(resolution.candidates.prefix(5).map {
+                .dict(["toolId": .string($0.toolId), "name": nameOf($0.toolId), "score": .double($0.score), "tier": .string($0.tier.rawValue)])
+            }),
+            "proofDigest": .string(resolution.proof.proofDigest),
+        ]
+        if let retry = resolution.retryAfterMs { proposal["retryAfterMs"] = .int(retry) }
+
+        let display: (AnyCodableValue?, String?) -> String = { name, toolId in
+            if case .string(let n)? = name { return n }
+            return toolId ?? "?"
+        }
+        let summary: String
+        if resolution.outcome == .resolved {
+            let shown = display(proposal["name"], resolution.chosen)
+            summary = "Proposed \(shown) (\(resolution.chosen ?? "?"), tier \(resolution.tier.rawValue)). Nothing was executed; call \(shown) to run it."
+        } else {
+            let candidates = resolution.candidates.prefix(5).map { display(nameOf($0.toolId), $0.toolId) }
+            summary = "No single tool proposed (\(resolution.outcome.rawValue)\(resolution.reason.map { ": \($0)" } ?? "")). Nothing was executed."
+                + (candidates.isEmpty ? "" : " Candidates: \(candidates.joined(separator: ", ")).")
+        }
+        return .dict([
+            "content": .array([.dict(["type": .string("text"), "text": .string("\(summary)\n\(jsonText(.dict(proposal)))")])]),
+            "structuredContent": .dict(proposal),
+            "isError": .bool(false),
+            "_meta": .dict([mcpResolutionMetaKey: compactResolution(resolution.proof)]),
+        ])
     }
 
     // MARK: - Resources

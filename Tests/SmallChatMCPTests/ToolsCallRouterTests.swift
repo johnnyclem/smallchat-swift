@@ -3,6 +3,7 @@ import Foundation
 @testable import SmallChatMCP
 import SmallChatCore
 import SmallChatRuntime
+import SmallChatEmbedding
 
 // MARK: - Helpers
 
@@ -50,10 +51,33 @@ private func toolsCallRequest(name: String, arguments: [String: AnyCodableValue]
     )
 }
 
-private func emptyProof(tier: DispatchTier = .high) -> ResolutionProof {
-    var p = ResolutionProof()
-    p.finalTier = tier
-    return p
+/// Embeds `intent` as e0 and anything else as the last axis.
+private struct AxisEmbedder: Embedder {
+    let intent: String
+    let dimensions = 3
+    func embed(_ text: String) async throws -> [Float] {
+        text == intent ? [1, 0, 0] : [0, 0, 1]
+    }
+}
+
+/// A runtime holding demo/echo, whose cosine similarity to `intent` is `score`.
+private func resolvingRuntime(intent: String, score: Float, recorder: CallRecorder) async throws -> ToolRuntime {
+    let runtime = ToolRuntime(vectorIndex: MemoryVectorIndex(), embedder: AxisEmbedder(intent: intent))
+    let selector = try await runtime.selectorTable.register(
+        embedding: [score, (1 - score * score).squareRoot(), 0],
+        canonical: "demo.echo"
+    )
+    let proxy = ToolProxy(
+        providerId: "demo",
+        toolName: "echo",
+        transportType: .local,
+        schemaLoader: { ToolSchema(name: "echo", description: intent, inputSchema: JSONSchemaType(type: "object")) },
+        executor: { _ in recorder.record("demo/echo"); return ToolResult(content: "ran") }
+    )
+    let cls = ToolClass(name: "demo")
+    cls.addMethod(selector, imp: proxy)
+    try await runtime.registerClass(cls)
+    return runtime
 }
 
 /// Records which tools the executor was asked to run.
@@ -115,9 +139,10 @@ struct ToolsCallRouterTests {
             recorder.record(tool.toolId)
             return ToolResult(content: "ran")
         }
-        await router.setSemanticDispatchHandler { _, _ in
-            recorder.record("semantic")
-            return .dispatched(result: ToolResult(content: "fuzzy"), tier: .high, proof: emptyProof())
+        struct NotCalled: Error {}
+        await router.setResolveHandler { _, _ in
+            recorder.record("resolve")
+            throw NotCalled()
         }
 
         // The upstream name alone, a near miss, and the canonical id are not listed names.
@@ -221,89 +246,80 @@ struct ToolsCallRouterTests {
     }
 }
 
-// MARK: - Semantic meta-tool
+// MARK: - Resolve meta-tool
 
-@Suite("smallchat_dispatch meta-tool")
-struct SemanticDispatchToolTests {
+@Suite("smallchat_resolve meta-tool")
+struct ResolveToolTests {
 
-    private func dispatch(_ intent: String) -> JSONRPCRequest {
-        toolsCallRequest(name: MCPSemanticDispatchTool.name, arguments: ["intent": .string(intent)])
+    private func resolve(_ intent: String) -> JSONRPCRequest {
+        toolsCallRequest(name: MCPResolveTool.name, arguments: ["intent": .string(intent)])
     }
 
-    @Test("is listed and callable only when semantic dispatch is wired")
+    @Test("is listed and callable only when resolution is wired, and never runs a tool")
     func listedOnlyWhenWired() async throws {
         let router = try await makeRouter()
-        await router.setToolExecutor { _, _ in ToolResult(content: "ran") }
-        let unwired = try #require(await router.handle(request: dispatch("echo something"), sessionId: nil))
+        let recorder = CallRecorder()
+        await router.setToolExecutor { tool, _ in recorder.record(tool.toolId); return ToolResult(content: "ran") }
+        let unwired = try #require(await router.handle(request: resolve("echo something"), sessionId: nil))
         #expect(unwired.error?.code == MCPErrorCode.invalidParams.rawValue)
 
-        await router.setSemanticDispatchHandler { _, _ in
-            .dispatched(result: ToolResult(content: "hello"), tier: .high, proof: emptyProof())
-        }
+        let runtime = try await resolvingRuntime(intent: "echo something", score: 0.97, recorder: recorder)
+        await router.setResolveHandler { intent, _ in try await runtime.resolve(intent) }
         let list = try body(await router.handle(request: JSONRPCRequest(id: .int(1), method: "tools/list"), sessionId: nil))
         guard case .array(let tools)? = list["tools"] else { Issue.record("missing tools"); return }
         #expect(tools.contains { tool in
-            if case .dict(let d) = tool, d["name"] == .string(MCPSemanticDispatchTool.name) { return true }
+            if case .dict(let d) = tool, d["name"] == .string(MCPResolveTool.name) { return true }
             return false
         })
-    }
 
-    @Test("dispatched result returns the tool's content with the tier")
-    func dispatchedResult() async throws {
-        let router = try await makeRouter()
-        await router.setSemanticDispatchHandler { intent, _ in
-            #expect(intent == "greet")
-            return .dispatched(result: ToolResult(codableContent: .string("hello")), tier: .high, proof: emptyProof(tier: .high))
-        }
-        let result = try body(await router.handle(request: dispatch("greet"), sessionId: nil))
+        let result = try body(await router.handle(request: resolve("echo something"), sessionId: nil))
         #expect(result["isError"] == .bool(false))
-        #expect(result["content"] == .array([.dict(["type": .string("text"), "text": .string("hello")])]))
-        guard case .dict(let meta)? = result["_meta"],
-              case .dict(let resolution)? = meta["dev.smallchat/resolution"] else {
+        guard case .dict(let proposal)? = result["structuredContent"] else { Issue.record("missing structuredContent"); return }
+        #expect(proposal["outcome"] == .string("resolved"))
+        #expect(proposal["toolId"] == .string("demo/echo"))
+        #expect(proposal["name"] == .string("demo__echo"))
+        #expect(proposal["tier"] == .string("exact"))
+        guard case .dict(let meta)? = result["_meta"], case .dict(let resolution)? = meta["dev.smallchat/resolution"] else {
             Issue.record("missing resolution meta"); return
         }
-        #expect(resolution["tier"] == .string("high"))
+        #expect(resolution["ran"] == .null)
+        #expect(recorder.all.isEmpty)
     }
 
-    @Test("refinement runs nothing and says so")
-    func refinementResult() async throws {
+    @Test("an intent below HIGH proposes nothing and runs nothing")
+    func subHighProposesNothing() async throws {
         let router = try await makeRouter()
-        await router.setSemanticDispatchHandler { intent, _ in
-            .refinement(ToolRefinement(originalIntent: intent, reason: "no confident match", proof: emptyProof(tier: .none)))
-        }
-        let result = try body(await router.handle(request: dispatch("fuzzy"), sessionId: nil))
+        let recorder = CallRecorder()
+        await router.setToolExecutor { tool, _ in recorder.record(tool.toolId); return ToolResult(content: "ran") }
+        let runtime = try await resolvingRuntime(intent: "echo maybe", score: 0.8, recorder: recorder)
+        await router.setResolveHandler { intent, _ in try await runtime.resolve(intent) }
+        let result = try body(await router.handle(request: resolve("echo maybe"), sessionId: nil))
         #expect(result["isError"] == .bool(false))
-        guard case .dict(let structured)? = result["structuredContent"] else { Issue.record("missing structuredContent"); return }
-        #expect(structured["originalIntent"] == .string("fuzzy"))
+        guard case .dict(let proposal)? = result["structuredContent"] else { Issue.record("missing structuredContent"); return }
+        #expect(proposal["outcome"] == .string("needs-disambiguation"))
+        #expect(proposal["name"] == .null)
+        #expect(recorder.all.isEmpty)
     }
 
-    @Test("decomposed result lists sub-intents")
-    func decomposedResult() async throws {
+    @Test("a missing intent, or args that are not an object, is isError")
+    func badArguments() async throws {
         let router = try await makeRouter()
-        await router.setSemanticDispatchHandler { _, _ in
-            .decomposed(subIntents: ["step one", "step two"], proof: emptyProof(tier: .low))
-        }
-        let result = try body(await router.handle(request: dispatch("compound"), sessionId: nil))
-        guard case .dict(let structured)? = result["structuredContent"] else { Issue.record("missing structuredContent"); return }
-        #expect(structured["subIntents"] == .array([.string("step one"), .string("step two")]))
-    }
-
-    @Test("strict ambiguity is isError")
-    func strictAmbiguityResult() async throws {
-        let router = try await makeRouter()
-        await router.setSemanticDispatchHandler { _, _ in
-            .strictAmbiguityError(reason: "ambiguous under strict mode", proof: emptyProof(tier: .medium))
-        }
-        let result = try body(await router.handle(request: dispatch("ambiguous"), sessionId: nil))
-        #expect(result["isError"] == .bool(true))
+        await router.setResolveHandler { _, _ in Issue.record("must not be called"); throw CancellationError() }
+        let missing = try body(await router.handle(request: toolsCallRequest(name: MCPResolveTool.name), sessionId: nil))
+        #expect(missing["isError"] == .bool(true))
+        let badArgs = try body(await router.handle(
+            request: toolsCallRequest(name: MCPResolveTool.name, arguments: ["intent": .string("x"), "args": .int(1)]),
+            sessionId: nil
+        ))
+        #expect(badArgs["isError"] == .bool(true))
     }
 
     @Test("a handler that throws is an isError result")
     func handlerThrows() async throws {
-        struct DispatchFailure: Error {}
+        struct ResolveFailure: Error {}
         let router = try await makeRouter()
-        await router.setSemanticDispatchHandler { _, _ in throw DispatchFailure() }
-        let result = try body(await router.handle(request: dispatch("boom"), sessionId: nil))
+        await router.setResolveHandler { _, _ in throw ResolveFailure() }
+        let result = try body(await router.handle(request: resolve("boom"), sessionId: nil))
         #expect(result["isError"] == .bool(true))
     }
 }
@@ -328,8 +344,8 @@ struct MCPToolCatalogTests {
         #expect(catalog.skipped.map(\.toolId) == ["p/bad tool!"])
     }
 
-    @Test("colliding names are all left out")
-    func collisionsSkipped() {
+    @Test("names cannot collide: a provider id with \"__\" is served only with --provider")
+    func collisionsImpossible() {
         let artifact = SerializedArtifact(
             stats: ArtifactStats(toolCount: 2, uniqueSelectorCount: 2, providerCount: 2, collisionCount: 0),
             selectors: [:],
@@ -339,8 +355,11 @@ struct MCPToolCatalogTests {
             ]
         )
         let catalog = MCPToolCatalog(artifact: artifact)
-        #expect(catalog.tools.isEmpty)
-        #expect(Set(catalog.skipped.map(\.toolId)) == ["a__b/c", "a/b__c"])
+        // 0.6 listed neither (both wanted "a__b__c"). The suite rule
+        // (spec/tool-id) makes the first "__" always end the provider id.
+        #expect(catalog.tools.map(\.toolId) == ["a/b__c"])
+        #expect(catalog.tools.map(\.name) == ["a__b__c"])
+        #expect(catalog.skipped.map(\.toolId) == ["a__b/c"])
     }
 }
 

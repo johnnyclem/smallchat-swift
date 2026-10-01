@@ -81,11 +81,16 @@ public struct MCPToolCatalog: Sendable {
             let name: String
             switch naming {
             case .aggregate:
-                name = entry.providerId + Self.aggregateSeparator + entry.toolName
-                guard Self.isValidAggregateName(name) else {
-                    skipped.append(MCPSkippedTool(toolId: toolId, reason: "\"\(name)\" is not a valid MCP tool name (^[A-Za-z0-9_-]{1,128}$)"))
+                guard isAggregateProviderId(entry.providerId) else {
+                    skipped.append(MCPSkippedTool(toolId: toolId, reason: "provider id \"\(entry.providerId)\" must match [A-Za-z0-9_-], contain no \"__\" and not end in \"_\" to prefix aggregate names; serve it with --provider \(entry.providerId)"))
                     continue
                 }
+                guard let aggregate = mcpAggregateName(providerId: entry.providerId, toolName: entry.toolName) else {
+                    let candidate = entry.providerId + Self.aggregateSeparator + entry.toolName
+                    skipped.append(MCPSkippedTool(toolId: toolId, reason: "\"\(candidate)\" is not a valid aggregate tool name (^[A-Za-z0-9_-]{1,128}$); serve it with --provider \(entry.providerId)"))
+                    continue
+                }
+                name = aggregate
             case .provider:
                 name = entry.toolName
                 guard !name.isEmpty else {
@@ -125,10 +130,7 @@ public struct MCPToolCatalog: Sendable {
     }
 
     static func isValidAggregateName(_ name: String) -> Bool {
-        guard (1...128).contains(name.utf8.count) else { return false }
-        return name.unicodeScalars.allSatisfy { scalar in
-            scalar.isASCII && (CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "-")
-        }
+        isValidMCPToolName(name)
     }
 }
 
@@ -141,43 +143,66 @@ public typealias MCPToolExecutor = @Sendable (
     _ arguments: [String: AnyCodableValue]
 ) async throws -> ToolResult
 
-/// Resolves an intent semantically and dispatches it (the opt-in
-/// `smallchat_dispatch` meta-tool).
-public typealias MCPSemanticDispatchHandler = @Sendable (
+/// Resolves an intent to a tool without running anything (the
+/// `smallchat_resolve` meta-tool). `arguments` are the call arguments the
+/// client intends to pass, when known (used to choose among overloads).
+public typealias MCPResolveHandler = @Sendable (
     _ intent: String,
-    _ arguments: [String: AnyCodableValue]
-) async throws -> TieredDispatchResult
+    _ arguments: [String: AnyCodableValue]?
+) async throws -> Resolution
 
-/// The explicit meta-tool for semantic dispatch. `tools/call` on any other
-/// name runs exactly that tool; only this tool resolves an intent.
-public enum MCPSemanticDispatchTool {
-    public static let name = "smallchat_dispatch"
+/// The read-only meta-tool for semantic resolution. It proposes a tool and
+/// returns its MCP name; it never executes anything. `tools/call` on any
+/// other name runs exactly that tool. (@smallchat/core 1.0 serves the same
+/// tool; smallchat-swift 0.6's executing `smallchat_dispatch` is gone.)
+public enum MCPResolveTool {
+    public static let name = "smallchat_resolve"
 
     public static var listEntry: [String: AnyCodableValue] {
         [
             "name": .string(name),
+            "title": .string("Resolve an intent to a tool"),
             "description": .string(
-                "Resolve a natural-language intent to one of this server's tools by semantic similarity "
-                + "and run it when the match is confident (EXACT/HIGH tier, or MEDIUM after verification). "
-                + "Otherwise nothing runs and the result asks for refinement or lists sub-intents. "
-                + "Prefer calling a listed tool by name."
+                "Propose the tool on this server that matches a natural-language intent. Returns the tool name, "
+                + "canonical id, confidence tier, ranked candidates and a proof digest. It never runs anything: "
+                + "call the proposed tool by name to execute it."
             ),
             "inputSchema": .dict([
                 "type": .string("object"),
                 "properties": .dict([
                     "intent": .dict([
                         "type": .string("string"),
-                        "description": .string("What to do, in natural language."),
+                        "minLength": .int(1),
+                        "description": .string("What you want to do, in plain language"),
                     ]),
-                    "arguments": .dict([
+                    "args": .dict([
                         "type": .string("object"),
-                        "description": .string("Arguments for the resolved tool."),
+                        "description": .string("The arguments you intend to pass, if known (used to choose among overloads)"),
                     ]),
                 ]),
                 "required": .array([.string("intent")]),
+                "additionalProperties": .bool(false),
             ]),
         ]
     }
+}
+
+/// `_meta` key of the compact resolution summary every result carries.
+public let mcpResolutionMetaKey = "dev.smallchat/resolution"
+
+/// The compact, digest-bound summary of a proof (`_meta["dev.smallchat/resolution"]`).
+public func compactResolution(_ proof: ResolutionProof) -> AnyCodableValue {
+    func optional(_ s: String?) -> AnyCodableValue { s.map { .string($0) } ?? .null }
+    return .dict([
+        "toolId": optional(proof.chosen),
+        "ran": optional(proof.ran),
+        "outcome": .string(proof.outcome.rawValue),
+        "decision": .string(proof.decision.rawValue),
+        "tier": .string(proof.tier.rawValue),
+        "callDigest": optional(proof.callDigest),
+        "proofDigest": .string(proof.proofDigest),
+        "artifactHash": optional(proof.artifactHash),
+    ])
 }
 
 // MARK: - Result shaping
@@ -206,6 +231,11 @@ public func mcpCallToolResult(
        case .array = dict["content"] {
         if dict["isError"] == nil { dict["isError"] = .bool(result.isError) }
         shaped = dict
+    } else if result.isError {
+        shaped = [
+            "content": .array([.dict(["type": .string("text"), "text": .string(errorText(result.content))])]),
+            "isError": .bool(true),
+        ]
     } else {
         shaped = [
             "content": .array(formatContent(result).map { .dict($0) }),
@@ -216,12 +246,31 @@ public func mcpCallToolResult(
             shaped["structuredContent"] = .dict(object)
         }
     }
+    var meta = meta
+    if let proof = result.metadata?["proof"] as? ResolutionProof {
+        meta[mcpResolutionMetaKey] = compactResolution(proof)
+    }
     if !meta.isEmpty {
         var existing: [String: AnyCodableValue] = [:]
         if case .dict(let current)? = shaped["_meta"] { existing = current }
         shaped["_meta"] = .dict(existing.merging(meta) { _, new in new })
     }
     return .dict(shaped)
+}
+
+/// The text of an error result: its `error` line and each of its `errors`.
+func errorText(_ content: (any Sendable)?) -> String {
+    let value = (content as? AnyCodableValue) ?? content.flatMap { anyCodableValue(from: $0) }
+    if case .dict(var object)? = value, case .string(let error)? = object["error"] {
+        object.removeValue(forKey: "error")
+        var lines = [error]
+        if case .array(let errors)? = object.removeValue(forKey: "errors") {
+            lines += errors.map { if case .string(let e) = $0 { return "- \(e)" }; return "- \(jsonText($0))" }
+        }
+        if !object.isEmpty { lines.append(jsonText(.dict(object))) }
+        return lines.joined(separator: "\n")
+    }
+    return contentText(content)
 }
 
 /// A tool execution error as a `CallToolResult` (`isError: true`).

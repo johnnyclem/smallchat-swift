@@ -7,45 +7,58 @@ struct TieredDispatchUnitTests {
 
     // MARK: - Verification
 
+    private final class SchemaIMP: ToolIMP, @unchecked Sendable {
+        let providerId = "p"
+        let toolName: String
+        let transportType: TransportType = .local
+        let schema: ToolSchema?
+        init(name: String, description: String, arguments: [ArgumentSpec] = []) {
+            toolName = name
+            schema = ToolSchema(name: name, description: description, inputSchema: JSONSchemaType(type: "object"), arguments: arguments)
+        }
+        func loadSchema() async throws -> ToolSchema { schema! }
+        func execute(args: [String: any Sendable]) async throws -> ToolResult { ToolResult(content: nil) }
+    }
+
     @Test("Verification fails when required arguments are missing")
     func verifyMissingArgs() async {
-        let result = await verifyCandidate(
-            intent: "send a message to alice",
-            toolName: "send_message",
-            toolDescription: "Send a chat message to a user",
-            arguments: [
-                ArgumentSpec(name: "recipient", type: .init(type: "string"), description: "user id", required: true),
-                ArgumentSpec(name: "body", type: .init(type: "string"), description: "message body", required: true),
-            ],
-            suppliedArgs: ["recipient": "alice"]
-        )
+        let imp = SchemaIMP(name: "send_message", description: "Send a chat message to a user", arguments: [
+            ArgumentSpec(name: "recipient", type: .init(type: "string"), description: "user id", required: true),
+            ArgumentSpec(name: "body", type: .init(type: "string"), description: "message body", required: true),
+        ])
+        let result = await verify(imp, intent: "send a message to alice", args: ["recipient": "alice"])
         #expect(result.passed == false)
-        #expect(result.strategy == .schema)
+        #expect(result.schemaMatch == false)
     }
 
     @Test("Keyword overlap rejects intents with no shared salient terms")
     func keywordOverlapRejects() async {
-        let result = await verifyCandidate(
-            intent: "what is the weather forecast for tomorrow",
-            toolName: "compile_typescript",
-            toolDescription: "Run the TypeScript compiler over a project",
-            arguments: [],
-            suppliedArgs: nil
-        )
+        let imp = SchemaIMP(name: "compile_typescript", description: "Run the TypeScript compiler over a project")
+        let result = await verify(imp, intent: "what is the weather forecast for tomorrow", args: [:], options: VerificationOptions(skipSchemaCheck: true))
         #expect(result.passed == false)
-        #expect(result.strategy == .keywordOverlap)
+        #expect(result.schemaMatch == true)
+        #expect(result.descriptionOverlap < 0.15)
     }
 
     @Test("Keyword overlap accepts intents with shared salient terms")
     func keywordOverlapAccepts() async {
-        let result = await verifyCandidate(
-            intent: "find callers of the loginUser function",
-            toolName: "loom_find_importers",
-            toolDescription: "find callers and importers of a function symbol",
-            arguments: [],
-            suppliedArgs: nil
-        )
+        let imp = SchemaIMP(name: "loom_find_importers", description: "find callers and importers of a function symbol")
+        let result = await verify(imp, intent: "find callers of the loginUser function", args: [:], options: VerificationOptions(skipSchemaCheck: true))
         #expect(result.passed == true)
+    }
+
+    @Test("An LLM verifier is asked when its answer authorizes the call, and can refuse")
+    func llmVerifierRefuses() async {
+        struct Refuses: LLMClient {
+            func verifyMatch(intent: String, toolName: String, toolDescription: String) async -> LLMVerificationResult { .rejected(reason: "no") }
+            func decompose(intent: String) async -> LLMDecompositionResult { .unavailable }
+            func clarifyingQuestions(intent: String, nearMatches: [String]) async -> [String] { [] }
+        }
+        let imp = SchemaIMP(name: "loom_find_importers", description: "find callers and importers of a function symbol")
+        let result = await verify(imp, intent: "find callers of the loginUser function", args: [:], llm: Refuses(),
+                                  options: VerificationOptions(forceLLMCheck: true, skipSchemaCheck: true))
+        #expect(result.passed == false)
+        #expect(result.llmConfirmed == false)
     }
 
     @Test("Standalone keywordOverlap helper returns Jaccard between meaningful tokens")

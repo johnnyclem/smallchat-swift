@@ -43,3 +43,19 @@ public func l2Normalize(_ vector: inout [Float]) {
     for i in 0..<vector.count { vector[i] /= norm }
     #endif
 }
+
+/// Cosine similarity accumulated in double precision from float32
+/// components -- the arithmetic @smallchat/core uses (`cosineSimilarity`
+/// over Float32Arrays). Mismatched dimensions or a zero vector give 0.
+public func cosineSimilarityDouble(_ a: [Float], _ b: [Float]) -> Double {
+    guard a.count == b.count, !a.isEmpty else { return 0 }
+    var dot = 0.0, normA = 0.0, normB = 0.0
+    for i in 0..<a.count {
+        let x = Double(a[i]), y = Double(b[i])
+        dot += x * y
+        normA += x * x
+        normB += y * y
+    }
+    let denom = normA.squareRoot() * normB.squareRoot()
+    return denom == 0 ? 0 : dot / denom
+}

@@ -22,6 +22,11 @@ public struct LocalEmbedder: Embedder, Sendable {
         self.dimensions = dimensions
     }
 
+    /// `hash` / `smallchat-hash-v1` at this embedder's dimensions: the same
+    /// fingerprint as @smallchat/core's `HashEmbedder`, whose vectors this
+    /// embedder reproduces.
+    public var fingerprint: EmbedderFingerprint? { .hash(dims: dimensions) }
+
     public func embed(_ text: String) async throws -> [Float] {
         LocalEmbedder.hashEmbed(text, dimensions: dimensions)
     }
@@ -50,7 +55,14 @@ public struct LocalEmbedder: Embedder, Sendable {
             }
         }
 
-        l2Normalize(&vector)
+        // L2-normalize as the reference does: the norm in double precision,
+        // each float32 component divided by it, so vectors match bit for bit.
+        var norm = 0.0
+        for v in vector { norm += Double(v) * Double(v) }
+        norm = norm.squareRoot()
+        if norm > 0 {
+            for i in 0..<vector.count { vector[i] = Float(Double(vector[i]) / norm) }
+        }
         return vector
     }
 

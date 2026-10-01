@@ -10,8 +10,10 @@ struct ServeCommand: AsyncParsableCommand {
         Tools are listed as <provider>__<tool> (or, with --provider, one provider's \
         tools under their upstream names), and tools/call runs exactly the named tool \
         through its provider's manifest endpoint: MCP servers over Streamable HTTP, \
-        REST APIs as POST <endpoint>/<tool>. Tools whose provider declares no such \
-        endpoint are listed but fail when called.
+        REST APIs as POST <endpoint>/<tool>. Its arguments are validated against the \
+        tool's inputSchema first. Tools whose provider declares no such endpoint are \
+        listed but fail when called. smallchat_resolve proposes a tool for a \
+        plain-language intent and never runs anything.
         """
     )
 
@@ -30,8 +32,8 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Serve only this provider's tools, under their upstream names")
     var provider: String?
 
-    @Flag(help: "Also list the smallchat_dispatch meta-tool (semantic intent dispatch)")
-    var semanticDispatch: Bool = false
+    @Flag(help: "Do not list the read-only smallchat_resolve meta-tool (it proposes a tool for an intent and never runs one)")
+    var noResolveTool: Bool = false
 
     @Flag(help: "Require a bearer token (from SMALLCHAT_MCP_TOKEN, or --auth-token-file)")
     var auth: Bool = false
@@ -83,12 +85,12 @@ struct ServeCommand: AsyncParsableCommand {
             sessionTTLMs: Int(sessionTtl * 3_600_000),
             maxConnections: maxConnections,
             toolNaming: naming,
-            semanticDispatch: semanticDispatch
+            resolveTool: !noResolveTool
         )
 
         let server = try MCPServer(config: config)
         await server.setArtifact(toolkit.artifact)
-        await server.setRuntime(toolkit.runtime, semanticDispatch: semanticDispatch)
+        await server.setRuntime(toolkit.runtime, resolveTool: !noResolveTool)
 
         print("  \(catalog.tools.count) tools listed (\(naming == .aggregate ? "<provider>__<tool>" : "upstream names"))")
         for skipped in catalog.skipped {
@@ -98,8 +100,8 @@ struct ServeCommand: AsyncParsableCommand {
         for unavailable in toolkit.unavailable where listed.contains(unavailable.toolId) {
             print("  cannot run: \(unavailable.toolId): \(unavailable.reason)")
         }
-        if semanticDispatch {
-            print("  Semantic dispatch: smallchat_dispatch")
+        if !noResolveTool {
+            print("  Intent resolution: smallchat_resolve (proposes a tool; never runs one)")
         }
         print("  Auth: \(token.map { "bearer token (\($0.origin))" } ?? "none")")
         print("  Rate limiting: \(rateLimit ? "enabled (\(rateLimitRpm) rpm)" : "disabled")")

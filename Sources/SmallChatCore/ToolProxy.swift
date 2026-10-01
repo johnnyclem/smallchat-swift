@@ -18,6 +18,8 @@ public final class ToolProxy: ToolIMP, @unchecked Sendable {
     public let providerId: String
     public let toolName: String
     public let transportType: TransportType
+    /// MCP annotations of the upstream tool (the dispatch policy reads them).
+    public let annotations: ToolAnnotations?
 
     private struct State {
         var schema: ToolSchema?
@@ -35,11 +37,13 @@ public final class ToolProxy: ToolIMP, @unchecked Sendable {
         toolName: String,
         transportType: TransportType,
         schemaLoader: @escaping @Sendable () async throws -> ToolSchema,
-        executor: (@Sendable ([String: any Sendable]) async throws -> ToolResult)? = nil
+        executor: (@Sendable ([String: any Sendable]) async throws -> ToolResult)? = nil,
+        annotations: ToolAnnotations? = nil
     ) {
         self.providerId = providerId
         self.toolName = toolName
         self.transportType = transportType
+        self.annotations = annotations
         self.schemaLoader = schemaLoader
         self.executor = executor
     }
