@@ -499,11 +499,16 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   reserved for 1.x), which 1.0 reads past. `Tests/Fixtures/truth-format` carries the
   spec's new fixtures: a UV verified and a TB minted by agent quorums in
   `valid/ledger.jsonl`; agent settlements without a quorum, agent quorums citing
-  an evidence kind this version doesn't know (`unknown-value`), and a quorum TB whose
+  an evidence kind this version doesn't know (`unknown-value`), a quorum TB whose
   member carries `verdict` (on a TB member a field this version doesn't define, kept
-  and read past) in `valid/routing.jsonl`; and in `invalid/` a refused line for each
-  quorum rule and lines that hold only if `Σ` lowercases without Final_Sigma
-  (Stenographer `bffa86b`).
+  and read past), quorum ADDENDUMs that keep rule 5 and carry a top-level `links`
+  (an `overrides` link, a `verifies` link beside `refuted` verdicts, a string),
+  which decode, since rule 5 reads `x-steno.links` only, and a quorum TB whose
+  `x-steno.links` carries a link type this version doesn't know (`unknown-value`)
+  in `valid/routing.jsonl`; and in `invalid/` a refused line for each quorum rule,
+  lines that hold only if `Σ` lowercases without Final_Sigma, rule 5 broken beside a
+  top-level `links` of `null` or `[]`, and a quorum ADDENDUM member whose `verdict`
+  is neither `verified` nor `refuted` (Stenographer `0848b44`).
 - **`NotaryClient.submitAndNotarize`** files a PROPOSAL envelope with Stenographer
   (`POST /proposals`, idempotent by envelope id) and notarizes it, returning the
   minted TB; `MessengerModel.authoredTombstones` keeps it in the ledger until a
