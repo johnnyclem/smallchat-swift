@@ -390,7 +390,19 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   A key needn't be in a normal form (`agent:a\u{0316}\u{034F}\u{0301}` keys to
   `agent:a` + U+0316 U+0301, `agent:\u{00E1}\u{0316}` to `agent:á` + U+0316): rule 2
   took such a pair as one writer, and a registry listing both names threw
-  (SW-QUORUM-5).
+  (SW-QUORUM-5). Keys, and the names a signer registry stores (NFC), are Unicode
+  16.0's on every platform, as Stenographer and short-hand compute them with ICU 77.1
+  on Node 22: NFKC, NFC, Default_Ignorable_Code_Point and lowercasing, with the
+  cased and case-ignorable classes Final_Sigma reads, come from Unicode Character
+  Database 16.0.0 tables that SmallChatTruth carries
+  (`Scripts/generate-unicode-tables.mjs`), not from Foundation or the Swift runtime.
+  Foundation's NFKC on Linux is Unicode 15.x, so `agent:` followed by OUTLINED LATIN
+  CAPITAL LETTERs (U+1CCD6–U+1CCEF, new in 16.0, which NFKC folds to A–Z) spelling
+  CODEX wasn't `agent:codex`, and outlined `AI` wasn't anonymous; and the Swift 6.4
+  runtime's properties are Unicode 17.0, which lowercases U+A7CE and makes `ʕ`
+  caseless (SW-UNICODE-1, SW-UNICODE-2). A test holds every code point's key, NFC's
+  composites, the combining classes and the case classes to Node 22's ICU
+  (SW-UNICODE-3).
 
 #### Messenger (`SmallChatAgents`, `SmallChatUI`)
 
@@ -921,6 +933,11 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
 - `SmallChatImportance`, `SmallChatCRDT`, `SmallChatCompaction` and
   `SmallChatShorthand` are ports of smallchat's 0.4-era modules (TS PRs #55–#58),
   not of @shorthand/core 1.0, whose versions of them differ.
+- **Truth format v2 doesn't name the Unicode version identity keys use.**
+  SmallChatTruth uses 16.0, as Stenographer and short-hand do on Node 22 (ICU 77.1).
+  On Node 24 (ICU 78, Unicode 17.0) they key some identities differently: U+A7CE, a
+  capital letter new in 17.0, lowercases there, and `ʕ` (U+0295) is no longer a cased
+  letter, so `agent:ʕΣ` keys to `agent:ʕσ` rather than `agent:ʕς`.
 
 ## [0.6.0] - 2026-05-06
 
