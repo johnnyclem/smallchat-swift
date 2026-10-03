@@ -65,7 +65,10 @@ This is the **Swift implementation** of [smallchat](https://github.com/johnnycle
   notarize (see [the messenger](#the-smallchat-app-agent-messenger)).
 - **`SmallChatTruth`** reads Stenographer's truth format v2 (hash-chained TB/UV streams
   with `TRANSITION` status lines), fails closed on anything unknown or unverifiable,
-  and runs Stenographer's golden fixtures in `swift test`.
+  and runs Stenographer's golden fixtures in `swift test`. Agents settle claims only
+  together: a TB an agent signs is truth only with a quorum of two or more agent
+  sessions agreeing from different angles within 15 minutes, and the reader refuses a
+  line whose quorum breaks the spec's rules.
 - Also since 0.6.0: `RtkTransport` (prefixes eligible shell commands with `rtk` and
   pipes large response bodies through `rtk filter`), and the `DispatchConfig.miniLM`
   threshold preset for lower-contrast sentence embedders.
@@ -355,7 +358,7 @@ SmallChatAgents ─── Agent messenger core: session discovery, handles, @men
 | **SmallChatImportance** | Three-signal importance detector (recency decay, co-mention centrality, novelty) with weighted ranking |
 | **SmallChatCRDT** | Replicated types for multi-agent shared memory: `LWWMap`, `ORSet`, `GCounter`, `VectorClock`. `LWWMap` merges are not commutative when two writes share a timestamp and replica (see the CHANGELOG's known issues) |
 | **SmallChatCompaction** | `CompactionVerifier` — three-strategy verification (resampling, contradiction detection, invariants) for safe history compaction |
-| **SmallChatTruth** | Truth format v2 reader (Stenographer's truth streams): hash-chain checks, TRANSITION fold, multi-file merge, fail-closed statuses, §7 consumption rules, marker escaping, truth-preserving compaction invariants, proposal-only write path |
+| **SmallChatTruth** | Truth format v2 reader (Stenographer's truth streams): hash-chain checks, TRANSITION fold, multi-file merge, fail-closed statuses, evidence classes and the agent quorum, §7 consumption rules, marker escaping, truth-preserving compaction invariants, proposal-only write path |
 | **SmallChatAgents** | Agent messenger core: Claude Code session discovery (live registry + transcripts), durable renamable handles, `@mention` parsing, direct/group routing with private-until-shared replies, the switchboard relay over Claude Code inter-agent messaging, headless `claude -p --resume`, and the stenographer watcher |
 | **SmallChatMemex** | Knowledge-base compiler: the same Read → Extract → Embed → Link → Emit pipeline as `ToolCompiler`, driving `smallchat memex` |
 | **SmallChatUI** | SwiftUI `WKWebView` wrapper (`AppWebView`) for rendering App/UI content, with sandboxed navigation and CSP injection |
@@ -382,7 +385,7 @@ immune to instructions inside the text it reads.
 | **Connection Limits** | The MCP server closes connections beyond `maxConnections` and rejects bodies over `maxRequestBodyBytes` (413). |
 | **DNS-Rebinding Protection** | A loopback-bound MCP server rejects (403) `Host` and `Origin` names other than `localhost`, `::1` and dotted-decimal IPv4 addresses in 127.0.0.0/8; a DNS name such as `127.0.0.1.nip.io` is refused even if it resolves to loopback. Origins in `allowedOrigins` are accepted. |
 | **Sender Gating** | The channel server's allowlist of event senders (`SenderGate`), with identity validation, a sender cap and 6-hex-digit pairing codes compared in constant time. An empty allowlist admits every sender. The HTTP bridge additionally requires the shared secret. |
-| **Truth Ledger Reading** | `SmallChatTruth` refuses a truth format v2 stream with an edited line or a broken hash chain, and never counts an entry with an unknown or missing status, a struck entry or an unsigned TB as current truth. The chain shows a stream wasn't edited between its first and last line; it doesn't show who wrote it (key signatures are planned for 1.x). |
+| **Truth Ledger Reading** | `SmallChatTruth` refuses a truth format v2 stream with an edited line or a broken hash chain, or a line whose agent quorum breaks the spec's rules, and never counts an entry with an unknown or missing status, a struck entry, an unsigned TB or a TB an agent signed without a quorum of agents as current truth. The chain shows a stream wasn't edited between its first and last line; it doesn't show who wrote it (key signatures are planned for 1.x). |
 | **Messenger** | Separate channel, notary and REST secrets kept in the Keychain (0600 files outside macOS), headless sessions with an explicit tool list, a nonce-framed switchboard protocol, and escaping of truth markers inside untrusted text (see [the messenger](#the-smallchat-app-agent-messenger)). |
 | **Concurrency** | Built in the Swift 6 language mode, so actor isolation and `Sendable` are checked by the compiler. Types that share mutable state across threads outside actors (for example `ToolClass`) are `@unchecked Sendable` behind locks, and blocking pipe reads run on dedicated threads. |
 

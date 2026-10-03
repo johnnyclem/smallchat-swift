@@ -117,11 +117,14 @@ public struct TruthSigner: Sendable, Equatable {
     }
 }
 
-/// The allowlist stenographer's import consults (`{"signers": [{id, role, aliases?}]}`):
+/// The allowlist stenographer's import consults (`{"signers": [{id, role, aliases?, keys?}]}`):
 /// names and roles, not credentials. With one, a TB is truth only when its
 /// author and signer are listed as a person or an agent, and a UV only when
-/// its author is; a TRANSITION by someone it doesn't list is held. Nothing
-/// here authenticates anyone.
+/// its author is; a TRANSITION by someone it doesn't list is held; and an
+/// agent, for the agent quorum, is an identity it lists with role `agent`.
+/// Nothing here authenticates anyone. An entry's `keys` (public keys,
+/// `[{alg, id, publicKey}]`) are reserved for key signing in 1.x: 1.0 reads
+/// past them, as it does any field it doesn't define.
 public struct TruthSignerRegistry: Sendable {
     private var exact: [String: (id: String, role: TruthSigner.Role)] = [:]
     /// Longest prefix first, so `agent:ci:*` can narrow `agent:*`.

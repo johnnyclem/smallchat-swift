@@ -503,6 +503,35 @@ needs at least 4 UTF-16 code units and an ASCII letter (so `日本語版` now ne
 subject), values are trimmed, and an explicit `"subject": null` is refused. Check
 drafts with `TombstoneDraft.problems()` or `TruthTombstonedLiteral.validationError()`.
 
+### Agents settle claims only together
+
+Truth format v2 lets agents settle a claim only as a quorum: two or more agent sessions
+agreeing from different angles (settling evidence of two kinds, no item shared) within
+15 minutes (spec: "Agent quorum"). `TruthFormat.decode` refuses a line whose `quorum`
+breaks those rules, or that carries one anywhere but a v2 TB or ADDENDUM
+(`TruthQuorum.issues(in:)` lists the broken rules). A TB an agent signs is truth only
+with a quorum whose members are all agents and cite settling evidence this version
+knows; otherwise `inadmissible?.reason` is the new `.agentWithoutQuorum`
+(`agent-without-quorum`). An agent is an identity the signer registry lists with role
+`agent`, or, without a registry, one whose key starts with `agent:`
+(`TruthQuorum.isAgent(_:signers:)`). A person still signs alone. A `switch` over
+`TruthInadmissible.Reason` needs the new case.
+
+`TruthTbEntry` has `quorum: [TruthQuorumMember]?`, and its initializer takes
+`quorum:` (default `nil`). `quorum` is no longer one of the `extra` fields.
+
+`TruthEvidence.Kind` knows `chat`, `ticket` and `doc`, and every kind has a class:
+`kind.evidenceClass` is `.settling` for `commit`, `file`, `test`, `claimed-command`
+and `wiki` (`TruthEvidence.Kind.settling`), and `.question` for every other kind,
+including one this version doesn't know. The classes bind agents only: a person may
+sign on any evidence.
+
+`consumptionRules` (shipped verbatim from Stenographer) now tells an agent to file its
+verdict with `resolve_uv`, which settles only when another session agrees.
+
+A `signers.json` entry may carry `keys` (public keys, reserved for 1.x); 1.0 ignores
+them.
+
 ### Writing back
 
 `TruthWiki.serialize` returns each entry's original line. If you changed an entry

@@ -24,6 +24,12 @@ import SmallChatCore
 //   hash and is unverifiable (unless the host opts in); with a signer
 //   registry, unlisted authors and signers are unverifiable; two lines
 //   giving one id different content (compared as JCS bytes) are a conflict.
+//   Agents settle claims only together: a TB an agent signs is truth only
+//   with a quorum (the codec checked its rules) whose members are all
+//   agents and, read with every kind this version doesn't know as
+//   question-class, cite settling evidence of two kinds or more
+//   (agent-without-quorum). Status changes come from TRANSITIONs: like a
+//   person's acts, an agent quorum's are the writer's to check.
 // - Never rewrite. Unknown fields and values are kept, never coerced, and a
 //   parsed entry serializes back to the exact line it was read from.
 // - Several files (one per writer) fold one by one, then each entry takes
@@ -36,8 +42,9 @@ public struct TruthReadOptions: Sendable {
     /// Whose entries count (stenographer's `signers.json`). With one, a TB
     /// is truth only when its author and signer are listed as a person or
     /// an agent, a UV only when its author is, and a TRANSITION by someone
-    /// it doesn't list is held. Without one, any identity that passes the
-    /// identity rules is accepted.
+    /// it doesn't list is held; who is an agent is its `agent` role. Without
+    /// one, any identity that passes the identity rules is accepted, and an
+    /// agent is an identity whose key starts with `agent:`.
     public var signers: TruthSignerRegistry?
     /// Take version 1 TBs as truth. Off by default: a v1 line carries no
     /// hash, so nothing shows it is the line stenographer wrote
@@ -400,6 +407,15 @@ public enum TruthWiki {
                     return TruthInadmissible(reason: .unverifiable, detail: "TB \(tb.id): signer '\(signer)' is not in the signer registry")
                 }
             }
+            // Agents settle only together: an agent's TB is truth only with a quorum of agents
+            if case .tb(let tb) = entry, let signer = tb.signedBy, TruthQuorum.isAgent(signer, signers: options.signers),
+               let why = agentSettlementIssue(tb, signers: options.signers) {
+                return TruthInadmissible(
+                    reason: .agentWithoutQuorum,
+                    detail: "TB \(tb.id) is signed by agent \(signer) with \(why): agents settle a claim only as two or more agent "
+                        + "sessions agreeing from different angles within 15 minutes, or a person signs it"
+                )
+            }
             return nil
         }
         guard let refusal = reason() else { return }
@@ -409,9 +425,22 @@ public enum TruthWiki {
         }
     }
 
+    /// Why an agent-signed TB's quorum doesn't settle it for this reader, or nil when it does.
+    private static func agentSettlementIssue(_ tb: TruthTbEntry, signers: TruthSignerRegistry?) -> String? {
+        guard let quorum = tb.quorum else { return "no quorum" }
+        if let person = quorum.first(where: { !TruthQuorum.isMemberAgent($0.author, signers: signers) }) {
+            let listed = signers.map { _ in "the signer registry doesn't list it as an agent" } ?? "its key doesn't start with \(TruthQuorum.agentPrefix)"
+            return "a quorum that isn't all agents (quorum member \(person.author): \(listed))"
+        }
+        if let angles = TruthQuorum.knownAnglesIssue(quorum) {
+            return "a quorum that rests on evidence this reader doesn't know as settling: \(angles)"
+        }
+        return nil
+    }
+
     // MARK: Line → entry
 
-    private static let tbKeys: Set<String> = ["id", "type", "ts", "author", "claim", "evidence", "signedBy", "literals", "status", "x-steno"]
+    private static let tbKeys: Set<String> = ["id", "type", "ts", "author", "claim", "evidence", "signedBy", "literals", "quorum", "status", "x-steno"]
     private static let uvKeys: Set<String> = ["id", "type", "ts", "author", "assertion", "basis", "verifyBy", "contests", "status", "x-steno"]
     private static let chainKeys: Set<String> = ["schemaVersion", "seq", "prevHash", "hash"]
 
@@ -457,6 +486,7 @@ public enum TruthWiki {
                 signedBy: string(o["signedBy"]),
                 status: status.map(TbStatus.init(rawValue:)),
                 literals: literals,
+                quorum: TruthQuorum.members(o["quorum"]),
                 xSteno: xSteno,
                 extra: extra,
                 source: source
@@ -548,6 +578,7 @@ public enum TruthWiki {
             } else {
                 body["literals"] = .null
             }
+            body["quorum"] = o["quorum"] ?? .null
         } else {
             body["assertion"] = o["assertion"] ?? .null
             body["basis"] = o["basis"] ?? .null
@@ -573,8 +604,10 @@ public enum TruthWiki {
     /// written back exactly as read (its status may have been folded from a
     /// later TRANSITION; the line's own never changes). An entry built in
     /// code is written in the version 1 shape, fields in stenographer's
-    /// order. A stream's TRANSITION, ADDENDUM and RULING lines are not
-    /// entries: to write a whole stream back, write `ParseResult.lines`.
+    /// order, without a `quorum` (a version 1 line carries none: agents
+    /// settle together only on v2 lines, which stenographer writes). A
+    /// stream's TRANSITION, ADDENDUM and RULING lines are not entries: to
+    /// write a whole stream back, write `ParseResult.lines`.
     public static func serialize(_ entries: [TruthLedgerEntry]) -> [String] {
         entries.map { $0.source?.text ?? handBuiltLine($0) }
     }

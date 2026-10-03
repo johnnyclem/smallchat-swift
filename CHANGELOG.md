@@ -308,6 +308,20 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   current truth. Version 1 TBs (no hash) are unverifiable unless
   `TruthReadOptions(admitV1Tbs: true)`. Version 1 lines must have a real `ts` and
   at least one piece of evidence, as Stenographer's import requires.
+- **Agents settle claims only together (truth format v2, "Agent quorum").** A
+  settlement by agents is valid only with a `quorum` of two or more agent sessions
+  agreeing from different angles within 15 minutes. `TruthFormat.decode` refuses a
+  line whose quorum breaks the spec's rules 1–6, a quorum on any line but a v2 TB or
+  ADDENDUM, and a version 1 line carrying one. A TB an agent signs is truth only with
+  a quorum whose members are all agents (with a signer registry, listed with role
+  `agent`; without one, an `agent:` key) and, read with every kind this version
+  doesn't know as question-class, cite settling evidence of two kinds; otherwise it
+  is inadmissible with the new reason `.agentWithoutQuorum` (`agent-without-quorum`),
+  so a `switch` over `TruthInadmissible.Reason` needs the case. `TruthTbEntry` carries
+  `quorum` (no longer among its `extra` fields).
+- **`consumptionRules` is Stenographer's new text:** an agent that can check an open
+  UV files its verdict and evidence with `resolve_uv`, which settles only when another
+  agent session agrees from a different angle within 15 minutes, or a person rules.
 - **`TruthWiki.serialize` writes lines back as read (XSUITE-09).** An entry read
   from a stream serializes to the exact line it came from (no `sortedKeys`
   rewrite, no status rewrite); an entry built in code is written in the version 1
@@ -432,6 +446,19 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   `signers.json`), `TruthReadOptions`, **`TruthEscaping.escapeUntrusted`**, and
   **`TruthProposalEnvelope`** (the suite PROPOSAL envelope, written byte for byte
   as the golden fixtures).
+- **The agent quorum and evidence classes in `SmallChatTruth`.**
+  `TruthQuorum` (`issues(in:)`, the line-local rules; `isAgent(_:signers:)`;
+  `windowMilliseconds` 900 000 and `minimumMembers` 2) and `TruthQuorumMember`.
+  `TruthEvidence.Kind` knows `chat` (a chat message or thread), `ticket` (an issue or
+  ticket) and `doc` (a document outside the truth ledger), and `TruthEvidenceClass`
+  classifies every kind: `Kind.settling` (`commit`, `file`, `test`,
+  `claimed-command`, `wiki`) are settling, every other kind, and any this version
+  doesn't know, question-class (`Kind.evidenceClass`, `Kind.isKnown`,
+  `TruthEvidence.isSettling`). A signer registry entry may carry `keys` (public keys
+  reserved for 1.x), which 1.0 reads past. `Tests/Fixtures/truth-format` carries the
+  spec's new fixtures: a UV verified and a TB minted by agent quorums in
+  `valid/ledger.jsonl`, agent settlements without a quorum in `valid/routing.jsonl`,
+  and a refused line for each quorum rule in `invalid/`.
 - **`NotaryClient.submitAndNotarize`** files a PROPOSAL envelope with Stenographer
   (`POST /proposals`, idempotent by envelope id) and notarizes it, returning the
   minted TB; `MessengerModel.authoredTombstones` keeps it in the ledger until a

@@ -18,7 +18,12 @@ import Foundation
 // Status, evidence kind and verifyBy kind are open strings: a newer writer
 // may send values this version doesn't know. They are kept as written,
 // never coerced to a known value, and an unknown or missing status is
-// never current truth (fail closed).
+// never current truth (fail closed). Every evidence kind has a class
+// (`TruthEvidenceClass`): settling evidence points at something a reader can
+// check; question evidence, and any kind this version doesn't know, can
+// prompt a check but isn't one. In 1.0 the classes bind agents only: an
+// agent settles a claim only in a quorum of sessions citing settling
+// evidence (`TruthQuorum`), while a person may sign on any evidence.
 
 // MARK: - Confidence & statuses
 
@@ -88,6 +93,17 @@ public struct UvStatus: RawRepresentable, Hashable, Sendable, Codable, Expressib
 
 // MARK: - Evidence & verification hints
 
+/// What an evidence kind can do (truth format v2, "Evidence classes").
+public enum TruthEvidenceClass: String, Sendable, Equatable {
+    /// Points at something a reader can check against the code or a ledger:
+    /// `commit`, `file`, `test`, `claimed-command`, `wiki`.
+    case settling
+    /// Reports what someone said or wrote down (`message`, `chat`, `ticket`,
+    /// `doc`, pre-1.0 `command`), or is a kind this version doesn't know: it
+    /// can prompt a check, but isn't one.
+    case question
+}
+
 /// A piece of evidence attached to a TB.
 public struct TruthEvidence: Sendable, Codable, Equatable {
     /// Open: a kind this version doesn't know is kept as written.
@@ -106,24 +122,48 @@ public struct TruthEvidence: Sendable, Codable, Equatable {
             try container.encode(rawValue)
         }
 
+        /// A commit, by its hash.
         public static let commit: Kind = "commit"
+        /// A file, usually with a line (`path:line`).
         public static let file: Kind = "file"
+        /// A test, by its name or path.
         public static let test: Kind = "test"
-        /// Command output the submitter says it saw. Stenographer records
-        /// it as `claimedCommand` (it did not run the command); `command`
-        /// appears only on entries recorded before 1.0.
+        /// Command output recorded before 1.0, which nobody re-ran: it can't
+        /// appear on a new write (stenographer records a submitted command as
+        /// `claimedCommand`) and is question-class.
         public static let command: Kind = "command"
+        /// A command line someone says they ran; `detail` holds the output
+        /// they say they saw. Stenographer didn't run it.
         public static let claimedCommand: Kind = "claimed-command"
+        /// The id of an entry in a truth ledger: this one or a teammate's. A
+        /// team wiki page is a `doc`.
         public static let wiki: Kind = "wiki"
+        /// A message in a conversation transcript, by its id.
         public static let message: Kind = "message"
+        /// A chat message or thread (Slack, Teams, Discord).
+        public static let chat: Kind = "chat"
+        /// An issue or ticket (Jira, Linear, GitHub issues).
+        public static let ticket: Kind = "ticket"
+        /// A document or page outside the truth ledger: a design doc, a team wiki page, a README.
+        public static let doc: Kind = "doc"
 
-        public static let known: [Kind] = [.commit, .file, .test, .command, .claimedCommand, .wiki, .message]
+        public static let known: [Kind] = [.commit, .file, .test, .command, .claimedCommand, .wiki, .message, .chat, .ticket, .doc]
+
+        /// The settling kinds; every other kind, known or not, is question-class.
+        public static let settling: [Kind] = [.commit, .file, .test, .claimedCommand, .wiki]
+
+        public var isKnown: Bool { Self.known.contains(self) }
+
+        /// This kind's class. A kind this version doesn't know is
+        /// question-class, whatever a newer writer meant by it: it fails closed.
+        public var evidenceClass: TruthEvidenceClass { Self.settling.contains(self) ? .settling : .question }
 
         public var description: String { rawValue }
     }
 
     public let kind: Kind
-    /// Commit sha, file/line, test name, command line, wiki entry id, or message id.
+    /// Commit sha, file/line, test name, command line, truth entry id,
+    /// message id, chat message or thread, ticket, or document.
     public let ref: String
     /// What the evidence shows (e.g. captured command output).
     public let detail: String?
@@ -133,6 +173,9 @@ public struct TruthEvidence: Sendable, Codable, Equatable {
         self.ref = ref
         self.detail = detail
     }
+
+    /// Whether this item is settling-class evidence (`Kind.evidenceClass`).
+    public var isSettling: Bool { kind.evidenceClass == .settling }
 }
 
 /// Machine-actionable verification hint carried by every UV.
@@ -274,6 +317,10 @@ public struct TruthInadmissible: Sendable, Equatable {
         case unsigned
         /// No hash to check (a version 1 TB), or an identity the signer registry doesn't list.
         case unverifiable
+        /// A TB an agent signed without a quorum of agents whose settling
+        /// evidence this reader knows: agents settle claims only together
+        /// (truth format v2, "Agent quorum").
+        case agentWithoutQuorum = "agent-without-quorum"
     }
 
     public let reason: Reason
@@ -298,6 +345,9 @@ public struct TruthTbEntry: Sendable, Equatable {
     public var status: TbStatus?
     /// Matchable dead literals (§12). Empty when the TB declares none.
     public let literals: [TruthTombstonedLiteral]
+    /// The agent sessions that settled it together, when agents signed it
+    /// (truth format v2, "Agent quorum"); nil when the line carries none.
+    public let quorum: [TruthQuorumMember]?
     /// Opaque stenographer namespace (`x-steno`).
     public let xSteno: JSONValue?
     /// Fields this version doesn't define, kept as written.
@@ -316,6 +366,7 @@ public struct TruthTbEntry: Sendable, Equatable {
         signedBy: String?,
         status: TbStatus?,
         literals: [TruthTombstonedLiteral] = [],
+        quorum: [TruthQuorumMember]? = nil,
         xSteno: JSONValue? = nil,
         extra: [String: JSONValue] = [:],
         source: TruthEntrySource? = nil,
@@ -329,6 +380,7 @@ public struct TruthTbEntry: Sendable, Equatable {
         self.signedBy = signedBy
         self.status = status
         self.literals = literals
+        self.quorum = quorum
         self.xSteno = xSteno
         self.extra = extra
         self.source = source
@@ -447,7 +499,7 @@ public let consumptionRules = """
 Consumption rules by confidence type:
 - Active TB: treat as ground truth. A reviewer may block on it; a code agent may rely on it.
 - Contested TB: ground truth with a visible asterisk — cite both the TB and the contesting UV.
-- Open UV: FLAG, DON'T BLOCK. A finding grounded only in a UV is phrased as a question or heads-up, never a demanded change. If your current task would settle the UV cheaply, do so via resolve_uv.
+- Open UV: FLAG, DON'T BLOCK. A finding grounded only in a UV is phrased as a question or heads-up, never a demanded change. If your current task can check the UV, file your verdict and evidence with resolve_uv: it settles only when another agent session agrees from a different angle (other evidence, another kind) within 15 minutes, or when a person rules.
 - Refuted UV / overridden TB: retrievable for history, excluded from current-truth by default, never citable as support for a claim.
 """
 
