@@ -237,7 +237,8 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   as in @smallchat/core), and an object whose member names differ in code points
   but are canonically equivalent (`"\u00e9"` and `"e\u0301"`) is a `-32700` parse
   error instead of being merged into one member. An integral `id` written `1.0`
-  is still the integer 1.
+  is still the integer 1. A string that starts with U+FEFF keeps it, as in
+  `JSON.parse` (SW-QUORUM-3).
 - **`AuditLog` requires a key and hashes every field (SC-SW-16).**
   `AuditLog(hmacKey:)` takes a non-empty key; `MCPServer` uses
   `MCPServerConfig.auditKey` or a random key. The chain now covers `clientId` and

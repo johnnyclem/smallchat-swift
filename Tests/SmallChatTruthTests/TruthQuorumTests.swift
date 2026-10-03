@@ -336,6 +336,27 @@ struct TruthQuorumTests {
         #expect(refusal(quorumTB(evidence: [item("commit", " c4fe0b1\u{2003}"), fileItem])) == nil)
         #expect(refusal(quorumTB(evidence: [item("commit", "C4FE0B1"), fileItem])) != nil)
     }
+
+    // MARK: Agreeing with stenographer's reading, code unit for code unit
+
+    @Test("SW-QUORUM-3: a leading U+FEFF belongs to its string: a session, a ref, and the line's hash")
+    func leadingByteOrderMark() throws {
+        // Rule 1: \u{FEFF}sess_b and sess_b are two sessions (U+FEFF is not White_Space)
+        let bom = member("agent:claude-code", "\u{FEFF}sess_b", "2026-09-01T10:13:00.000Z", [commitItem])
+        #expect(refusal(quorumTB(members: [bom, codexAt1014])) == nil)
+
+        // A line whose string starts with U+FEFF hashes with it, as every codec hashes it.
+        // The body is already in JCS form, so its hash is the SHA-256 of its own bytes.
+        let jcs = "{\"assertion\":\"\u{FEFF}searchV1 is gone\",\"author\":\"kim\",\"basis\":\"\u{FEFF}the release notes\",\"contests\":null,\"id\":\"UV-1\",\"prevHash\":null,\"schemaVersion\":2,\"seq\":1,\"status\":\"open\",\"ts\":\"2026-09-01T10:14:00.000Z\",\"type\":\"UV\",\"verifyBy\":{\"kind\":\"ask\",\"value\":\"ops\"}}"
+        let hash = sha256Hex(Array(jcs.utf8))
+        let text = String(jcs.dropLast()) + ",\"hash\":\"\(hash)\"}"
+        #expect(try TruthFormat.hash(line: text) == hash)
+        let decoded = try TruthFormat.decode(text)
+        #expect(decoded.version == 2)
+        let read = TruthWiki.parse(lines: [text])
+        #expect(read.errors.isEmpty)
+        #expect(TruthWiki.serialize(read.entries) == [text])
+    }
 }
 
 @Suite("Signer registry keys")

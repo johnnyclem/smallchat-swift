@@ -179,7 +179,13 @@ private struct JSONTextParser {
         var runStart = index
         func flushRun(_ end: Int, into scalars: inout String.UnicodeScalarView) throws {
             guard end > runStart else { return }
-            guard let run = String(bytes: bytes[runStart..<end], encoding: .utf8) else {
+            // Not Foundation's String(bytes:encoding:), which drops a leading
+            // U+FEFF: a string that starts with one keeps it, as in JSON.parse.
+            // Decoding repairs ill-formed bytes, so a run that doesn't come
+            // back byte for byte wasn't UTF-8.
+            let slice = bytes[runStart..<end]
+            let run = String(decoding: slice, as: UTF8.self)
+            guard run.utf8.elementsEqual(slice) else {
                 throw JSONParseError(offset: runStart, reason: "invalid UTF-8 in a string")
             }
             scalars.append(contentsOf: run.unicodeScalars)
