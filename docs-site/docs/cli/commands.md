@@ -96,7 +96,8 @@ Start a Claude Code channel server (stdio JSON-RPC).
 
 ```bash
 swift run smallchat channel --name <name> [--two-way] [--reply-tool <name>] [--permission-relay] \
-  [--instructions <text>] [--sender-allowlist <a,b>] [--http-bridge] [--http-bridge-host <host>] [--http-bridge-port <port>]
+  [--instructions <text>] [--sender-allowlist <a,b>] [--http-bridge] [--http-bridge-host <host>] [--http-bridge-port <port>] \
+  [--http-bridge-secret-identity <name>]
 ```
 
 This launches a stdio MCP channel server that Claude Code starts: it pushes injected
@@ -112,6 +113,7 @@ closes.
 | `--sender-allowlist` | Comma-separated senders whose events are accepted (default: everyone) |
 | `--http-bridge` | Serve `POST /event` and `GET /health`; needs the shared secret in `SMALLCHAT_CHANNEL_SECRET` |
 | `--http-bridge-host`, `--http-bridge-port` | Bridge address (default `127.0.0.1:3002`) |
+| `--http-bridge-secret-identity` | Who the bridge's events are from: the identity the shared secret authenticates, which `--sender-allowlist` judges (default `bridge`; a request body's `sender` is ignored) |
 
 See [Claude Code Integration](../guides/claude-code-integration).
 

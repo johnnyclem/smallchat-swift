@@ -14,9 +14,9 @@ import SmallChatCore
 //
 // `TruthFormat.decode` validates one line — the structure the schema
 // describes, plus what JSON Schema can't express: the hash, the identity
-// rules and the link rules — and throws `TruthLineError` when a reader must
-// refuse it. `TruthFormat.checkChain` checks that decoded lines form one
-// stream. Unknown fields and unknown values of status, kinds, link types,
+// rules, the link rules and the agent quorum rules (`TruthQuorum`) — and
+// throws `TruthLineError` when a reader must refuse it.
+// `TruthFormat.checkChain` checks that decoded lines form one stream. Unknown fields and unknown values of status, kinds, link types,
 // cause kinds and signal sources are kept, never refused and never coerced.
 // The line `type` and the required fields are closed. The reference codec
 // is stenographer's src/truth/wiki.ts.
@@ -239,6 +239,9 @@ public enum TruthFormat {
             try identity(o, "author")
         }
         try checkLinks(o, type, links)
+        // Agents settle only together: a quorum keeps rules 1–6, and appears only on a TB or an ADDENDUM
+        let quorumIssues = TruthQuorum.issues(in: o)
+        if !quorumIssues.isEmpty { throw fail("quorum", quorumIssues.joined(separator: "; ")) }
 
         let computed: String
         do {
@@ -287,6 +290,8 @@ public enum TruthFormat {
             try verifyBy(o, v1: true)
             if let contests = o["contests"], contests != .null { try requireId(o, "contests") }
         }
+        // 0.x wrote no quorum; an agent's settlement is a v2 line
+        if o["quorum"] != nil { throw TruthLineError("a v1 line carries no quorum: agents settle claims together only on v2 lines") }
         return DecodedTruthLine(version: 1, type: type, object: o, text: raw, seq: nil, prevHash: nil, hash: nil)
     }
 
@@ -360,6 +365,40 @@ public enum TruthFormat {
         guard f.hour <= 23, f.minute <= 59, f.second <= 59 else { return false }
         if let offset = f.offset, offset.hour > 23 || offset.minute > 59 { return false }
         return true
+    }
+
+    /// An RFC 3339 date-time as the agent quorum's rule 4 reads it:
+    /// milliseconds since the epoch, any fractional digits past the third
+    /// dropped (not rounded), the offset applied. Nil when `ts` isn't one
+    /// (`isRFC3339DateTime`).
+    static func epochMilliseconds(_ ts: String) -> Int64? {
+        guard isRFC3339DateTime(ts), let f = rfc3339Fields(ts) else { return nil }
+        // The fraction's first three digits, padded: ".5" is 500 ms, ".0009" is 0
+        let b = Array(ts.utf8)
+        var millisecond: Int64 = 0
+        if b.count > 19, b[19] == UInt8(ascii: ".") {
+            var scale: Int64 = 100
+            var i = 20
+            while i < b.count, scale > 0, (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(b[i]) {
+                millisecond += Int64(b[i] - UInt8(ascii: "0")) * scale
+                scale /= 10
+                i += 1
+            }
+        }
+        // Days since 1970-01-01 in the proleptic Gregorian calendar (H. Hinnant's days_from_civil)
+        let y = Int64(f.month <= 2 ? f.year - 1 : f.year)
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yearOfEra = y - era * 400
+        let dayOfYear = (153 * Int64((f.month + 9) % 12) + 2) / 5 + Int64(f.day) - 1
+        let dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear
+        let days = era * 146_097 + dayOfEra - 719_468
+        var offsetMinutes: Int64 = 0
+        if let offset = f.offset {
+            offsetMinutes = Int64(offset.hour * 60 + offset.minute)
+            if b.count > 6, b[b.count - 6] == UInt8(ascii: "-") { offsetMinutes = -offsetMinutes }
+        }
+        let seconds = days * 86_400 + Int64(f.hour * 3_600 + f.minute * 60 + f.second) - offsetMinutes * 60
+        return seconds * 1_000 + millisecond
     }
 
     private static func hasLeapSecond(_ ts: String) -> Bool {

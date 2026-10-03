@@ -439,6 +439,29 @@ with `X-Channel-Secret: $SMALLCHAT_CHANNEL_SECRET` or
 worked: use `smallchat channel --name <name>` (`--http-bridge-port` sets the bridge
 port).
 
+### The bridge's sender is the credential's identity
+
+A `POST /event` body no longer says who an event is from or which channel it is on:
+its `sender` and `channel` are ignored, and `meta` can't set `sender`, `source` or
+`user` (`reservedMetaKeys`; `filterMetaKeys` and `isValidMetaKey` drop them). Every
+event is from the identity the shared secret authenticates, on the configured
+channel, as in smallchat (TypeScript) 1.0:
+
+- `ChannelServerConfig(httpBridgeSecretIdentity:)` (CLI:
+  `--http-bridge-secret-identity <name>`) names that identity; it defaults to
+  `bridge`. The sender allowlist judges it, so a server with `--sender-allowlist`
+  must list it: `--http-bridge-secret-identity ci-bot --sender-allowlist ci-bot`.
+  A body that said `"sender": "ci-bot"` used to pass that gate; it no longer counts.
+- `ChannelBridgeProtocol.handle(...)` and `ChannelBridgeServer(...)` take
+  `secretIdentity:` (default `ChannelBridgeProtocol.defaultSecretIdentity`, `bridge`)
+  and stamp it, with `defaultChannel`, on every `ChannelInboundEvent`. The response
+  body adds `"sender"`.
+- `ChannelServer.injectEvent` stamps the event's `sender` as the notification's
+  `meta.sender`, and `serializeChannelTag(channel:content:meta:sender:)` renders it as
+  the tag's `sender` attribute (the adapter passes it).
+- The messenger's objection channel stamps `stenographer` on stenographer's channel,
+  whatever a post says.
+
 ### `ChannelServer.shutdown()` is async
 
 Add `await` where you call it outside the actor.
@@ -502,6 +525,39 @@ Tombstoned literals follow Stenographer's rule: without a `subject`, the dead va
 needs at least 4 UTF-16 code units and an ASCII letter (so `日本語版` now needs a
 subject), values are trimmed, and an explicit `"subject": null` is refused. Check
 drafts with `TombstoneDraft.problems()` or `TruthTombstonedLiteral.validationError()`.
+
+### Agents settle claims only together
+
+Truth format v2 lets agents settle a claim only as a quorum: two or more agent sessions
+agreeing from different angles (settling evidence of two kinds, no item shared) within
+15 minutes (spec: "Agent quorum"). `TruthFormat.decode` refuses a line whose `quorum`
+breaks those rules, or that carries one anywhere but a v2 TB or ADDENDUM
+(`TruthQuorum.issues(in:)` lists the broken rules). A TB an agent signs is truth only
+with a quorum whose members are all agents; otherwise `inadmissible?.reason` is the
+new `.agentWithoutQuorum` (`agent-without-quorum`). One that cites an evidence kind
+this version doesn't know, on its line or in any member of its quorum, or that carries
+a link type it doesn't know, is never truth, however well its quorum keeps the rules:
+`inadmissible?.reason` is the new `.unknownValue` (`unknown-value`, Stenographer's
+reason for it). An agent is an
+identity the signer registry lists with role `agent`, or, without a registry, one
+whose key starts with `agent:` (`TruthQuorum.isAgent(_:signers:)`). A person still
+signs alone, on evidence of any kind. A `switch` over `TruthInadmissible.Reason`
+needs both new cases.
+
+`TruthTbEntry` has `quorum: [TruthQuorumMember]?`, and its initializer takes
+`quorum:` (default `nil`). `quorum` is no longer one of the `extra` fields.
+
+`TruthEvidence.Kind` knows `chat`, `ticket` and `doc`, and every kind has a class:
+`kind.evidenceClass` is `.settling` for `commit`, `file`, `test`, `claimed-command`
+and `wiki` (`TruthEvidence.Kind.settling`), and `.question` for every other kind,
+including one this version doesn't know. The classes bind agents only: a person may
+sign on any evidence.
+
+`consumptionRules` (shipped verbatim from Stenographer) now tells an agent to file its
+verdict with `resolve_uv`, which settles only when another session agrees.
+
+A `signers.json` entry may carry `keys` (public keys, reserved for 1.x); 1.0 ignores
+them.
 
 ### Writing back
 

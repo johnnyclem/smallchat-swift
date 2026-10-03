@@ -35,7 +35,9 @@ swift run smallchat channel --name ci --two-way
 This starts a stdio JSON-RPC server for Claude Code to launch. It exits when Claude Code
 closes its stdin. Add `--http-bridge` (with the shared secret in
 `SMALLCHAT_CHANNEL_SECRET`) to accept events over HTTP at `POST /event`, and
-`--sender-allowlist a,b` to accept events only from those senders.
+`--sender-allowlist a,b` to accept events only from those senders. Bridge events are
+from the identity the secret authenticates (`--http-bridge-secret-identity`, default
+`bridge`), so an allowlist must name it.
 
 ### Programmatic
 
@@ -46,7 +48,8 @@ let config = ChannelServerConfig(
     channelName: "ci",
     twoWay: true,
     httpBridge: true,
-    httpBridgeSecret: secret
+    httpBridgeSecret: secret,
+    httpBridgeSecretIdentity: "ci-bot"
 )
 
 let server = ChannelServer(config: config)
@@ -101,6 +104,10 @@ curl -s http://127.0.0.1:3002/event \
   -d '{"content": "Build 1234 failed on main", "meta": {"run_id": "1234"}}'
 ```
 
+The event's sender is the identity the secret authenticates (`httpBridgeSecretIdentity`)
+and its channel the server's: a `sender` or `channel` in the body is ignored, and `meta`
+can't set `sender`, `source` or `user`.
+
 ## Sender Gate
 
 The `SenderGate` decides whose events are injected. With an allowlist
@@ -151,8 +158,10 @@ for await event in await server.events {
   `<channel>` tag or open a forged one. It can still contain instructions, so treat
   events like any other untrusted input to the model.
 - **Gate the senders.** Without an allowlist, any process that can call `injectEvent`
-  (or reach the HTTP bridge with the secret) can push events.
+  (or reach the HTTP bridge with the secret) can push events. A bridge event is from the
+  secret's identity, whatever its body says.
 - **The bridge secret is mandatory** and is compared in constant time. Use it only for
   the bridge: never reuse it as Stenographer's `STENOGRAPHER_NOTARY_SECRET`.
-- **Meta keys are filtered** to identifiers, and `__proto__`, `constructor` and
-  `prototype` are dropped.
+- **Meta keys are filtered** to identifiers, and `__proto__`, `constructor`,
+  `prototype`, `sender`, `source` and `user` are dropped; the server stamps `meta.sender`
+  itself.

@@ -130,7 +130,10 @@ public actor ChannelServer {
     /// Start the HTTP bridge when `httpBridge` is configured: `POST /event`
     /// injects an event as if `injectEvent(_:)` were called (403 when sender
     /// gating or the size limit rejects it), `GET /health` answers liveness.
-    /// The secret (`httpBridgeSecret`) is mandatory.
+    /// The secret (`httpBridgeSecret`) is mandatory. Every bridge event is
+    /// from the identity the secret authenticates (`httpBridgeSecretIdentity`,
+    /// "bridge" by default) on `channelName`: that identity is what the sender
+    /// gate judges, whatever the body's `sender` says.
     ///
     /// - Returns: The bound port, or nil when the bridge is not configured.
     @discardableResult
@@ -139,10 +142,15 @@ public actor ChannelServer {
         guard let secret = config.httpBridgeSecret, !secret.isEmpty else {
             throw ChannelBridgeError.missingSecret
         }
+        let identity = config.httpBridgeSecretIdentity ?? ChannelBridgeProtocol.defaultSecretIdentity
+        guard !identity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ChannelBridgeError.blankSecretIdentity
+        }
         let server = ChannelBridgeServer(
             host: config.httpBridgeHost,
             port: config.httpBridgePort,
             secret: secret,
+            secretIdentity: identity,
             defaultChannel: config.channelName
         ) { [weak self] event in
             guard let self else { return false }
@@ -238,14 +246,21 @@ public actor ChannelServer {
         // Ingest into adapter
         await adapter.ingest(cleanEvent)
 
-        // Emit MCP notification over stdio
+        // Emit MCP notification over stdio. meta.sender is stamped here with the
+        // event's sender (for bridge events, the identity of the credential that
+        // posted it), so Claude Code sees who posted, not who the body claims:
+        // filterMetaKeys dropped any sender, source or user the meta carried.
+        var notifiedMeta = cleanEvent.meta
+        if let sender = cleanEvent.sender, !sender.isEmpty {
+            notifiedMeta = (notifiedMeta ?? [:]).merging(["sender": sender]) { _, stamped in stamped }
+        }
         sendNotification(
             method: NotificationType.channel.rawValue,
             params: [
                 "channel": .string(cleanEvent.channel),
                 "content": .string(cleanEvent.content),
             ].merging(
-                metaToParams(cleanEvent.meta),
+                metaToParams(notifiedMeta),
                 uniquingKeysWith: { _, new in new }
             )
         )
@@ -478,8 +493,15 @@ public actor ChannelServer {
 /// Errors starting the channel's HTTP bridge.
 public enum ChannelBridgeError: Error, Sendable, CustomStringConvertible {
     case missingSecret
+    /// `httpBridgeSecretIdentity` is blank: every bridge event would be from no one.
+    case blankSecretIdentity
 
     public var description: String {
-        "The channel HTTP bridge needs a shared secret (httpBridgeSecret, or SMALLCHAT_CHANNEL_SECRET for the CLI)"
+        switch self {
+        case .missingSecret:
+            return "The channel HTTP bridge needs a shared secret (httpBridgeSecret, or SMALLCHAT_CHANNEL_SECRET for the CLI)"
+        case .blankSecretIdentity:
+            return "The channel HTTP bridge's secret identity (httpBridgeSecretIdentity, --http-bridge-secret-identity) can't be blank: it is who every bridge event is from"
+        }
     }
 }

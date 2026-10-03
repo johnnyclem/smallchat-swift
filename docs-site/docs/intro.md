@@ -75,7 +75,9 @@ and `CHANGELOG.md` lists every change.
 - **Linux and iOS.** CI builds and tests on macOS and Linux (Swift 6.1, 6.3, 6.4) and
   builds the libraries for iOS.
 - **`SmallChatTruth`** reads Stenographer's truth format v2 and fails closed on anything
-  it cannot verify.
+  it cannot verify. Agents settle claims only together: a TB an agent signs counts only
+  with a quorum of two or more agent sessions agreeing from different angles within
+  15 minutes.
 
 ## Parity with @smallchat/core
 

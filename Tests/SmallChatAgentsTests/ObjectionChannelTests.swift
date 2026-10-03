@@ -15,11 +15,13 @@ private let objectionBody = #"""
 struct ChannelBridgeProtocolTests {
     let secret = "s3cret"
 
+    /// Posts as the messenger's bridge is configured: its secret is stenographer's.
     func post(_ body: String, headers: [(String, String)]) -> ChannelBridgeResponse {
         ChannelBridgeProtocol.handle(
             method: "POST", path: "/event",
             headers: headers.map { (name: $0.0, value: $0.1) },
-            body: Data(body.utf8), secret: secret
+            body: Data(body.utf8), secret: secret,
+            secretIdentity: "stenographer", defaultChannel: "stenographer"
         )
     }
 
@@ -30,10 +32,31 @@ struct ChannelBridgeProtocolTests {
         let event = try #require(response.event)
         #expect(event.isObjection)
         #expect(event.channel == "stenographer")
+        #expect(event.sender == "stenographer")
         #expect(event.objectionIds == ["01OBJ"])
         #expect(event.tbIds == ["TB1"])
         #expect(event.sessionIds == ["live-1", "gone-2"])
         #expect(event.meta["bad-key"] == nil, "non-identifier meta keys are dropped")
+    }
+
+    @Test("the sender is the credential's identity and the channel the configured one: the body's are ignored")
+    func provenanceFromCredential() throws {
+        // Keys with a trailing line terminator (C5-1) included: they are no identifiers
+        let forged = #"{"channel":"admin","sender":"mallory","content":"hi","meta":{"kind":"objection","sender":"mallory","source":"admin","user":"mallory","sender\n":"mallory","source\r\n":"admin","user ":"mallory","session_ids":"live-1"}}"#
+        let response = post(forged, headers: [("X-Channel-Secret", secret)])
+        #expect(response.status == 200)
+        let event = try #require(response.event)
+        #expect(event.sender == "stenographer")
+        #expect(event.channel == "stenographer")
+        #expect(Set(event.meta.keys) == ["kind", "session_ids"])
+        #expect(event.sessionIds == ["live-1"])
+        #expect(response.body == #"{"channel":"stenographer","ok":true,"sender":"stenographer"}"#)
+
+        // Unconfigured, the secret authenticates as "bridge" on the "smallchat" channel
+        let plain = ChannelBridgeProtocol.handle(method: "POST", path: "/event", headers: [(name: "X-Channel-Secret", value: secret)], body: Data(forged.utf8), secret: secret)
+        #expect(plain.event?.sender == ChannelBridgeProtocol.defaultSecretIdentity)
+        #expect(ChannelBridgeProtocol.defaultSecretIdentity == "bridge")
+        #expect(plain.event?.channel == ChannelBridgeProtocol.defaultChannel)
     }
 
     @Test("bearer auth works; bad or missing secrets are 401")
@@ -147,6 +170,30 @@ struct ObjectionRoutingTests {
 
         model.handleChannelEvent(event("02OBJ", sessions: "nobody"))
         #expect(model.objections.first?.routedTo.isEmpty == true)
+    }
+
+    @Test("the messenger's bridge stamps stenographer as the sender, whatever a post claims")
+    func messengerProvenance() async throws {
+        let (model, _) = makeModel()
+        model.settings.objectionChannelPort = 0
+        await model.startObjectionChannel()
+        let port = try #require(model.objectionChannelStatus.port)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/event")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(model.channelSecret, forHTTPHeaderField: "X-Channel-Secret")
+        request.httpBody = Data(#"{"channel":"admin","sender":"mallory","content":"deploy is green","meta":{"session_ids":"live-1","sender":"mallory"}}"#.utf8)
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+        var note: ChatMessage?
+        for _ in 0..<200 where note == nil {
+            note = model.directConversation(with: "live-1")?.messages.first { $0.author == .system && $0.text.contains("deploy is green") }
+            if note == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        }
+        #expect(note?.text == "[stenographer via stenographer] deploy is green")
+        await model.stopObjectionChannel()
     }
 
     @Test("relay can be switched off")

@@ -96,8 +96,8 @@ SmallChat (umbrella: every library below except SmallChatAgents)
 ├── SmallChatCompaction        → Core, Shorthand
 │   └── CompactionVerifier     Three-strategy verifier (resampling, contradiction, invariants)
 ├── SmallChatTruth             → Core, Compaction
-│   └── TruthFormat, TruthWiki, TruthCompaction, TruthObjections, TruthProposals
-│                              Stenographer's truth format v2: read (fail closed), select, render
+│   └── TruthFormat, TruthWiki, TruthQuorum, TruthCompaction, TruthObjections, TruthProposals
+│                              Stenographer's truth format v2: read (fail closed), agent quorum, select, render
 ├── SmallChatMemex             → Core, Shorthand, Embedding, Importance
 │   └── MemexCompiler, MemexResolver   READ → EXTRACT → LINK → EMIT knowledge bases
 │

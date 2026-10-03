@@ -32,6 +32,9 @@ struct ChannelCommand: AsyncParsableCommand {
     @Option(help: "HTTP bridge host")
     var httpBridgeHost: String = "127.0.0.1"
 
+    @Option(help: "Sender identity of HTTP bridge requests that present the shared secret (what --sender-allowlist judges; a body's sender is ignored)")
+    var httpBridgeSecretIdentity: String = ChannelBridgeProtocol.defaultSecretIdentity
+
     @Option(help: "Comma-separated sender allowlist")
     var senderAllowlist: String?
 
@@ -68,6 +71,7 @@ struct ChannelCommand: AsyncParsableCommand {
             httpBridgePort: httpBridgePort,
             httpBridgeHost: httpBridgeHost,
             httpBridgeSecret: bridgeSecret,
+            httpBridgeSecretIdentity: httpBridgeSecretIdentity,
             senderAllowlist: parsedAllowlist
         )
 
@@ -79,7 +83,7 @@ struct ChannelCommand: AsyncParsableCommand {
             ("[channel] \(name) channel server started (stdio)\n" +
              "  Two-way: \(twoWay ? "yes" : "no")\n" +
              "  Permission relay: \(permissionRelay ? "yes" : "no")\n" +
-             "  HTTP bridge: \(bridgePort.map { "http://\(httpBridgeHost):\($0) (POST /event, GET /health)" } ?? "disabled")\n").utf8
+             "  HTTP bridge: \(bridgePort.map { "http://\(httpBridgeHost):\($0) (POST /event, GET /health; events are from \"\(httpBridgeSecretIdentity)\")" } ?? "disabled")\n").utf8
         ))
 
         // Forward outbound messages to stdout

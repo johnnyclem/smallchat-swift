@@ -15,8 +15,9 @@ import SmallChatCore
 // line is inserted into its ledger, filed as a reconciliation proposal, or
 // held). A reader does not import: the parts that apply to it are that
 // `inserted` lines are read with that status, that `proposal` lines never
-// become current truth (for the reasons a reader applies: unsigned,
-// unverifiable, an unknown status), and that `held` lines change no status.
+// become current truth (for the reasons a reader applies, compared by name:
+// unsigned, unverifiable, agent-without-quorum, unknown-value; or an unknown
+// status), and that `held` lines change no status.
 
 enum TruthFixtures {
     static let root: URL = URL(fileURLWithPath: #filePath)
@@ -166,14 +167,16 @@ struct TruthFormatConformanceTests {
         let entryLines = lines.filter { ["TB", "UV"].contains(F.string(F.object($0)["type"])) }
         #expect(TruthWiki.serialize(result.entries) == entryLines)
         #expect(result.lines.map(\.text) == lines)
-        #expect(result.head == TruthStreamHead(seq: 15, hash: F.string(F.object(lines[14])["hash"])!))
+        #expect(lines.count == 19)
+        #expect(result.head == TruthStreamHead(seq: 19, hash: F.string(F.object(lines[18])["hash"])!))
     }
 
     @Test("valid/ledger.jsonl: current truth, struck and overridden TBs never object, and the contest rides its TB until resolved")
     func ledgerSelection() throws {
         let result = TruthWiki.parse(try F.text("valid/ledger.jsonl"))
         let selection = TruthWiki.selectCurrentTruth(result.entries)
-        #expect(selection.groundTruth.map(\.id) == ["01M1E6JK84NECBQZ8GX9C7H1KA", "01M1E6JK8BVGAAP733SN0VCW9W"])
+        // The last is the TB two agent sessions' drafts minted by quorum
+        #expect(selection.groundTruth.map(\.id) == ["01M1E6JK84NECBQZ8GX9C7H1KA", "01M1E6JK8BVGAAP733SN0VCW9W", "01M1E6JK8KR7Z4VAZ1GM8KFSQT"])
         #expect(selection.contested.isEmpty)
         #expect(selection.unverified.map(\.id) == ["01M1E6JK81TR57BA191BG8Y0Q3"])
         let tombstones = result.entries.compactMap { entry -> TruthTbEntry? in
@@ -352,11 +355,15 @@ struct TruthFormatConformanceTests {
         }
     }
 
-    @Test("valid/routing.jsonl: without a signer registry, an identity that passes the identity rules is accepted")
+    @Test("valid/routing.jsonl: without a signer registry, an identity that passes the identity rules is accepted, and an agent is an `agent:` key")
     func routingWithoutRegistry() throws {
-        let mallory = try F.lines("valid/routing.jsonl")[1]
-        let result = TruthWiki.parse(lines: [mallory])
-        #expect(result.entries.map(TruthWiki.classify) == [.groundTruth])
+        let lines = try F.lines("valid/routing.jsonl")
+        let mallory = TruthWiki.parse(lines: [lines[1]])
+        #expect(mallory.entries.map(TruthWiki.classify) == [.groundTruth])
+        // A TB an agent signed alone is not truth without a registry either
+        let agentAlone = TruthWiki.parse(lines: [lines[5]])
+        #expect(F.string(F.object(lines[5])["signedBy"]) == "agent:claude-code")
+        #expect(agentAlone.entries.first?.inadmissible?.reason == .agentWithoutQuorum)
     }
 
     // MARK: v1/

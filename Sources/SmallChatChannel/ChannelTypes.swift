@@ -213,6 +213,10 @@ public struct ChannelServerConfig: Sendable, Codable, Equatable {
     public let httpBridgeHost: String
     /// Shared secret for HTTP bridge authentication.
     public let httpBridgeSecret: String?
+    /// Who a request presenting `httpBridgeSecret` is (default: "bridge"):
+    /// every bridge event is from this identity, and the sender allowlist
+    /// judges it. A request body can't set the sender.
+    public let httpBridgeSecretIdentity: String?
     /// Sender allowlist (identity strings).
     public let senderAllowlist: [String]?
     /// Path to sender allowlist file (one sender per line).
@@ -230,6 +234,7 @@ public struct ChannelServerConfig: Sendable, Codable, Equatable {
         httpBridgePort: Int = 3002,
         httpBridgeHost: String = "127.0.0.1",
         httpBridgeSecret: String? = nil,
+        httpBridgeSecretIdentity: String? = nil,
         senderAllowlist: [String]? = nil,
         senderAllowlistFile: String? = nil,
         maxPayloadSize: Int = 64 * 1024
@@ -243,6 +248,7 @@ public struct ChannelServerConfig: Sendable, Codable, Equatable {
         self.httpBridgePort = httpBridgePort
         self.httpBridgeHost = httpBridgeHost
         self.httpBridgeSecret = httpBridgeSecret
+        self.httpBridgeSecretIdentity = httpBridgeSecretIdentity
         self.senderAllowlist = senderAllowlist
         self.senderAllowlistFile = senderAllowlistFile
         self.maxPayloadSize = maxPayloadSize

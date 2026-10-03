@@ -8,13 +8,26 @@ import Foundation
 
 /// Valid meta key pattern: only letters, digits, and underscores.
 /// Matches Claude Code behavior -- invalid keys are silently dropped.
-private let metaKeyPattern = try! NSRegularExpression(pattern: "^[a-zA-Z0-9_]+$")
+/// Anchored with `\A` and `\z`: ICU's `$` also matches before a final line
+/// terminator, so `^...$` let `sender\n` through, which an XML reader takes
+/// for a second `sender` attribute (JavaScript's `$`, in the TS rule, doesn't).
+private let metaKeyPattern = try! NSRegularExpression(pattern: #"\A[a-zA-Z0-9_]+\z"#)
 
 /// Keys blocked to prevent prototype-pollution-style attacks.
 private let blockedKeys: Set<String> = ["__proto__", "constructor", "prototype"]
 
+/// Meta keys a sender may not set (the TS `RESERVED_META_KEYS`). `source` is
+/// the `<channel>` tag's provenance attribute (the channel name, from server
+/// config); a meta `source` would serialize as a second, forged
+/// `source="..."`. `sender` is the event's sender, stamped by the server
+/// (for bridge events, the identity of the credential that posted it; see
+/// `ChannelServer.injectEvent` and `serializeChannelTag`), and `user` is
+/// reserved so a body cannot present another identity next to it.
+public let reservedMetaKeys: Set<String> = ["source", "sender", "user"]
+
 /// Filter meta keys to only those containing letters, digits, and underscores.
-/// Invalid keys are silently dropped (matching Claude Code behavior).
+/// Invalid keys are silently dropped (matching Claude Code behavior), and so
+/// are the reserved tag attributes (`reservedMetaKeys`).
 /// Also prevents prototype pollution by rejecting __proto__, constructor, prototype.
 public func filterMetaKeys(_ meta: [String: String]?) -> [String: String]? {
     guard let meta, !meta.isEmpty else { return nil }
@@ -29,10 +42,10 @@ public func filterMetaKeys(_ meta: [String: String]?) -> [String: String]? {
     return filtered.isEmpty ? nil : filtered
 }
 
-/// Check if a single meta key is valid.
+/// Check if a single meta key is valid: identifier-only, and neither blocked nor reserved.
 public func isValidMetaKey(_ key: String) -> Bool {
     guard !key.isEmpty else { return false }
-    if blockedKeys.contains(key) { return false }
+    if blockedKeys.contains(key) || reservedMetaKeys.contains(key) { return false }
     let range = NSRange(key.startIndex..., in: key)
     return metaKeyPattern.firstMatch(in: key, range: range) != nil
 }
@@ -139,12 +152,16 @@ public func sanitizeUntrustedContent(_ content: String) -> String {
 
 /// Serialize a channel event into a `<channel>` XML tag for LLM prompt injection.
 /// This is the format Claude Code uses to present channel events in context.
+/// `sender` is the event's (server-determined) sender and becomes the
+/// `sender` attribute; meta never sets a reserved attribute (`reservedMetaKeys`).
 public func serializeChannelTag(
     channel: String,
     content: String,
-    meta: [String: String]? = nil
+    meta: [String: String]? = nil,
+    sender: String? = nil
 ) -> String {
     var attrs = ["source=\"\(escapeXmlAttr(channel))\""]
+    if let sender, !sender.isEmpty { attrs.append("sender=\"\(escapeXmlAttr(sender))\"") }
 
     if let meta {
         // Sort keys for deterministic output

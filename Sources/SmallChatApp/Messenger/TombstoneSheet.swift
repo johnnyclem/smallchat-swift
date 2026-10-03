@@ -134,7 +134,9 @@ struct TombstoneSheet: View {
         .onAppear(perform: load)
     }
 
-    private let evidenceKinds: [TruthEvidence.Kind] = [.commit, .file, .test, .claimedCommand, .wiki, .message]
+    /// The kinds a person may cite: every known kind but pre-1.0 `command`. A person may sign on
+    /// question-class evidence (`message`, `chat`, `ticket`, `doc`) too; only agents need settling evidence.
+    private let evidenceKinds: [TruthEvidence.Kind] = [.commit, .file, .test, .claimedCommand, .wiki, .message, .chat, .ticket, .doc]
 
     private var draft: TombstoneDraft {
         TombstoneDraft(

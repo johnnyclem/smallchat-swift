@@ -42,16 +42,67 @@ func ecmaScriptTrim(_ s: String) -> String {
     return String(scalars[first...last])
 }
 
+/// `s.toLowerCase()` as ECMAScript lowercases: each scalar's full lowercase
+/// mapping, and Final_Sigma, the one context Unicode's default mapping has.
+/// `String.lowercased()` maps every Σ to σ; at the end of a word (after a
+/// cased letter, and before none, case-ignorables skipped both ways, as ICU
+/// skips them) Σ is ς. So `ΟΔΥΣΣΕΥΣ` is `οδυσσευς`, as in stenographer.
+func ecmaScriptLowercased(_ s: String) -> String {
+    guard s.unicodeScalars.contains("\u{03A3}") else { return s.lowercased() }
+    let scalars = Array(s.unicodeScalars)
+    /// Whether the first scalar at `indices` that isn't case-ignorable is cased.
+    func reachesCased(_ indices: some Sequence<Int>) -> Bool {
+        for i in indices where !scalars[i].properties.isCaseIgnorable {
+            return scalars[i].properties.isCased
+        }
+        return false
+    }
+    var out = String.UnicodeScalarView()
+    for (i, scalar) in scalars.enumerated() {
+        if scalar == "\u{03A3}" {
+            let final = reachesCased(stride(from: i - 1, through: 0, by: -1)) && !reachesCased(i + 1 ..< scalars.count)
+            out.append(final ? "\u{03C2}" : "\u{03C3}")
+        } else {
+            out.append(contentsOf: scalar.properties.lowercaseMapping.unicodeScalars)
+        }
+    }
+    return String(out)
+}
+
+/// `s.startsWith(prefix)` as ECMAScript compares, code unit for code unit.
+/// `String.hasPrefix` compares Characters, so to it `agent:` followed by a
+/// combining mark (one Character with the `:`) doesn't start with `agent:`.
+func hasCodeUnitPrefix(_ s: String, _ prefix: String) -> Bool {
+    s.utf8.starts(with: prefix.utf8)
+}
+
 /// The comparison form of an identity: NFKC (full-width and ligature
 /// look-alikes fold), default-ignorable code points removed, trimmed,
-/// lowercased.
+/// lowercased (as ECMAScript lowercases, see `ecmaScriptLowercased`).
+/// Compare two keys byte for byte (`sameIdentity`), not with `==`.
+///
+/// Each step reads the platform's Unicode data: Foundation's NFKC (Unicode
+/// 15.x on Linux) and the Swift runtime's properties. Stenographer reads its
+/// runtime's ICU, so, as the spec's *Unicode version* note says, a character
+/// assigned or changed after Unicode 15.0 may key differently there.
 public func identityKey(_ identity: String) -> String {
     var scalars = String.UnicodeScalarView()
     for scalar in identity.precomposedStringWithCompatibilityMapping.unicodeScalars
     where !scalar.properties.isDefaultIgnorableCodePoint {
         scalars.append(scalar)
     }
-    return ecmaScriptTrim(String(scalars)).lowercased()
+    return ecmaScriptLowercased(ecmaScriptTrim(String(scalars)))
+}
+
+/// Whether two identities are one by key: their `identityKey`s compared
+/// byte for byte, as stenographer compares them (code unit for code unit).
+/// `String ==` compares canonical equivalence, and a key is not always in a
+/// normal form (removing default-ignorables after NFKC can leave marks out
+/// of order): `agent:a\u{0316}\u{034F}\u{0301}` keys to `agent:a` + U+0316
+/// U+0301 and `agent:\u{00E1}\u{0316}` to `agent:á` + U+0316, which `==`
+/// calls equal and stenographer calls two names.
+func sameIdentity(_ a: String, _ b: String) -> Bool {
+    identityKey(a).utf8.elementsEqual(identityKey(b).utf8)
 }
 
 /// An anonymous or generic identity (`system`, `Assistant`, `ａｉ`, …).
@@ -62,7 +113,7 @@ public func isAnonymousIdentity(_ identity: String) -> Bool {
 /// `migration` and `detector:*` belong to stenographer's internal write paths.
 public func isReservedIdentity(_ identity: String) -> Bool {
     let key = identityKey(identity)
-    return key == truthMigrationAuthor || key.hasPrefix(truthDetectorPrefix)
+    return key == truthMigrationAuthor || hasCodeUnitPrefix(key, truthDetectorPrefix)
 }
 
 /// Control characters (Unicode Cc: newlines, escapes) have no place in a name someone stands behind.
@@ -80,7 +131,7 @@ public func identityIssue(_ identity: String, allowDetector: Bool = false) -> St
         return "identities cannot contain control characters"
     }
     if isReservedIdentity(identity) {
-        if allowDetector, identityKey(identity).hasPrefix(truthDetectorPrefix) { return nil }
+        if allowDetector, hasCodeUnitPrefix(identityKey(identity), truthDetectorPrefix) { return nil }
         return "'\(truthMigrationAuthor)' and '\(truthDetectorPrefix)*' are reserved for the backfill and detector paths (got \"\(identity)\")"
     }
     return nil
@@ -117,13 +168,18 @@ public struct TruthSigner: Sendable, Equatable {
     }
 }
 
-/// The allowlist stenographer's import consults (`{"signers": [{id, role, aliases?}]}`):
+/// The allowlist stenographer's import consults (`{"signers": [{id, role, aliases?, keys?}]}`):
 /// names and roles, not credentials. With one, a TB is truth only when its
 /// author and signer are listed as a person or an agent, and a UV only when
-/// its author is; a TRANSITION by someone it doesn't list is held. Nothing
-/// here authenticates anyone.
+/// its author is; a TRANSITION by someone it doesn't list is held; and an
+/// agent, for the agent quorum, is an identity it lists with role `agent`.
+/// Nothing here authenticates anyone. An entry's `keys` (public keys,
+/// `[{alg, id, publicKey}]`) are reserved for key signing in 1.x: 1.0 reads
+/// past them, as it does any field it doesn't define.
 public struct TruthSignerRegistry: Sendable {
-    private var exact: [String: (id: String, role: TruthSigner.Role)] = [:]
+    /// By the key's UTF-8 bytes, as stenographer's Map compares keys: a
+    /// `String` key would match canonically equivalent keys (`sameIdentity`).
+    private var exact: [[UInt8]: (id: String, role: TruthSigner.Role)] = [:]
     /// Longest prefix first, so `agent:ci:*` can narrow `agent:*`.
     private var prefixes: [(prefix: String, role: TruthSigner.Role)] = []
 
@@ -134,13 +190,14 @@ public struct TruthSignerRegistry: Sendable {
             guard !id.isEmpty else {
                 throw TruthError.malformedLine(line: 0, reason: "signer registry: signers[\(i)].id must be a non-empty string")
             }
-            if id.hasSuffix("*") {
-                prefixes.append((identityKey(String(id.dropLast())), signer.role))
+            // By scalar, as `endsWith('*')`: a `*` after a prepended mark is one Character with it
+            if id.unicodeScalars.last == "*" {
+                prefixes.append((identityKey(String(id.unicodeScalars.dropLast())), signer.role))
                 continue
             }
             for name in [id] + signer.aliases {
-                let key = identityKey(name)
-                if let prior = exact[key], prior.id != id {
+                let key = Array(identityKey(name).utf8)
+                if let prior = exact[key], !prior.id.utf8.elementsEqual(id.utf8) {
                     throw TruthError.malformedLine(line: 0, reason: "signer registry: '\(name)' names both '\(prior.id)' and '\(id)'")
                 }
                 exact[key] = (id, signer.role)
@@ -173,8 +230,8 @@ public struct TruthSignerRegistry: Sendable {
     /// The listed signer `identity` resolves to (by identity key), or nil.
     public func lookup(_ identity: String) -> (id: String, role: TruthSigner.Role)? {
         let key = identityKey(identity)
-        if let listed = exact[key] { return listed }
-        if let match = prefixes.first(where: { key.hasPrefix($0.prefix) && key.utf16.count > $0.prefix.utf16.count }) {
+        if let listed = exact[Array(key.utf8)] { return listed }
+        if let match = prefixes.first(where: { hasCodeUnitPrefix(key, $0.prefix) && key.utf16.count > $0.prefix.utf16.count }) {
             return (identity, match.role)
         }
         return nil

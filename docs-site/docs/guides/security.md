@@ -132,7 +132,10 @@ Overload resolution additionally matches argument types to overload signatures
 The channel server (`SmallChatChannel`) gates *who can push events* into a Claude Code
 session: `SenderGate` admits only allowlisted senders (an empty allowlist admits
 everyone), with 6-hex-digit pairing codes compared in constant time, and the HTTP bridge
-requires a shared secret. With permission relay, the server receives Claude Code's
+requires a shared secret. A bridge event is from the identity the secret authenticates
+(`httpBridgeSecretIdentity`, `--http-bridge-secret-identity`, default `bridge`), never
+from a `sender` the request body names, so holding the secret doesn't let a poster pass
+the gate as someone else. With permission relay, the server receives Claude Code's
 permission requests and sends back the verdicts your code gives
 (`sendPermissionVerdict(_:)`); `smallchat channel` only logs them.
 
@@ -142,8 +145,10 @@ without asking anyone. Use the dispatch policy, intent pins and `serve --auth` f
 ## Metadata Filtering
 
 Before an event is pushed to Claude Code, `filterMetaKeys` drops `meta` keys that are not
-identifiers (letters, digits, `_`) and the keys `__proto__`, `constructor` and
-`prototype`; the values are passed on unchanged. Event content is XML-escaped inside the
+identifiers (letters, digits, `_`), the keys `__proto__`, `constructor` and
+`prototype`, and the reserved `sender`, `source` and `user` (`reservedMetaKeys`), so meta
+can't present another sender or a second `source`; the values are passed on unchanged.
+The server then stamps the event's own sender as `meta.sender`. Event content is XML-escaped inside the
 `<channel>` tag, so it cannot close the tag or open a forged one.
 
 ## Audit Logging

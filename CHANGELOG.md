@@ -237,7 +237,8 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   as in @smallchat/core), and an object whose member names differ in code points
   but are canonically equivalent (`"\u00e9"` and `"e\u0301"`) is a `-32700` parse
   error instead of being merged into one member. An integral `id` written `1.0`
-  is still the integer 1.
+  is still the integer 1. A string that starts with U+FEFF keeps it, as in
+  `JSON.parse` (SW-QUORUM-3).
 - **`AuditLog` requires a key and hashes every field (SC-SW-16).**
   `AuditLog(hmacKey:)` takes a non-empty key; `MCPServer` uses
   `MCPServerConfig.auditKey` or a random key. The chain now covers `clientId` and
@@ -283,6 +284,18 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
 - **`serializeChannelTag` XML-escapes `&`, `<` and `>` in the content (SC-SW-24).**
   Content containing those characters now renders as entities (`&lt;b&gt;`, not
   `<b>` or a blocklist-escaped tag).
+- **The bridge's sender is the credential's identity, not the body's.** `POST /event`
+  ignores the body's `sender` and `channel`: every event is from the identity the
+  shared secret authenticates on the configured channel, as in smallchat
+  (TypeScript) 1.0 (its SC-SURF-10 and SC-SURF-25).
+  `ChannelServerConfig.httpBridgeSecretIdentity` (`--http-bridge-secret-identity`,
+  default `bridge`) names it, and the sender allowlist judges it; `ChannelBridgeProtocol.handle` and `ChannelBridgeServer` take
+  `secretIdentity:` (`ChannelBridgeProtocol.defaultSecretIdentity`). `sender`,
+  `source` and `user` are reserved meta keys (`reservedMetaKeys`), which
+  `isValidMetaKey` and `filterMetaKeys` drop; `ChannelServer.injectEvent` stamps the
+  event's sender as the notification's `meta.sender`, and
+  `serializeChannelTag(channel:content:meta:sender:)` renders it as the tag's
+  `sender` attribute. The messenger's objection channel stamps `stenographer`.
 - **`ChannelServer.shutdown()` is `async`** (it also stops the HTTP bridge).
 - **`smallchat channel --http-bridge` requires `SMALLCHAT_CHANNEL_SECRET`**, and the
   channel server negotiates its protocol version (it always answered `2024-11-05`):
@@ -307,7 +320,37 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   entry is history too, and `TruthObjections.check` ignores every TB that isn't
   current truth. Version 1 TBs (no hash) are unverifiable unless
   `TruthReadOptions(admitV1Tbs: true)`. Version 1 lines must have a real `ts` and
-  at least one piece of evidence, as Stenographer's import requires.
+  at least one piece of evidence, as Stenographer's import requires. Two lines, or
+  two files, that give one id different content are a conflict (`.conflict`), not
+  truth: its fields compared as JCS, fields this version doesn't define included
+  (Stenographer's Importing rules 2 and 10), the chain fields (`schemaVersion`,
+  `seq`, `prevHash`, `hash`) and `x-steno` aside. Copies that differed only in an
+  unknown field were taken as one entry (SW-CONFLICT-1).
+- **Agents settle claims only together (truth format v2, "Agent quorum").** A
+  settlement by agents is valid only with a `quorum` of two or more agent sessions
+  agreeing from different angles within 15 minutes. `TruthFormat.decode` refuses a
+  line whose quorum breaks the spec's rules 1–6, a quorum on any line but a v2 TB or
+  ADDENDUM, and a version 1 line carrying one. A TB an agent signs is truth only with
+  a quorum whose members are all agents (with a signer registry, listed with role
+  `agent`; without one, an `agent:` key); otherwise it is inadmissible with the new
+  reason `.agentWithoutQuorum` (`agent-without-quorum`). One that cites an evidence
+  kind this version doesn't know, on its line or in any member of its quorum, is
+  inadmissible with the new reason `.unknownValue` (`unknown-value`), weighed first
+  and however well its quorum keeps the rules: the rules refuse no line over such a
+  kind, so nothing shows two settling angles, and Stenographer's import files such a
+  TB as `unknown-value` too (SW-QUORUM-4). Before, the reader read unknown kinds as
+  question-class and reported `agent-without-quorum`, and took a quorum whose known
+  kinds alone kept rule 3 as truth. A TB an agent signs that carries a link type this
+  version doesn't know in `x-steno.links` is `unknown-value` the same way: the quorum
+  rules read only the link types a reader knows, so a reader that admits truth fails
+  closed on such a line (spec: "Unknown values"), and Stenographer files it so; the
+  reader took it as truth (SW-QUORUM-6). A `switch` over `TruthInadmissible.Reason` needs
+  both cases. A person's TB may still cite any kind, and an ADDENDUM is a cause the
+  reader never applies by itself (only a `TRANSITION` moves a status).
+  `TruthTbEntry` carries `quorum` (no longer among its `extra` fields).
+- **`consumptionRules` is Stenographer's new text:** an agent that can check an open
+  UV files its verdict and evidence with `resolve_uv`, which settles only when another
+  agent session agrees from a different angle within 15 minutes, or a person rules.
 - **`TruthWiki.serialize` writes lines back as read (XSUITE-09).** An entry read
   from a stream serializes to the exact line it came from (no `sortedKeys`
   rewrite, no status rewrite); an entry built in code is written in the version 1
@@ -339,7 +382,19 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   invisible characters (`ａｓｓｉｓｔａｎｔ` is anonymous), and
   `assertAccountableAuthor` also refuses control characters and the reserved
   `migration` and `detector:*` (unless `allowDetector`). `TruthError.malformedLine`
-  with line 0 describes itself as just its reason.
+  with line 0 describes itself as just its reason. As in Stenographer, a key is
+  lowercased as ECMAScript's `toLowerCase` lowercases (a word-final `Σ` is `ς`; a
+  quorum's `commit` refs compare the same way), and the `agent:` and `detector:`
+  prefixes and a signer registry's `*` entries match code point for code point, so
+  `agent:` followed by a combining mark is an agent (SW-QUORUM-1, SW-QUORUM-2).
+  Two keys are one identity only when their bytes are equal, as Stenographer compares
+  code units: quorum rule 2 (the writer is a member and signs its TB),
+  `TombstoneDraft.proposal(author:)`'s drafter-is-not-the-notary check and the signer
+  registry's lookup no longer use `String ==`, which compares canonical equivalence.
+  A key needn't be in a normal form (`agent:a\u{0316}\u{034F}\u{0301}` keys to
+  `agent:a` + U+0316 U+0301, `agent:\u{00E1}\u{0316}` to `agent:á` + U+0316): rule 2
+  took such a pair as one writer, and a registry listing both names threw
+  (SW-QUORUM-5).
 
 #### Messenger (`SmallChatAgents`, `SmallChatUI`)
 
@@ -432,6 +487,28 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   `signers.json`), `TruthReadOptions`, **`TruthEscaping.escapeUntrusted`**, and
   **`TruthProposalEnvelope`** (the suite PROPOSAL envelope, written byte for byte
   as the golden fixtures).
+- **The agent quorum and evidence classes in `SmallChatTruth`.**
+  `TruthQuorum` (`issues(in:)`, the line-local rules; `isAgent(_:signers:)`;
+  `windowMilliseconds` 900 000 and `minimumMembers` 2) and `TruthQuorumMember`.
+  `TruthEvidence.Kind` knows `chat` (a chat message or thread), `ticket` (an issue or
+  ticket) and `doc` (a document outside the truth ledger), and `TruthEvidenceClass`
+  classifies every kind: `Kind.settling` (`commit`, `file`, `test`,
+  `claimed-command`, `wiki`) are settling, every other kind, and any this version
+  doesn't know, question-class (`Kind.evidenceClass`, `Kind.isKnown`,
+  `TruthEvidence.isSettling`). A signer registry entry may carry `keys` (public keys
+  reserved for 1.x), which 1.0 reads past. `Tests/Fixtures/truth-format` carries the
+  spec's new fixtures: a UV verified and a TB minted by agent quorums in
+  `valid/ledger.jsonl`; agent settlements without a quorum, agent quorums citing
+  an evidence kind this version doesn't know (`unknown-value`), a quorum TB whose
+  member carries `verdict` (on a TB member a field this version doesn't define, kept
+  and read past), quorum ADDENDUMs that keep rule 5 and carry a top-level `links`
+  (an `overrides` link, a `verifies` link beside `refuted` verdicts, a string),
+  which decode, since rule 5 reads `x-steno.links` only, and a quorum TB whose
+  `x-steno.links` carries a link type this version doesn't know (`unknown-value`)
+  in `valid/routing.jsonl`; and in `invalid/` a refused line for each quorum rule,
+  lines that hold only if `Σ` lowercases without Final_Sigma, rule 5 broken beside a
+  top-level `links` of `null` or `[]`, and a quorum ADDENDUM member whose `verdict`
+  is neither `verified` nor `refuted` (Stenographer `0848b44`).
 - **`NotaryClient.submitAndNotarize`** files a PROPOSAL envelope with Stenographer
   (`POST /proposals`, idempotent by envelope id) and notarizes it, returning the
   minted TB; `MessengerModel.authoredTombstones` keeps it in the ledger until a
@@ -753,6 +830,15 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
 - **Channel content can't forge a channel tag (SC-SW-24).** `serializeChannelTag`
   escaped only a blocklist of tag names, so event content could close `</channel>`
   and open a forged `<channel source="trusted-admin">`, as TypeScript fixed in #85.
+- **A bridge post can't choose who it is from** (TypeScript's SC-SURF-10 and
+  SC-SURF-25). The HTTP bridge took the event's sender from the request body, so
+  anyone holding the shared secret could post as any sender the allowlist admits,
+  and a meta `sender`, `source` or `user` could put a second, forged identity or
+  provenance attribute in the `<channel>` tag. The sender is now the identity of the
+  credential, the channel the configured one, and those meta keys are dropped.
+  A key followed by a line terminator (`source\n`, `sender\r\n`) is not an identifier
+  either (C5-1): ICU's `$` matched before a final line terminator, so since 0.2
+  `isValidMetaKey` passed such a key, which an XML reader takes for a second `source`.
 - **`ChannelBridgeProtocol.constantTimeEqual` compares full lengths (SC-SW-34).**
   It folded the length difference into 8 bits, so a secret followed by 256 NUL
   bytes matched.
@@ -833,6 +919,18 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   a remove at the same timestamp) keep whichever side the merge started from, and
   a remove at the timestamp of a set is ignored. Give each write a distinct
   timestamp per replica (a Lamport counter) until this is fixed.
+- **Identity keys depend on the reader's Unicode data** (truth format v2,
+  "Identities", *Unicode version*). SmallChatTruth computes identity keys and quorum
+  `commit` refs with the platform's: Foundation's NFKC, which on Linux is Unicode
+  15.x, and the Swift runtime's lowercase mappings and default-ignorable and case
+  properties (Unicode 17.0 in Swift 6.3 and 6.4; on Apple platforms, the OS's).
+  Stenographer and short-hand use their runtime's ICU (Unicode 16.0 on Node 22,
+  17.0 on Node 24). So a character assigned or changed after Unicode 15.0 may key
+  differently between readers: `agent:` followed by OUTLINED LATIN CAPITAL LETTERs
+  (U+1CCD6–U+1CCEF, new in 16.0) spelling `CODEX` is `agent:codex` to Stenographer
+  on Node 22 but not here, and outlined `AI` is anonymous there but not here.
+  Identities should not use characters newer than Unicode 15.0; key signatures
+  (planned for 1.x) remove this dependence.
 - `smallchat serve` lists the tools of providers launched over stdio, but calling
   them fails: `serve` reaches providers only at an HTTP endpoint.
 - The only built-in embedder is the hash embedder (`LocalEmbedder`). An artifact
