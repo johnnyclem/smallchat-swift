@@ -494,11 +494,12 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   `TruthEvidence.isSettling`). A signer registry entry may carry `keys` (public keys
   reserved for 1.x), which 1.0 reads past. `Tests/Fixtures/truth-format` carries the
   spec's new fixtures: a UV verified and a TB minted by agent quorums in
-  `valid/ledger.jsonl`, agent settlements without a quorum and agent quorums citing
-  an evidence kind this version doesn't know (`unknown-value`) in
-  `valid/routing.jsonl`, and in `invalid/` a refused line for each quorum rule and
-  lines that hold only if `Σ` lowercases without Final_Sigma (Stenographer
-  `6e3edbc`).
+  `valid/ledger.jsonl`; agent settlements without a quorum, agent quorums citing
+  an evidence kind this version doesn't know (`unknown-value`), and a quorum TB whose
+  member carries `verdict` (on a TB member a field this version doesn't define, kept
+  and read past) in `valid/routing.jsonl`; and in `invalid/` a refused line for each
+  quorum rule and lines that hold only if `Σ` lowercases without Final_Sigma
+  (Stenographer `bffa86b`).
 - **`NotaryClient.submitAndNotarize`** files a PROPOSAL envelope with Stenographer
   (`POST /proposals`, idempotent by envelope id) and notarizes it, returning the
   minted TB; `MessengerModel.authoredTombstones` keeps it in the ledger until a
