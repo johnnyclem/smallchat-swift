@@ -55,7 +55,11 @@ func start()
 When `httpBridge` is configured, serve `POST /event` (authenticated with
 `X-Channel-Secret` or `Authorization: Bearer`; `httpBridgeSecret` is required) and
 `GET /health`. Each event is injected as if `injectEvent(_:)` were called; a rejected
-event gets `403`. Returns the bound port, or nil when the bridge is not configured.
+event gets `403`. Every event is from the identity the secret authenticates
+(`httpBridgeSecretIdentity`, `"bridge"` by default) on `channelName`: that is the sender
+the gate judges, and a body's `sender` and `channel` are ignored. Returns the bound
+port, or nil when the bridge is not configured; throws `ChannelBridgeError` without a
+secret or with a blank identity.
 
 ```swift
 @discardableResult
@@ -210,6 +214,9 @@ let adapter = await server.getAdapter()
 ```
 
 Before an event is sent, the server drops `meta` keys that are not identifiers
-(letters, digits, `_`) or are `__proto__`, `constructor` or `prototype`, and refuses
-content over `maxPayloadSize`. `serializeChannelTag(channel:content:meta:)` renders a
-`<channel>` tag with its content XML-escaped.
+(letters, digits, `_`), are `__proto__`, `constructor` or `prototype`, or are reserved
+(`reservedMetaKeys`: `sender`, `source`, `user`), refuses content over
+`maxPayloadSize`, and stamps the event's `sender` as the notification's `meta.sender`.
+`serializeChannelTag(channel:content:meta:sender:)` renders a `<channel>` tag with one
+`source` (the channel), the `sender` attribute from its argument, and its content
+XML-escaped.

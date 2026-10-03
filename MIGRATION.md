@@ -439,6 +439,29 @@ with `X-Channel-Secret: $SMALLCHAT_CHANNEL_SECRET` or
 worked: use `smallchat channel --name <name>` (`--http-bridge-port` sets the bridge
 port).
 
+### The bridge's sender is the credential's identity
+
+A `POST /event` body no longer says who an event is from or which channel it is on:
+its `sender` and `channel` are ignored, and `meta` can't set `sender`, `source` or
+`user` (`reservedMetaKeys`; `filterMetaKeys` and `isValidMetaKey` drop them). Every
+event is from the identity the shared secret authenticates, on the configured
+channel, as in smallchat (TypeScript) 1.0:
+
+- `ChannelServerConfig(httpBridgeSecretIdentity:)` (CLI:
+  `--http-bridge-secret-identity <name>`) names that identity; it defaults to
+  `bridge`. The sender allowlist judges it, so a server with `--sender-allowlist`
+  must list it: `--http-bridge-secret-identity ci-bot --sender-allowlist ci-bot`.
+  A body that said `"sender": "ci-bot"` used to pass that gate; it no longer counts.
+- `ChannelBridgeProtocol.handle(...)` and `ChannelBridgeServer(...)` take
+  `secretIdentity:` (default `ChannelBridgeProtocol.defaultSecretIdentity`, `bridge`)
+  and stamp it, with `defaultChannel`, on every `ChannelInboundEvent`. The response
+  body adds `"sender"`.
+- `ChannelServer.injectEvent` stamps the event's `sender` as the notification's
+  `meta.sender`, and `serializeChannelTag(channel:content:meta:sender:)` renders it as
+  the tag's `sender` attribute (the adapter passes it).
+- The messenger's objection channel stamps `stenographer` on stenographer's channel,
+  whatever a post says.
+
 ### `ChannelServer.shutdown()` is async
 
 Add `await` where you call it outside the actor.

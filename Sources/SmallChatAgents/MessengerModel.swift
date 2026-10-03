@@ -686,9 +686,13 @@ public final class MessengerModel {
     public func startObjectionChannel() async {
         await stopObjectionChannel()
         guard settings.objectionChannelEnabled else { return }
+        // The channel secret is stenographer's: whoever presents it posts as
+        // stenographer on its channel, whatever the body says
         let server = ChannelBridgeServer(
             port: settings.objectionChannelPort,
-            secret: channelSecret
+            secret: channelSecret,
+            secretIdentity: "stenographer",
+            defaultChannel: "stenographer"
         ) { [weak self] event in
             Task { @MainActor in self?.handleChannelEvent(event) }
         }

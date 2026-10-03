@@ -8,10 +8,18 @@ import NIOPosix
 // An HTTP endpoint that speaks smallchat's channel-bridge contract (the TS
 // `ChannelServer` HTTP bridge):
 //
-//   POST /event   {channel, content, meta?, sender?, timestamp?}
+//   POST /event   {content, meta?, timestamp?}
 //                 authenticated by `X-Channel-Secret` (or `Authorization: Bearer`);
 //                 the secret is mandatory
 //   GET  /health  liveness, unauthenticated
+//
+// Provenance comes from the server, never from the body (the TS bridge's
+// rule, SC-SURF-10): every event is from the identity the secret
+// authenticates (`secretIdentity`, "bridge" unless configured) on the
+// configured channel (`defaultChannel`). A body's `sender` and `channel` are
+// ignored, and meta can't set `sender`, `source` or `user`
+// (`reservedMetaKeys`), so a poster can't present itself as someone the
+// sender gate admits, or forge the `<channel>` tag's provenance.
 //
 // Two users: `smallchat channel --http-bridge` injects each event into the
 // Claude Code channel (403 when sender gating or the size limit rejects it),
@@ -24,9 +32,14 @@ import NIOPosix
 
 /// One event posted to the bridge.
 public struct ChannelInboundEvent: Sendable, Equatable {
+    /// The bridge's configured channel (a body's `channel` is ignored).
     public let channel: String
     public let content: String
+    /// The posted meta, without keys a channel tag can't carry or a poster
+    /// may not set (`isValidMetaKey`).
     public let meta: [String: String]
+    /// Who posted it: the identity of the credential the request presented
+    /// (a body's `sender` is ignored). Nil only on an event built in code.
     public let sender: String?
     public let timestamp: String?
 
@@ -69,15 +82,20 @@ public enum ChannelBridgeProtocol {
     /// Objections are compact; anything bigger is rejected (TS: payload cap).
     public static let maxBodyBytes = 64 * 1024
     public static let defaultChannel = "smallchat"
+    /// Who a request presenting the shared secret is, unless configured (as the TS bridge's default).
+    public static let defaultSecretIdentity = "bridge"
 
     /// Pure request handling, so the contract is testable without sockets.
-    /// `defaultChannel` names events that carry no `channel`.
+    /// An accepted event is from `secretIdentity`, the identity the secret
+    /// authenticates, on `defaultChannel`: the body's `sender` and `channel`
+    /// are ignored.
     public static func handle(
         method: String,
         path: String,
         headers: [(name: String, value: String)],
         body: Data,
         secret: String,
+        secretIdentity: String = ChannelBridgeProtocol.defaultSecretIdentity,
         defaultChannel: String = ChannelBridgeProtocol.defaultChannel
     ) -> ChannelBridgeResponse {
         let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
@@ -111,19 +129,25 @@ public enum ChannelBridgeProtocol {
         }
         var meta: [String: String] = [:]
         for (key, value) in payload["meta"] as? [String: Any] ?? [:] {
-            // Channel meta keys are identifier-only (Claude Code drops others).
-            guard key.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }) else { continue }
+            // Channel meta keys are identifier-only (Claude Code drops others), and
+            // never one that names who sent the event or where it came from.
+            guard isValidMetaKey(key) else { continue }
             if let s = value as? String { meta[key] = s } else if let n = value as? NSNumber { meta[key] = n.stringValue }
         }
-        let channel = (payload["channel"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? defaultChannel
+        // Provenance comes from the server: the configured channel and the
+        // secret's identity. The body's "channel" and "sender" are ignored.
         let event = ChannelInboundEvent(
-            channel: channel,
+            channel: defaultChannel,
             content: content,
             meta: meta,
-            sender: payload["sender"] as? String,
+            sender: secretIdentity,
             timestamp: payload["timestamp"] as? String
         )
-        return ChannelBridgeResponse(status: 200, body: encode(["ok": true, "channel": channel]), event: event)
+        return ChannelBridgeResponse(
+            status: 200,
+            body: encode(["ok": true, "channel": defaultChannel, "sender": secretIdentity]),
+            event: event
+        )
     }
 
     /// A fresh random secret for the bridge (hex, 32 bytes of entropy).
@@ -163,31 +187,42 @@ public final class ChannelBridgeServer: @unchecked Sendable {
     public let port: Int
     public let host: String
     private let secret: String
+    private let secretIdentity: String
     private let defaultChannel: String
     private let accept: @Sendable (ChannelInboundEvent) async -> Bool
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     private var channel: Channel?
 
-    /// A bridge whose events are all accepted (answered `200`).
-    public convenience init(port: Int, secret: String, onEvent: @escaping @Sendable (ChannelInboundEvent) -> Void) {
-        self.init(port: port, secret: secret) { event in
+    /// A bridge whose events are all accepted (answered `200`). Each event is
+    /// from `secretIdentity` on `defaultChannel`, whatever its body says.
+    public convenience init(
+        port: Int,
+        secret: String,
+        secretIdentity: String = ChannelBridgeProtocol.defaultSecretIdentity,
+        defaultChannel: String = ChannelBridgeProtocol.defaultChannel,
+        onEvent: @escaping @Sendable (ChannelInboundEvent) -> Void
+    ) {
+        self.init(port: port, secret: secret, secretIdentity: secretIdentity, defaultChannel: defaultChannel) { event in
             onEvent(event)
             return true
         }
     }
 
     /// A bridge that answers `200` when `accept` takes the event and `403`
-    /// when it refuses it.
+    /// when it refuses it. Each event is from `secretIdentity` (the identity
+    /// the secret authenticates) on `defaultChannel`, whatever its body says.
     public init(
         host: String = "127.0.0.1",
         port: Int,
         secret: String,
+        secretIdentity: String = ChannelBridgeProtocol.defaultSecretIdentity,
         defaultChannel: String = ChannelBridgeProtocol.defaultChannel,
         accept: @escaping @Sendable (ChannelInboundEvent) async -> Bool
     ) {
         self.host = host
         self.port = port
         self.secret = secret
+        self.secretIdentity = secretIdentity
         self.defaultChannel = defaultChannel
         self.accept = accept
     }
@@ -196,6 +231,7 @@ public final class ChannelBridgeServer: @unchecked Sendable {
     @discardableResult
     public func start() async throws -> Int {
         let secret = self.secret
+        let secretIdentity = self.secretIdentity
         let defaultChannel = self.defaultChannel
         let accept = self.accept
         let bootstrap = ServerBootstrap(group: group)
@@ -205,7 +241,7 @@ public final class ChannelBridgeServer: @unchecked Sendable {
                 channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.configureHTTPServerPipeline()
                     try channel.pipeline.syncOperations.addHandler(
-                        BridgeHTTPHandler(secret: secret, defaultChannel: defaultChannel, accept: accept)
+                        BridgeHTTPHandler(secret: secret, secretIdentity: secretIdentity, defaultChannel: defaultChannel, accept: accept)
                     )
                 }
             }
@@ -226,14 +262,16 @@ private final class BridgeHTTPHandler: ChannelInboundHandler {
     typealias OutboundOut = HTTPServerResponsePart
 
     private let secret: String
+    private let secretIdentity: String
     private let defaultChannel: String
     private let accept: @Sendable (ChannelInboundEvent) async -> Bool
     private var head: HTTPRequestHead?
     private var body = Data()
     private var tooLarge = false
 
-    init(secret: String, defaultChannel: String, accept: @escaping @Sendable (ChannelInboundEvent) async -> Bool) {
+    init(secret: String, secretIdentity: String, defaultChannel: String, accept: @escaping @Sendable (ChannelInboundEvent) async -> Bool) {
         self.secret = secret
+        self.secretIdentity = secretIdentity
         self.defaultChannel = defaultChannel
         self.accept = accept
     }
@@ -263,6 +301,7 @@ private final class BridgeHTTPHandler: ChannelInboundHandler {
                     headers: head.headers.map { ($0.name, $0.value) },
                     body: body,
                     secret: secret,
+                    secretIdentity: secretIdentity,
                     defaultChannel: defaultChannel
                 )
             }

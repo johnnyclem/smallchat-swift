@@ -130,13 +130,13 @@ public actor ClaudeCodeChannelAdapter {
     /// Serialize all accumulated messages to `<channel>` XML tags for prompt generation.
     /// This is the format Claude Code uses to present channel events in LLM context.
     public func serializeForPrompt() -> String {
-        messages.map { serializeChannelTag(channel: $0.channel, content: $0.content, meta: $0.meta) }
+        messages.map { serializeChannelTag(channel: $0.channel, content: $0.content, meta: $0.meta, sender: $0.sender) }
             .joined(separator: "\n\n")
     }
 
     /// Serialize a single event to a `<channel>` tag.
     public func serializeEvent(_ event: ChannelEvent) -> String {
-        serializeChannelTag(channel: event.channel, content: event.content, meta: event.meta)
+        serializeChannelTag(channel: event.channel, content: event.content, meta: event.meta, sender: event.sender)
     }
 
     /// Build the notification params for emitting a channel event over MCP.

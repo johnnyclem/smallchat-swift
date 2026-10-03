@@ -283,6 +283,18 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
 - **`serializeChannelTag` XML-escapes `&`, `<` and `>` in the content (SC-SW-24).**
   Content containing those characters now renders as entities (`&lt;b&gt;`, not
   `<b>` or a blocklist-escaped tag).
+- **The bridge's sender is the credential's identity, not the body's.** `POST /event`
+  ignores the body's `sender` and `channel`: every event is from the identity the
+  shared secret authenticates on the configured channel, as in smallchat
+  (TypeScript) 1.0 (its SC-SURF-10 and SC-SURF-25).
+  `ChannelServerConfig.httpBridgeSecretIdentity` (`--http-bridge-secret-identity`,
+  default `bridge`) names it, and the sender allowlist judges it; `ChannelBridgeProtocol.handle` and `ChannelBridgeServer` take
+  `secretIdentity:` (`ChannelBridgeProtocol.defaultSecretIdentity`). `sender`,
+  `source` and `user` are reserved meta keys (`reservedMetaKeys`), which
+  `isValidMetaKey` and `filterMetaKeys` drop; `ChannelServer.injectEvent` stamps the
+  event's sender as the notification's `meta.sender`, and
+  `serializeChannelTag(channel:content:meta:sender:)` renders it as the tag's
+  `sender` attribute. The messenger's objection channel stamps `stenographer`.
 - **`ChannelServer.shutdown()` is `async`** (it also stops the HTTP bridge).
 - **`smallchat channel --http-bridge` requires `SMALLCHAT_CHANNEL_SECRET`**, and the
   channel server negotiates its protocol version (it always answered `2024-11-05`):
@@ -780,6 +792,12 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
 - **Channel content can't forge a channel tag (SC-SW-24).** `serializeChannelTag`
   escaped only a blocklist of tag names, so event content could close `</channel>`
   and open a forged `<channel source="trusted-admin">`, as TypeScript fixed in #85.
+- **A bridge post can't choose who it is from** (TypeScript's SC-SURF-10 and
+  SC-SURF-25). The HTTP bridge took the event's sender from the request body, so
+  anyone holding the shared secret could post as any sender the allowlist admits,
+  and a meta `sender`, `source` or `user` could put a second, forged identity or
+  provenance attribute in the `<channel>` tag. The sender is now the identity of the
+  credential, the channel the configured one, and those meta keys are dropped.
 - **`ChannelBridgeProtocol.constantTimeEqual` compares full lengths (SC-SW-34).**
   It folded the length difference into 8 bits, so a secret followed by 256 NUL
   bytes matched.
