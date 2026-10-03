@@ -411,14 +411,22 @@ public enum TruthWiki {
                 }
             }
             // Agents settle only together, from different angles: an agent's TB is truth only with a
-            // quorum of agents, and only when this reader knows every evidence kind it cites (it fails
-            // closed on one it doesn't, ahead of the quorum check, as stenographer's import does)
+            // quorum of agents, and only when this reader knows every evidence kind it cites and every
+            // link type it carries (it fails closed on one it doesn't, ahead of the quorum check, as
+            // stenographer's import does)
             if case .tb(let tb) = entry, let signer = tb.signedBy, TruthQuorum.isAgent(signer, signers: options.signers) {
                 if let unknown = unknownEvidenceKind(tb) {
                     return TruthInadmissible(
                         reason: .unknownValue,
                         detail: "TB \(tb.id) is signed by agent \(signer) and cites evidence kind '\(unknown.rawValue)', which this version "
                             + "doesn't know: it settles nothing for this reader, which can't tell that the quorum agrees from different angles"
+                    )
+                }
+                if let unknown = unknownLinkType(tb) {
+                    return TruthInadmissible(
+                        reason: .unknownValue,
+                        detail: "TB \(tb.id) is signed by agent \(signer) and carries link type '\(unknown)', which this version "
+                            + "doesn't know: an agent's settlement carrying a value this reader can't read settles nothing for it"
                     )
                 }
                 if let why = agentSettlementIssue(tb, signers: options.signers) {
@@ -449,6 +457,21 @@ public enum TruthWiki {
     private static func unknownEvidenceKind(_ tb: TruthTbEntry) -> TruthEvidence.Kind? {
         let items = tb.evidence + (tb.quorum ?? []).flatMap(\.evidence)
         return items.first { !$0.kind.isKnown }?.kind
+    }
+
+    /// The first link type this version doesn't know in an agent's TB's
+    /// `x-steno.links`, or nil. The codec doesn't judge such a link (it may be
+    /// a newer writer's), and the quorum rules read only the link types a
+    /// reader knows, so a quorum line carrying an unknown one is kept, and a
+    /// reader that admits truth fails closed on it (truth format v2, "Unknown
+    /// values"), as stenographer's import files it: `unknown-value`
+    /// (Importing rule 5), whatever its quorum.
+    private static func unknownLinkType(_ tb: TruthTbEntry) -> String? {
+        guard case .object(let xSteno)? = tb.xSteno, case .array(let links)? = xSteno["links"] else { return nil }
+        for case .object(let link) in links {
+            if case .string(let type)? = link["type"], !TruthFormat.linkTypes.contains(type) { return type }
+        }
+        return nil
     }
 
     /// Why an agent-signed TB doesn't settle for this reader for want of a

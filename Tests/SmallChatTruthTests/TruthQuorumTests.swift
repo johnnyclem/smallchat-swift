@@ -222,6 +222,47 @@ struct TruthQuorumTests {
         #expect(TruthWiki.parse(lines: [line(byKim)], options: TruthReadOptions(signers: signers)).entries.map(TruthWiki.classify) == [.groundTruth])
     }
 
+    @Test("SW-QUORUM-6: an agent's TB carrying a link type the reader doesn't know decodes, and is never truth (unknown-value)")
+    func unknownLinkTypeFailsClosed() throws {
+        // Case 148 of the three-way differential run, verbatim. The quorum rules read the link types a
+        // reader knows, so a quorum line carrying an unknown one is kept, and a reader that admits truth
+        // fails closed on it (spec: "Unknown values"): stenographer files it as unknown-value
+        let tb148 = #"{"schemaVersion":2,"seq":1,"id":"TBQ","type":"TB","ts":"2026-09-01T10:14:00.000Z","author":"agent:codex","claim":"searchV1 is gone; searchV2 replaced it.","evidence":[{"kind":"commit","ref":"c4fe0b1"},{"kind":"file","ref":"src/api/search.ts:1"}],"signedBy":"agent:codex","literals":[{"dead":"searchV1","current":"searchV2"}],"quorum":[{"author":"agent:claude-code","agentSessionId":"sess_a","ts":"2026-09-01T10:13:00.000Z","evidence":[{"kind":"commit","ref":"c4fe0b1"}]},{"author":"agent:codex","agentSessionId":"sess_b","ts":"2026-09-01T10:14:00.000Z","evidence":[{"kind":"file","ref":"src/api/search.ts:1"}]}],"status":"active","x-steno":{"origin":"local","provenance":{"kind":"manual"},"agentSessionId":null,"targetRef":null,"links":[{"fromId":"TBQ","toId":"TB-OLD","type":"corroborates"}]},"prevHash":null,"hash":"54d5e9586a8e05541d5141f3c326f7f7289bcbe7753816e35f4dfb7382f133b4"}"#
+        #expect(try TruthFormat.hash(line: tb148) == "54d5e9586a8e05541d5141f3c326f7f7289bcbe7753816e35f4dfb7382f133b4")
+        #expect(throws: Never.self) { try TruthFormat.decode(tb148) }
+        let signers = try TruthSignerRegistry(signers: [TruthSigner(id: "agent:*", role: .agent), TruthSigner(id: "kim", role: .human)])
+        for options in [TruthReadOptions(), TruthReadOptions(signers: signers)] {
+            let read = TruthWiki.parse(lines: [tb148], options: options)
+            #expect(read.errors.isEmpty)
+            #expect(read.entries.first?.inadmissible?.reason == .unknownValue)
+            #expect(read.entries.first?.inadmissible?.detail.contains("link type 'corroborates'") == true)
+            #expect(read.entries.map(TruthWiki.classify) == [.history])
+            // Kept as written all the same
+            #expect(TruthWiki.serialize(read.entries) == [tb148])
+        }
+
+        // Beside known links, and weighed ahead of the quorum check: an agent's TB without one is unknown-value too
+        let withSigns = quorumTB().replacingOccurrences(
+            of: #","status":"active"}"#,
+            with: #","status":"active","x-steno":{"links":[{"fromId":"TB-Q","toId":"PROP-1","type":"signs"},{"fromId":"TB-OLD","toId":"TB-Q","type":"corroborates"}]}}"#
+        )
+        #expect(refusal(withSigns) == nil)
+        #expect(TruthWiki.parse(lines: [line(withSigns)]).entries.first?.inadmissible?.reason == .unknownValue)
+        let alone = #"{"id":"TB-A","type":"TB","ts":"2026-09-01T10:14:00.000Z","author":"agent:codex","claim":"searchV1 is gone.","evidence":[\#(commitItem)],"signedBy":"agent:codex","literals":[{"dead":"searchV1"}],"status":"active","x-steno":{"links":[{"fromId":"TB-A","toId":"TB-OLD","type":"corroborates"}]}}"#
+        #expect(TruthWiki.parse(lines: [line(alone)]).entries.first?.inadmissible?.reason == .unknownValue)
+
+        // Known link types only: the same quorum TB is truth
+        let known = quorumTB().replacingOccurrences(
+            of: #","status":"active"}"#,
+            with: #","status":"active","x-steno":{"links":[{"fromId":"TB-Q","toId":"PROP-1","type":"signs"}]}}"#
+        )
+        #expect(TruthWiki.parse(lines: [line(known)], options: TruthReadOptions(signers: signers)).entries.map(TruthWiki.classify) == [.groundTruth])
+
+        // A person's TB is a person's act: a reader keeps its unknown link and reads its status, as for an unknown kind
+        let byKim = #"{"id":"TB-K","type":"TB","ts":"2026-09-01T10:14:00.000Z","author":"kim","claim":"searchV1 is gone.","evidence":[\#(commitItem)],"signedBy":"kim","literals":[{"dead":"searchV1"}],"status":"active","x-steno":{"links":[{"fromId":"TB-K","toId":"TB-OLD","type":"corroborates"}]}}"#
+        #expect(TruthWiki.parse(lines: [line(byKim)], options: TruthReadOptions(signers: signers)).entries.map(TruthWiki.classify) == [.groundTruth])
+    }
+
     @Test("an agent quorum's ADDENDUM citing an evidence kind the reader doesn't know decodes, and settles nothing by itself")
     func unknownKindAddendum() {
         // A reader never applies an ADDENDUM: it is a cause, kept in `lines`; only a TRANSITION moves a status

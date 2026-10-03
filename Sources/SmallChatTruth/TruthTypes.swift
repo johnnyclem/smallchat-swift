@@ -328,12 +328,13 @@ public struct TruthInadmissible: Sendable, Equatable {
         /// otherwise a person signs it (truth format v2, "Agent quorum").
         case agentWithoutQuorum = "agent-without-quorum"
         /// A TB an agent signed that cites an evidence kind this version
-        /// doesn't know, on its line or in its quorum. The quorum rules don't
-        /// refuse a line over such a kind (it may be a newer writer's settling
-        /// kind), so this reader can't tell that the members agree from
-        /// different angles, and fails closed, however well the quorum keeps
-        /// the rules otherwise (truth format v2, "Agent quorum", "Evidence
-        /// classes"). A person's TB may cite any kind.
+        /// doesn't know, on its line or in its quorum, or that carries a link
+        /// type it doesn't know in `x-steno.links`. The quorum rules don't
+        /// refuse a line over such a value (it may be a newer writer's: a
+        /// settling kind, say), so this reader can't tell that the members
+        /// agree from different angles, and fails closed, however well the
+        /// quorum keeps the rules otherwise (truth format v2, "Unknown values",
+        /// "Agent quorum", "Evidence classes"). A person's TB may cite any kind.
         case unknownValue = "unknown-value"
     }
 

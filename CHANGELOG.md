@@ -340,7 +340,11 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   kind, so nothing shows two settling angles, and Stenographer's import files such a
   TB as `unknown-value` too (SW-QUORUM-4). Before, the reader read unknown kinds as
   question-class and reported `agent-without-quorum`, and took a quorum whose known
-  kinds alone kept rule 3 as truth. A `switch` over `TruthInadmissible.Reason` needs
+  kinds alone kept rule 3 as truth. A TB an agent signs that carries a link type this
+  version doesn't know in `x-steno.links` is `unknown-value` the same way: the quorum
+  rules read only the link types a reader knows, so a reader that admits truth fails
+  closed on such a line (spec: "Unknown values"), and Stenographer files it so; the
+  reader took it as truth (SW-QUORUM-6). A `switch` over `TruthInadmissible.Reason` needs
   both cases. A person's TB may still cite any kind, and an ADDENDUM is a cause the
   reader never applies by itself (only a `TRANSITION` moves a status).
   `TruthTbEntry` carries `quorum` (no longer among its `extra` fields).
