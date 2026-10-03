@@ -308,19 +308,33 @@ public struct TruthEntrySource: Sendable, Equatable {
     public var transition: TruthTransition?
 }
 
-/// Why a reader will not take an entry as truth, whatever its status.
+/// Why a reader will not take an entry as truth, whatever its status. The
+/// reasons' raw values are stenographer's reconciliation reasons (its import
+/// files such lines as proposals for a person, and is stricter: it files any
+/// line with a value it doesn't know).
 public struct TruthInadmissible: Sendable, Equatable {
     public enum Reason: String, Sendable, Equatable {
-        /// Two lines (or two files) give the id different content.
+        /// Two lines (or two files) give the id different content: its
+        /// fields compared as JCS, unknown fields included, the chain fields
+        /// (`schemaVersion`, `seq`, `prevHash`, `hash`) and `x-steno` aside.
         case conflict
         /// A TB without a signer (a backfilled TB): never truth on its own.
         case unsigned
         /// No hash to check (a version 1 TB), or an identity the signer registry doesn't list.
         case unverifiable
-        /// A TB an agent signed without a quorum of agents whose settling
-        /// evidence this reader knows: agents settle claims only together
-        /// (truth format v2, "Agent quorum").
+        /// A TB an agent signed without a quorum whose members are all
+        /// agents: agents settle claims only together, as two or more agent
+        /// sessions agreeing from different angles within 15 minutes;
+        /// otherwise a person signs it (truth format v2, "Agent quorum").
         case agentWithoutQuorum = "agent-without-quorum"
+        /// A TB an agent signed that cites an evidence kind this version
+        /// doesn't know, on its line or in its quorum. The quorum rules don't
+        /// refuse a line over such a kind (it may be a newer writer's settling
+        /// kind), so this reader can't tell that the members agree from
+        /// different angles, and fails closed, however well the quorum keeps
+        /// the rules otherwise (truth format v2, "Agent quorum", "Evidence
+        /// classes"). A person's TB may cite any kind.
+        case unknownValue = "unknown-value"
     }
 
     public let reason: Reason

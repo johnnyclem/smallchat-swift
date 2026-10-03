@@ -15,8 +15,9 @@ import SmallChatCore
 // line is inserted into its ledger, filed as a reconciliation proposal, or
 // held). A reader does not import: the parts that apply to it are that
 // `inserted` lines are read with that status, that `proposal` lines never
-// become current truth (for the reasons a reader applies: unsigned,
-// unverifiable, an unknown status), and that `held` lines change no status.
+// become current truth (for the reasons a reader applies, compared by name:
+// unsigned, unverifiable, agent-without-quorum, unknown-value; or an unknown
+// status), and that `held` lines change no status.
 
 enum TruthFixtures {
     static let root: URL = URL(fileURLWithPath: #filePath)

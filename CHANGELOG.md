@@ -320,18 +320,30 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   entry is history too, and `TruthObjections.check` ignores every TB that isn't
   current truth. Version 1 TBs (no hash) are unverifiable unless
   `TruthReadOptions(admitV1Tbs: true)`. Version 1 lines must have a real `ts` and
-  at least one piece of evidence, as Stenographer's import requires.
+  at least one piece of evidence, as Stenographer's import requires. Two lines, or
+  two files, that give one id different content are a conflict (`.conflict`), not
+  truth: its fields compared as JCS, fields this version doesn't define included
+  (Stenographer's Importing rules 2 and 10), the chain fields (`schemaVersion`,
+  `seq`, `prevHash`, `hash`) and `x-steno` aside. Copies that differed only in an
+  unknown field were taken as one entry (SW-CONFLICT-1).
 - **Agents settle claims only together (truth format v2, "Agent quorum").** A
   settlement by agents is valid only with a `quorum` of two or more agent sessions
   agreeing from different angles within 15 minutes. `TruthFormat.decode` refuses a
   line whose quorum breaks the spec's rules 1–6, a quorum on any line but a v2 TB or
   ADDENDUM, and a version 1 line carrying one. A TB an agent signs is truth only with
   a quorum whose members are all agents (with a signer registry, listed with role
-  `agent`; without one, an `agent:` key) and, read with every kind this version
-  doesn't know as question-class, cite settling evidence of two kinds; otherwise it
-  is inadmissible with the new reason `.agentWithoutQuorum` (`agent-without-quorum`),
-  so a `switch` over `TruthInadmissible.Reason` needs the case. `TruthTbEntry` carries
-  `quorum` (no longer among its `extra` fields).
+  `agent`; without one, an `agent:` key); otherwise it is inadmissible with the new
+  reason `.agentWithoutQuorum` (`agent-without-quorum`). One that cites an evidence
+  kind this version doesn't know, on its line or in any member of its quorum, is
+  inadmissible with the new reason `.unknownValue` (`unknown-value`), weighed first
+  and however well its quorum keeps the rules: the rules refuse no line over such a
+  kind, so nothing shows two settling angles, and Stenographer's import files such a
+  TB as `unknown-value` too (SW-QUORUM-4). Before, the reader read unknown kinds as
+  question-class and reported `agent-without-quorum`, and took a quorum whose known
+  kinds alone kept rule 3 as truth. A `switch` over `TruthInadmissible.Reason` needs
+  both cases. A person's TB may still cite any kind, and an ADDENDUM is a cause the
+  reader never applies by itself (only a `TRANSITION` moves a status).
+  `TruthTbEntry` carries `quorum` (no longer among its `extra` fields).
 - **`consumptionRules` is Stenographer's new text:** an agent that can check an open
   UV files its verdict and evidence with `resolve_uv`, which settles only when another
   agent session agrees from a different angle within 15 minutes, or a person rules.
@@ -371,6 +383,14 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   quorum's `commit` refs compare the same way), and the `agent:` and `detector:`
   prefixes and a signer registry's `*` entries match code point for code point, so
   `agent:` followed by a combining mark is an agent (SW-QUORUM-1, SW-QUORUM-2).
+  Two keys are one identity only when their bytes are equal, as Stenographer compares
+  code units: quorum rule 2 (the writer is a member and signs its TB),
+  `TombstoneDraft.proposal(author:)`'s drafter-is-not-the-notary check and the signer
+  registry's lookup no longer use `String ==`, which compares canonical equivalence.
+  A key needn't be in a normal form (`agent:a\u{0316}\u{034F}\u{0301}` keys to
+  `agent:a` + U+0316 U+0301, `agent:\u{00E1}\u{0316}` to `agent:á` + U+0316): rule 2
+  took such a pair as one writer, and a registry listing both names threw
+  (SW-QUORUM-5).
 
 #### Messenger (`SmallChatAgents`, `SmallChatUI`)
 
@@ -474,8 +494,11 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   `TruthEvidence.isSettling`). A signer registry entry may carry `keys` (public keys
   reserved for 1.x), which 1.0 reads past. `Tests/Fixtures/truth-format` carries the
   spec's new fixtures: a UV verified and a TB minted by agent quorums in
-  `valid/ledger.jsonl`, agent settlements without a quorum in `valid/routing.jsonl`,
-  and a refused line for each quorum rule in `invalid/`.
+  `valid/ledger.jsonl`, agent settlements without a quorum and agent quorums citing
+  an evidence kind this version doesn't know (`unknown-value`) in
+  `valid/routing.jsonl`, and in `invalid/` a refused line for each quorum rule and
+  lines that hold only if `Σ` lowercases without Final_Sigma (Stenographer
+  `6e3edbc`).
 - **`NotaryClient.submitAndNotarize`** files a PROPOSAL envelope with Stenographer
   (`POST /proposals`, idempotent by envelope id) and notarizes it, returning the
   minted TB; `MessengerModel.authoredTombstones` keeps it in the ledger until a

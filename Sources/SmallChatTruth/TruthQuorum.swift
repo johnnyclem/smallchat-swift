@@ -12,7 +12,8 @@ import SmallChatCore
 // A reader refuses a line whose quorum breaks the rules (spec numbering):
 //   1. Two or more members, from distinct agent sessions (compared trimmed
 //      of White_Space), each an accountable identity.
-//   2. The writer is a member (by key), and a TB is signed by its writer.
+//   2. The writer is a member (by key, byte for byte), and a TB is signed
+//      by its writer.
 //   3. From different angles: every member cites settling evidence, no item
 //      appears in two members (refs compared normalized for their kind), and
 //      the settling evidence spans two kinds or more. A kind this version
@@ -139,12 +140,12 @@ public enum TruthQuorum {
 
         // Rule 2: the writer is a member; a TB is signed by its writer
         let author = string(line["author"]) ?? ""
-        if !members.contains(where: { identityKey($0.author) == identityKey(author) }) {
+        if !members.contains(where: { sameIdentity($0.author, author) }) {
             issues.append("the line's author \(author) is not a quorum member: the agent whose attestation completed the quorum writes it (rule 2)")
         }
         if type == "TB" {
             let signedBy = string(line["signedBy"])
-            if signedBy.map({ identityKey($0) != identityKey(author) }) ?? true {
+            if signedBy.map({ !sameIdentity($0, author) }) ?? true {
                 issues.append("a quorum TB is signed by its author (rule 2): signedBy \(signedBy ?? "null") is not \(author)")
             }
         }
@@ -235,25 +236,6 @@ public enum TruthQuorum {
             issues.append("the line's evidence holds \(describe(e)), which no quorum member cites (rule 6)")
         }
         return issues
-    }
-
-    /// Why a quorum's members don't settle a claim for this reader, when
-    /// rule 3 holds only by a kind it doesn't know: read as question-class
-    /// (fail closed), every member must still cite settling evidence and the
-    /// members two settling kinds. Nil when they do.
-    static func knownAnglesIssue(_ members: [TruthQuorumMember]) -> String? {
-        let unknown = members.flatMap { $0.evidence.map(\.kind) }.filter { !$0.isKnown }.map(\.rawValue)
-        var seen: [String] = []
-        for kind in unknown where !seen.contains(kind) { seen.append(kind) }
-        let note = seen.isEmpty ? "" : " (\(seen.map { "'\($0)'" }.joined(separator: ", ")) is evidence this reader doesn't know, which settles nothing)"
-        var kinds: [String] = []
-        for (i, m) in members.enumerated() {
-            let settling = m.evidence.filter(\.isSettling)
-            if settling.isEmpty { return "quorum member \(i + 1) cites no settling evidence this reader knows\(note)" }
-            for e in settling where !kinds.contains(e.kind.rawValue) { kinds.append(e.kind.rawValue) }
-        }
-        if kinds.count < 2 { return "its members' settling evidence spans one kind this reader knows (\(kinds.joined()))\(note)" }
-        return nil
     }
 
     // MARK: Comparing evidence

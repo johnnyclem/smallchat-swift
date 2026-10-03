@@ -79,6 +79,7 @@ func hasCodeUnitPrefix(_ s: String, _ prefix: String) -> Bool {
 /// The comparison form of an identity: NFKC (full-width and ligature
 /// look-alikes fold), default-ignorable code points removed, trimmed,
 /// lowercased (as ECMAScript lowercases, see `ecmaScriptLowercased`).
+/// Compare two keys byte for byte (`sameIdentity`), not with `==`.
 public func identityKey(_ identity: String) -> String {
     var scalars = String.UnicodeScalarView()
     for scalar in identity.precomposedStringWithCompatibilityMapping.unicodeScalars
@@ -86,6 +87,17 @@ public func identityKey(_ identity: String) -> String {
         scalars.append(scalar)
     }
     return ecmaScriptLowercased(ecmaScriptTrim(String(scalars)))
+}
+
+/// Whether two identities are one by key: their `identityKey`s compared
+/// byte for byte, as stenographer compares them (code unit for code unit).
+/// `String ==` compares canonical equivalence, and a key is not always in a
+/// normal form (removing default-ignorables after NFKC can leave marks out
+/// of order): `agent:a\u{0316}\u{034F}\u{0301}` keys to `agent:a` + U+0316
+/// U+0301 and `agent:\u{00E1}\u{0316}` to `agent:á` + U+0316, which `==`
+/// calls equal and stenographer calls two names.
+func sameIdentity(_ a: String, _ b: String) -> Bool {
+    identityKey(a).utf8.elementsEqual(identityKey(b).utf8)
 }
 
 /// An anonymous or generic identity (`system`, `Assistant`, `ａｉ`, …).
@@ -160,7 +172,9 @@ public struct TruthSigner: Sendable, Equatable {
 /// `[{alg, id, publicKey}]`) are reserved for key signing in 1.x: 1.0 reads
 /// past them, as it does any field it doesn't define.
 public struct TruthSignerRegistry: Sendable {
-    private var exact: [String: (id: String, role: TruthSigner.Role)] = [:]
+    /// By the key's UTF-8 bytes, as stenographer's Map compares keys: a
+    /// `String` key would match canonically equivalent keys (`sameIdentity`).
+    private var exact: [[UInt8]: (id: String, role: TruthSigner.Role)] = [:]
     /// Longest prefix first, so `agent:ci:*` can narrow `agent:*`.
     private var prefixes: [(prefix: String, role: TruthSigner.Role)] = []
 
@@ -177,8 +191,8 @@ public struct TruthSignerRegistry: Sendable {
                 continue
             }
             for name in [id] + signer.aliases {
-                let key = identityKey(name)
-                if let prior = exact[key], prior.id != id {
+                let key = Array(identityKey(name).utf8)
+                if let prior = exact[key], !prior.id.utf8.elementsEqual(id.utf8) {
                     throw TruthError.malformedLine(line: 0, reason: "signer registry: '\(name)' names both '\(prior.id)' and '\(id)'")
                 }
                 exact[key] = (id, signer.role)
@@ -211,7 +225,7 @@ public struct TruthSignerRegistry: Sendable {
     /// The listed signer `identity` resolves to (by identity key), or nil.
     public func lookup(_ identity: String) -> (id: String, role: TruthSigner.Role)? {
         let key = identityKey(identity)
-        if let listed = exact[key] { return listed }
+        if let listed = exact[Array(key.utf8)] { return listed }
         if let match = prefixes.first(where: { hasCodeUnitPrefix(key, $0.prefix) && key.utf16.count > $0.prefix.utf16.count }) {
             return (identity, match.role)
         }

@@ -533,12 +533,15 @@ agreeing from different angles (settling evidence of two kinds, no item shared) 
 15 minutes (spec: "Agent quorum"). `TruthFormat.decode` refuses a line whose `quorum`
 breaks those rules, or that carries one anywhere but a v2 TB or ADDENDUM
 (`TruthQuorum.issues(in:)` lists the broken rules). A TB an agent signs is truth only
-with a quorum whose members are all agents and cite settling evidence this version
-knows; otherwise `inadmissible?.reason` is the new `.agentWithoutQuorum`
-(`agent-without-quorum`). An agent is an identity the signer registry lists with role
-`agent`, or, without a registry, one whose key starts with `agent:`
-(`TruthQuorum.isAgent(_:signers:)`). A person still signs alone. A `switch` over
-`TruthInadmissible.Reason` needs the new case.
+with a quorum whose members are all agents; otherwise `inadmissible?.reason` is the
+new `.agentWithoutQuorum` (`agent-without-quorum`). One that cites an evidence kind
+this version doesn't know, on its line or in any member of its quorum, is never
+truth, however well its quorum keeps the rules: `inadmissible?.reason` is the new
+`.unknownValue` (`unknown-value`, Stenographer's reason for it). An agent is an
+identity the signer registry lists with role `agent`, or, without a registry, one
+whose key starts with `agent:` (`TruthQuorum.isAgent(_:signers:)`). A person still
+signs alone, on evidence of any kind. A `switch` over `TruthInadmissible.Reason`
+needs both new cases.
 
 `TruthTbEntry` has `quorum: [TruthQuorumMember]?`, and its initializer takes
 `quorum:` (default `nil`). `quorum` is no longer one of the `extra` fields.

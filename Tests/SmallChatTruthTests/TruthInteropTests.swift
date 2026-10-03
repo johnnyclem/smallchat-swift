@@ -215,6 +215,40 @@ struct TruthReaderTests {
         #expect(TruthWiki.selectCurrentTruth(merged.entries).groundTruth.isEmpty)
     }
 
+    @Test("SW-CONFLICT-1: a field a newer writer added is content: copies that differ in it are a conflict; the chain fields are not")
+    func unknownFieldsAreContent() {
+        func withField(_ body: String, _ field: String) -> String { String(body.dropLast()) + ",\(field)}" }
+        let uv = #"{"id":"UV-1","type":"UV","ts":"2026-09-01T10:01:00.000Z","author":"sam","assertion":"Retries are idempotent.","basis":"the retry test","verifyBy":{"kind":"ask","value":"ops"},"contests":null,"status":"open"}"#
+
+        // One stream: two lines give an id different values for the field (stenographer's Importing rules 2 and 10)
+        let stream = TruthWiki.parse(lines: chainTruthLines([
+            withField(tb, #""scope":"staging""#), withField(tb, #""scope":"production""#),
+            withField(uv, #""tier":1"#), withField(uv, #""tier":2"#),
+        ]))
+        #expect(stream.errors.isEmpty)
+        #expect(stream.conflicts == [TruthConflict(id: "TB-1", files: []), TruthConflict(id: "UV-1", files: [])])
+        #expect(stream.entries.map { $0.inadmissible?.reason } == [.conflict, .conflict])
+        #expect(stream.entries.first?.inadmissible?.detail == "lines 1 and 2 give TB-1 different content")
+        #expect(stream.entries.map(TruthWiki.classify) == [.history, .history])
+
+        // Two files: one copy carries the field, or the copies carry different values
+        let plain = chainTruthLines([tb]).joined(separator: "\n")
+        let staging = chainTruthLines([withField(tb, #""scope":{"env":"staging","region":"eu"}"#)]).joined(separator: "\n")
+        let production = chainTruthLines([withField(tb, #""scope":{"env":"production","region":"eu"}"#)]).joined(separator: "\n")
+        for (a, b) in [(plain, staging), (staging, production)] {
+            let merged = TruthWiki.parseFiles([("a.jsonl", a), ("b.jsonl", b)])
+            #expect(merged.conflicts == [TruthConflict(id: "TB-1", files: ["a.jsonl", "b.jsonl"])])
+            #expect(merged.entries.map(TruthWiki.classify) == [.history])
+        }
+
+        // The same field and value, in either key order, at another place in another writer's chain, is the same content
+        let reordered = chainTruthLines([strike, withField(tb, #""scope":{"region":"eu","env":"staging"}"#)], firstSeq: 7, prevHash: String(repeating: "ab", count: 32))
+        let merged = TruthWiki.parseFiles([("a.jsonl", staging), ("b.jsonl", reordered.joined(separator: "\n"))])
+        #expect(merged.errors.isEmpty && merged.conflicts.isEmpty)
+        #expect(merged.entries.map(TruthWiki.classify) == [.groundTruth])
+        #expect(TruthWiki.parse(lines: chainTruthLines([withField(tb, #""scope":1"#), withField(tb, #""scope":1"#)])).conflicts.isEmpty)
+    }
+
     @Test("several files: one refused file refuses the merge — it might hold the strike that matters")
     func mergeRefused() {
         let good = chainTruthLines([tb]).joined(separator: "\n")

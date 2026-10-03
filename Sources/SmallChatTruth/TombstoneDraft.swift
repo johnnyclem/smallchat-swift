@@ -68,7 +68,7 @@ public struct TombstoneDraft: Sendable, Equatable {
         now: Date = Date()
     ) throws -> TruthProposalEnvelope {
         if let first = problems().first { throw TruthError.malformedLine(line: 0, reason: first) }
-        if identityKey(author) == identityKey(notary) {
+        if sameIdentity(author, notary) {
             throw TruthError.malformedLine(line: 0, reason: "“\(notary)” can't both draft and notarize the tombstone — sign as a person")
         }
         func clean(_ s: String?) -> String? {

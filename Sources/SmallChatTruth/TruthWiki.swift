@@ -23,13 +23,16 @@ import SmallChatCore
 // - Admission. An unsigned TB is never truth on its own; a v1 TB has no
 //   hash and is unverifiable (unless the host opts in); with a signer
 //   registry, unlisted authors and signers are unverifiable; two lines
-//   giving one id different content (compared as JCS bytes) are a conflict.
-//   Agents settle claims only together: a TB an agent signs is truth only
-//   with a quorum (the codec checked its rules) whose members are all
-//   agents and, read with every kind this version doesn't know as
-//   question-class, cite settling evidence of two kinds or more
-//   (agent-without-quorum). Status changes come from TRANSITIONs: like a
-//   person's acts, an agent quorum's are the writer's to check.
+//   giving one id different content (compared as JCS bytes, unknown fields
+//   included, the chain fields aside) are a conflict. Agents settle claims
+//   only together: a TB an agent signs is truth only with a quorum (the
+//   codec checked its rules) whose members are all agents
+//   (agent-without-quorum), and never when it cites an evidence kind this
+//   version doesn't know, on its line or in its quorum: the rules don't
+//   refuse a line over one, so nothing shows two settling angles
+//   (unknown-value, weighed first). Status changes come from TRANSITIONs:
+//   like a person's acts, an agent quorum's are the writer's to check (an
+//   ADDENDUM is a cause, which a reader never applies by itself).
 // - Never rewrite. Unknown fields and values are kept, never coerced, and a
 //   parsed entry serializes back to the exact line it was read from.
 // - Several files (one per writer) fold one by one, then each entry takes
@@ -407,14 +410,24 @@ public enum TruthWiki {
                     return TruthInadmissible(reason: .unverifiable, detail: "TB \(tb.id): signer '\(signer)' is not in the signer registry")
                 }
             }
-            // Agents settle only together: an agent's TB is truth only with a quorum of agents
-            if case .tb(let tb) = entry, let signer = tb.signedBy, TruthQuorum.isAgent(signer, signers: options.signers),
-               let why = agentSettlementIssue(tb, signers: options.signers) {
-                return TruthInadmissible(
-                    reason: .agentWithoutQuorum,
-                    detail: "TB \(tb.id) is signed by agent \(signer) with \(why): agents settle a claim only as two or more agent "
-                        + "sessions agreeing from different angles within 15 minutes, or a person signs it"
-                )
+            // Agents settle only together, from different angles: an agent's TB is truth only with a
+            // quorum of agents, and only when this reader knows every evidence kind it cites (it fails
+            // closed on one it doesn't, ahead of the quorum check, as stenographer's import does)
+            if case .tb(let tb) = entry, let signer = tb.signedBy, TruthQuorum.isAgent(signer, signers: options.signers) {
+                if let unknown = unknownEvidenceKind(tb) {
+                    return TruthInadmissible(
+                        reason: .unknownValue,
+                        detail: "TB \(tb.id) is signed by agent \(signer) and cites evidence kind '\(unknown.rawValue)', which this version "
+                            + "doesn't know: it settles nothing for this reader, which can't tell that the quorum agrees from different angles"
+                    )
+                }
+                if let why = agentSettlementIssue(tb, signers: options.signers) {
+                    return TruthInadmissible(
+                        reason: .agentWithoutQuorum,
+                        detail: "TB \(tb.id) is signed by agent \(signer) with \(why): agents settle a claim only as two or more agent "
+                            + "sessions agreeing from different angles within 15 minutes, or a person signs it"
+                    )
+                }
             }
             return nil
         }
@@ -425,15 +438,26 @@ public enum TruthWiki {
         }
     }
 
-    /// Why an agent-signed TB's quorum doesn't settle it for this reader, or nil when it does.
+    /// The first evidence kind this version doesn't know that an agent's TB
+    /// cites, on its line or in any member of its quorum, or nil. The quorum
+    /// rules don't refuse a line over such a kind (it may be a newer writer's
+    /// settling kind), so nothing shows this reader that the members settle
+    /// from different angles: it fails closed (`unknown-value`), whatever its
+    /// quorum, as stenographer's import does (truth format v2, "Agent
+    /// quorum", Importing rule 5). With every kind known, the codec's rule 3
+    /// has shown the angles.
+    private static func unknownEvidenceKind(_ tb: TruthTbEntry) -> TruthEvidence.Kind? {
+        let items = tb.evidence + (tb.quorum ?? []).flatMap(\.evidence)
+        return items.first { !$0.kind.isKnown }?.kind
+    }
+
+    /// Why an agent-signed TB doesn't settle for this reader for want of a
+    /// quorum of agents, or nil when it has one (the codec checked its rules).
     private static func agentSettlementIssue(_ tb: TruthTbEntry, signers: TruthSignerRegistry?) -> String? {
         guard let quorum = tb.quorum else { return "no quorum" }
         if let person = quorum.first(where: { !TruthQuorum.isMemberAgent($0.author, signers: signers) }) {
             let listed = signers.map { _ in "the signer registry doesn't list it as an agent" } ?? "its key doesn't start with \(TruthQuorum.agentPrefix)"
             return "a quorum that isn't all agents (quorum member \(person.author): \(listed))"
-        }
-        if let angles = TruthQuorum.knownAnglesIssue(quorum) {
-            return "a quorum that rests on evidence this reader doesn't know as settling: \(angles)"
         }
         return nil
     }
@@ -557,10 +581,20 @@ public enum TruthWiki {
         )
     }
 
-    /// What two copies of one entry must agree on, compared as JCS bytes (key order never matters).
+    /// What two copies of one entry must agree on, compared as JCS bytes (key
+    /// order never matters): its fields, unknown ones included (stenographer's
+    /// Importing rules 2 and 10). The chain fields differ between two
+    /// writers' copies of one entry, and `x-steno` is each ledger's own
+    /// record, so neither counts; nor do `id`, `ts` and `status`.
     private static func bodyKey(_ d: DecodedTruthLine) -> String {
         let o = d.object
-        var body: [String: AnyCodableValue] = ["type": .string(d.type.rawValue), "author": o["author"] ?? .null]
+        let known = d.type == .tb ? tbKeys : uvKeys
+        let unknown = o.filter { !known.contains($0.key) && !chainKeys.contains($0.key) }
+        var body: [String: AnyCodableValue] = [
+            "type": .string(d.type.rawValue),
+            "author": o["author"] ?? .null,
+            "extra": unknown.isEmpty ? .null : .dict(unknown),
+        ]
         if d.type == .tb {
             var evidence = o["evidence"] ?? .null
             if d.version == 1, case .array(let list) = evidence {

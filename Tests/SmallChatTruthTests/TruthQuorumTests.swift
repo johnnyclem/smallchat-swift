@@ -179,26 +179,68 @@ struct TruthQuorumTests {
         #expect(TruthWiki.parse(lines: [line(quorumTB())], options: TruthReadOptions(signers: signers)).entries.map(TruthWiki.classify) == [.groundTruth])
     }
 
-    @Test("an evidence kind the reader doesn't know: the line decodes, and settles nothing for this reader")
-    func unknownKindFailsClosed() {
-        // Member 2 cites only a kind this version doesn't know: it may be a newer writer's settling kind
-        let tb = quorumTB(
-            evidence: [commitItem, item("benchmark", "bench/search")],
-            members: [claudeAt1013, member("agent:codex", "sess_b", "2026-09-01T10:14:00.000Z", [item("benchmark", "bench/search")])]
-        )
-        #expect(refusal(tb) == nil)
-        let read = TruthWiki.parse(lines: [line(tb)])
-        #expect(read.errors.isEmpty)
-        #expect(read.entries.first?.inadmissible?.reason == .agentWithoutQuorum)
-        #expect(read.entries.first?.inadmissible?.detail.contains("benchmark") == true)
-        #expect(read.entries.map(TruthWiki.classify) == [.history])
+    @Test("SW-QUORUM-4: an agent's TB citing an evidence kind the reader doesn't know decodes, and is never truth (unknown-value), however well its quorum keeps rule 3")
+    func unknownKindFailsClosed() throws {
+        // The codec keeps these lines (an unknown kind may be a newer writer's settling kind, so it
+        // breaks no rule); a reader that admits truth fails closed on them, as stenographer's import
+        // files them: unknown-value, never agent-without-quorum, with or without a registry
+        let bench = item("benchmark", "bench/search")
+        let shot = item("screenshot", "shot.png")
+        let shapes: [(name: String, first: [String], second: [String], kind: String)] = [
+            ("member 2 cites only an unknown kind", [commitItem], [bench], "benchmark"),
+            ("no member cites a known settling kind", [shot], [bench], "screenshot"),
+            ("two known settling kinds, and an unknown one beside them", [commitItem], [fileItem, bench], "benchmark"),
+            ("one settling kind, and an unknown item clears rule 3", [commitItem], [item("commit", "9a8b7c6"), item("vibes", "v")], "vibes"),
+            ("a known question kind beside an invented one", [commitItem], [item("message", "msg_1"), bench], "benchmark"),
+        ]
+        let signers = try TruthSignerRegistry(signers: [TruthSigner(id: "agent:*", role: .agent), TruthSigner(id: "kim", role: .human)])
+        for shape in shapes {
+            let tb = quorumTB(
+                evidence: shape.first + shape.second,
+                members: [
+                    member("agent:claude-code", "sess_a", "2026-09-01T10:13:00.000Z", shape.first),
+                    member("agent:codex", "sess_b", "2026-09-01T10:14:00.000Z", shape.second),
+                ]
+            )
+            #expect(refusal(tb) == nil, "\(shape.name)")
+            for options in [TruthReadOptions(), TruthReadOptions(signers: signers)] {
+                let read = TruthWiki.parse(lines: [line(tb)], options: options)
+                #expect(read.errors.isEmpty, "\(shape.name)")
+                #expect(read.entries.first?.inadmissible?.reason == .unknownValue, "\(shape.name)")
+                #expect(read.entries.first?.inadmissible?.reason.rawValue == "unknown-value", "\(shape.name)")
+                #expect(read.entries.first?.inadmissible?.detail.contains("evidence kind '\(shape.kind)'") == true, "\(shape.name)")
+                #expect(read.entries.map(TruthWiki.classify) == [.history], "\(shape.name)")
+            }
+        }
 
-        // An unknown kind beside settling evidence of two known kinds rests nothing on it
-        let extra = quorumTB(
-            evidence: [commitItem, fileItem, item("benchmark", "bench/search")],
-            members: [claudeAt1013, member("agent:codex", "sess_b", "2026-09-01T10:14:00.000Z", [fileItem, item("benchmark", "bench/search")])]
+        // Weighed ahead of the quorum check: an agent's TB without one, citing an unknown kind, is unknown-value too
+        let alone = #"{"id":"TB-A","type":"TB","ts":"2026-09-01T10:14:00.000Z","author":"agent:codex","claim":"searchV1 is gone.","evidence":[\#(commitItem),\#(bench)],"signedBy":"agent:codex","literals":[{"dead":"searchV1"}],"status":"active"}"#
+        #expect(TruthWiki.parse(lines: [line(alone)]).entries.first?.inadmissible?.reason == .unknownValue)
+
+        // The classes bind agents only: a person may sign on evidence of any class, a kind this version doesn't know included
+        let byKim = #"{"id":"TB-K","type":"TB","ts":"2026-09-01T10:14:00.000Z","author":"kim","claim":"searchV1 is gone.","evidence":[\#(shot)],"signedBy":"kim","literals":[{"dead":"searchV1"}],"status":"active"}"#
+        #expect(TruthWiki.parse(lines: [line(byKim)], options: TruthReadOptions(signers: signers)).entries.map(TruthWiki.classify) == [.groundTruth])
+    }
+
+    @Test("an agent quorum's ADDENDUM citing an evidence kind the reader doesn't know decodes, and settles nothing by itself")
+    func unknownKindAddendum() {
+        // A reader never applies an ADDENDUM: it is a cause, kept in `lines`; only a TRANSITION moves a status
+        let bench = item("benchmark", "bench/search")
+        let addendum = quorumAddendum(
+            evidence: [commitItem, bench],
+            members: [
+                member("agent:claude-code", "sess_a", "2026-09-01T10:13:00.000Z", [commitItem], verdict: "verified"),
+                member("agent:codex", "sess_b", "2026-09-01T10:14:00.000Z", [bench], verdict: "verified"),
+            ]
         )
-        #expect(TruthWiki.parse(lines: [line(extra)]).entries.map(TruthWiki.classify) == [.groundTruth])
+        #expect(refusal(addendum) == nil)
+        let uv = #"{"id":"UV-1","type":"UV","ts":"2026-09-01T10:00:00.000Z","author":"sam","assertion":"searchV1 is still called.","basis":"a log line","verifyBy":{"kind":"ask","value":"ops"},"contests":null,"status":"open"}"#
+        let read = TruthWiki.parse(lines: chainTruthLines([uv, addendum]))
+        #expect(read.errors.isEmpty)
+        #expect(read.lines.map(\.type) == [.uv, .addendum])
+        #expect(read.transitions.isEmpty && read.held.isEmpty)
+        #expect(read.entries.map(\.statusValue) == ["open"])
+        #expect(read.entries.map(TruthWiki.classify) == [.flag])
     }
 
     @Test("a quorum is part of a TB's content: two copies with different members are a conflict")
@@ -423,6 +465,37 @@ struct TruthQuorumTests {
         let read = TruthWiki.parse(lines: [text])
         #expect(read.errors.isEmpty)
         #expect(TruthWiki.serialize(read.entries) == [text])
+    }
+
+    @Test("SW-QUORUM-5: identity keys compare byte for byte, as stenographer compares code units, not by canonical equivalence")
+    func keysCompareByBytes() throws {
+        // NFKC keeps U+034F (CGJ) between the marks, so U+0301 doesn't compose; then CGJ, a
+        // default-ignorable, is removed. The keys, agent:a + U+0316 U+0301 and agent:á + U+0316,
+        // are canonically equivalent (Swift's String == says equal) but differ code unit for code unit
+        let x = "agent:a\u{0316}\u{034F}\u{0301}"
+        let y = "agent:\u{00E1}\u{0316}"
+        #expect(Array(identityKey(x).unicodeScalars) == ["a", "g", "e", "n", "t", ":", "a", "\u{0316}", "\u{0301}"])
+        #expect(Array(identityKey(y).unicodeScalars) == ["a", "g", "e", "n", "t", ":", "\u{00E1}", "\u{0316}"])
+        #expect(identityKey(x) == identityKey(y), "canonical equivalence: what the reader must not compare by")
+
+        // Rule 2: the writer is a member, and signs its TB, by key (stenographer's checkQuorum refuses both)
+        let memberY = member(y, "sess_b", "2026-09-01T10:14:00.000Z", [fileItem])
+        #expect(refusal(quorumTB(author: x, signedBy: x, members: [claudeAt1013, memberY]))?.contains("is not a quorum member") == true)
+        #expect(refusal(quorumTB(author: y, signedBy: x, members: [claudeAt1013, memberY]))?.contains("signed by its author") == true)
+        #expect(refusal(quorumTB(author: y, signedBy: "AGENT:\u{00C1}\u{0316}", members: [claudeAt1013, memberY])) == nil)
+
+        // A draft's author and its notary are two people unless their keys are one
+        let draft = TombstoneDraft(claim: "searchV1 is gone.", evidence: [TruthEvidence(kind: .commit, ref: "c4fe0b1")], signer: y)
+        #expect(try draft.proposal(author: x).author == x)
+        #expect(throws: TruthError.self) { try draft.proposal(author: "AGENT:\u{00C1}\u{0316}") }
+
+        // The signer registry looks names up by key, byte for byte, as stenographer's Map does
+        let registry = try TruthSignerRegistry(signers: [TruthSigner(id: y, role: .agent)])
+        #expect(registry.lookup("Agent:\u{00C1}\u{0316}")?.role == .agent)
+        #expect(registry.lookup(x) == nil)
+        let both = try TruthSignerRegistry(signers: [TruthSigner(id: x, role: .human), TruthSigner(id: y, role: .agent)])
+        #expect(both.lookup(x)?.role == .human)
+        #expect(both.lookup(y)?.role == .agent)
     }
 }
 
