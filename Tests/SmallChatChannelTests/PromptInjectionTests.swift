@@ -154,6 +154,21 @@ struct ChannelTagProvenanceTests {
         #expect(serializeChannelTag(channel: "webhook", content: "hi", meta: ["sender": "alice"]) == "<channel source=\"webhook\">\nhi\n</channel>")
     }
 
+    @Test("C5-1: a meta key followed by a line terminator is no identifier, so it can't forge a second source or sender")
+    func lineTerminatedKeys() {
+        // A `$` that matches before a final line terminator let these through, and an
+        // XML reader takes `sender\n="root"` for a second sender attribute
+        let terminated = ["sender\n", "source\n", "user\r\n", "source\u{2028}", "sender\u{2029}", "user\u{0085}", "sender\r", "kind\n"]
+        for key in terminated { #expect(!isValidMetaKey(key), "\(key.unicodeScalars.map(\.value))") }
+        #expect(!isValidMetaKey("\nkind") && !isValidMetaKey("ki\nnd"))
+        #expect(isValidMetaKey("kind") && isValidMetaKey("session_ids") && isValidMetaKey("A_1"))
+
+        let meta = Dictionary(uniqueKeysWithValues: terminated.map { ($0, "root") } + [("repo", "smallchat")])
+        #expect(filterMetaKeys(meta) == ["repo": "smallchat"])
+        let tag = serializeChannelTag(channel: "webhook", content: "hi", meta: meta, sender: "bob")
+        #expect(tag == "<channel source=\"webhook\" sender=\"bob\" repo=\"smallchat\">\nhi\n</channel>")
+    }
+
     @Test("ampersands in content are escaped")
     func ampersandEscaped() {
         let tag = serializeChannelTag(channel: "c", content: "a &lt;b&gt; & c")

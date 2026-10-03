@@ -798,6 +798,9 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   and a meta `sender`, `source` or `user` could put a second, forged identity or
   provenance attribute in the `<channel>` tag. The sender is now the identity of the
   credential, the channel the configured one, and those meta keys are dropped.
+  A key followed by a line terminator (`source\n`, `sender\r\n`) is not an identifier
+  either (C5-1): ICU's `$` matched before a final line terminator, so since 0.2
+  `isValidMetaKey` passed such a key, which an XML reader takes for a second `source`.
 - **`ChannelBridgeProtocol.constantTimeEqual` compares full lengths (SC-SW-34).**
   It folded the length difference into 8 bits, so a secret followed by 256 NUL
   bytes matched.

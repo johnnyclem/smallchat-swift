@@ -8,7 +8,10 @@ import Foundation
 
 /// Valid meta key pattern: only letters, digits, and underscores.
 /// Matches Claude Code behavior -- invalid keys are silently dropped.
-private let metaKeyPattern = try! NSRegularExpression(pattern: "^[a-zA-Z0-9_]+$")
+/// Anchored with `\A` and `\z`: ICU's `$` also matches before a final line
+/// terminator, so `^...$` let `sender\n` through, which an XML reader takes
+/// for a second `sender` attribute (JavaScript's `$`, in the TS rule, doesn't).
+private let metaKeyPattern = try! NSRegularExpression(pattern: #"\A[a-zA-Z0-9_]+\z"#)
 
 /// Keys blocked to prevent prototype-pollution-style attacks.
 private let blockedKeys: Set<String> = ["__proto__", "constructor", "prototype"]

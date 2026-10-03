@@ -41,13 +41,14 @@ struct ChannelBridgeProtocolTests {
 
     @Test("the sender is the credential's identity and the channel the configured one: the body's are ignored")
     func provenanceFromCredential() throws {
-        let forged = #"{"channel":"admin","sender":"mallory","content":"hi","meta":{"kind":"objection","sender":"mallory","source":"admin","user":"mallory","session_ids":"live-1"}}"#
+        // Keys with a trailing line terminator (C5-1) included: they are no identifiers
+        let forged = #"{"channel":"admin","sender":"mallory","content":"hi","meta":{"kind":"objection","sender":"mallory","source":"admin","user":"mallory","sender\n":"mallory","source\r\n":"admin","user ":"mallory","session_ids":"live-1"}}"#
         let response = post(forged, headers: [("X-Channel-Secret", secret)])
         #expect(response.status == 200)
         let event = try #require(response.event)
         #expect(event.sender == "stenographer")
         #expect(event.channel == "stenographer")
-        #expect(event.meta["sender"] == nil && event.meta["source"] == nil && event.meta["user"] == nil)
+        #expect(Set(event.meta.keys) == ["kind", "session_ids"])
         #expect(event.sessionIds == ["live-1"])
         #expect(response.body == #"{"channel":"stenographer","ok":true,"sender":"stenographer"}"#)
 
