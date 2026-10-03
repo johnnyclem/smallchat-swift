@@ -42,16 +42,50 @@ func ecmaScriptTrim(_ s: String) -> String {
     return String(scalars[first...last])
 }
 
+/// `s.toLowerCase()` as ECMAScript lowercases: each scalar's full lowercase
+/// mapping, and Final_Sigma, the one context Unicode's default mapping has.
+/// `String.lowercased()` maps every Σ to σ; at the end of a word (after a
+/// cased letter, and before none, case-ignorables skipped both ways, as ICU
+/// skips them) Σ is ς. So `ΟΔΥΣΣΕΥΣ` is `οδυσσευς`, as in stenographer.
+func ecmaScriptLowercased(_ s: String) -> String {
+    guard s.unicodeScalars.contains("\u{03A3}") else { return s.lowercased() }
+    let scalars = Array(s.unicodeScalars)
+    /// Whether the first scalar at `indices` that isn't case-ignorable is cased.
+    func reachesCased(_ indices: some Sequence<Int>) -> Bool {
+        for i in indices where !scalars[i].properties.isCaseIgnorable {
+            return scalars[i].properties.isCased
+        }
+        return false
+    }
+    var out = String.UnicodeScalarView()
+    for (i, scalar) in scalars.enumerated() {
+        if scalar == "\u{03A3}" {
+            let final = reachesCased(stride(from: i - 1, through: 0, by: -1)) && !reachesCased(i + 1 ..< scalars.count)
+            out.append(final ? "\u{03C2}" : "\u{03C3}")
+        } else {
+            out.append(contentsOf: scalar.properties.lowercaseMapping.unicodeScalars)
+        }
+    }
+    return String(out)
+}
+
+/// `s.startsWith(prefix)` as ECMAScript compares, code unit for code unit.
+/// `String.hasPrefix` compares Characters, so to it `agent:` followed by a
+/// combining mark (one Character with the `:`) doesn't start with `agent:`.
+func hasCodeUnitPrefix(_ s: String, _ prefix: String) -> Bool {
+    s.utf8.starts(with: prefix.utf8)
+}
+
 /// The comparison form of an identity: NFKC (full-width and ligature
 /// look-alikes fold), default-ignorable code points removed, trimmed,
-/// lowercased.
+/// lowercased (as ECMAScript lowercases, see `ecmaScriptLowercased`).
 public func identityKey(_ identity: String) -> String {
     var scalars = String.UnicodeScalarView()
     for scalar in identity.precomposedStringWithCompatibilityMapping.unicodeScalars
     where !scalar.properties.isDefaultIgnorableCodePoint {
         scalars.append(scalar)
     }
-    return ecmaScriptTrim(String(scalars)).lowercased()
+    return ecmaScriptLowercased(ecmaScriptTrim(String(scalars)))
 }
 
 /// An anonymous or generic identity (`system`, `Assistant`, `ａｉ`, …).
@@ -62,7 +96,7 @@ public func isAnonymousIdentity(_ identity: String) -> Bool {
 /// `migration` and `detector:*` belong to stenographer's internal write paths.
 public func isReservedIdentity(_ identity: String) -> Bool {
     let key = identityKey(identity)
-    return key == truthMigrationAuthor || key.hasPrefix(truthDetectorPrefix)
+    return key == truthMigrationAuthor || hasCodeUnitPrefix(key, truthDetectorPrefix)
 }
 
 /// Control characters (Unicode Cc: newlines, escapes) have no place in a name someone stands behind.
@@ -80,7 +114,7 @@ public func identityIssue(_ identity: String, allowDetector: Bool = false) -> St
         return "identities cannot contain control characters"
     }
     if isReservedIdentity(identity) {
-        if allowDetector, identityKey(identity).hasPrefix(truthDetectorPrefix) { return nil }
+        if allowDetector, hasCodeUnitPrefix(identityKey(identity), truthDetectorPrefix) { return nil }
         return "'\(truthMigrationAuthor)' and '\(truthDetectorPrefix)*' are reserved for the backfill and detector paths (got \"\(identity)\")"
     }
     return nil
@@ -137,8 +171,9 @@ public struct TruthSignerRegistry: Sendable {
             guard !id.isEmpty else {
                 throw TruthError.malformedLine(line: 0, reason: "signer registry: signers[\(i)].id must be a non-empty string")
             }
-            if id.hasSuffix("*") {
-                prefixes.append((identityKey(String(id.dropLast())), signer.role))
+            // By scalar, as `endsWith('*')`: a `*` after a prepended mark is one Character with it
+            if id.unicodeScalars.last == "*" {
+                prefixes.append((identityKey(String(id.unicodeScalars.dropLast())), signer.role))
                 continue
             }
             for name in [id] + signer.aliases {
@@ -177,7 +212,7 @@ public struct TruthSignerRegistry: Sendable {
     public func lookup(_ identity: String) -> (id: String, role: TruthSigner.Role)? {
         let key = identityKey(identity)
         if let listed = exact[key] { return listed }
-        if let match = prefixes.first(where: { key.hasPrefix($0.prefix) && key.utf16.count > $0.prefix.utf16.count }) {
+        if let match = prefixes.first(where: { hasCodeUnitPrefix(key, $0.prefix) && key.utf16.count > $0.prefix.utf16.count }) {
             return (identity, match.role)
         }
         return nil

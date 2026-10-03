@@ -69,7 +69,7 @@ public enum TruthQuorum {
     /// (stenographer's classifier). An agent's TB needs a quorum.
     public static func isAgent(_ identity: String, signers: TruthSignerRegistry?) -> Bool {
         if let listed = signers?.lookup(identity) { return listed.role == .agent }
-        return identityKey(identity).hasPrefix(agentPrefix)
+        return hasCodeUnitPrefix(identityKey(identity), agentPrefix)
     }
 
     /// Whether `identity` may be a quorum member: with a signer registry, one
@@ -305,16 +305,16 @@ public enum TruthQuorum {
     }
 
     /// A ref as rule 3 compares it, normalized for its kind so that one piece
-    /// of evidence spelled two ways is one item: a `commit` lowercased; a
-    /// `file` path with `\` read as `/` and empty and `.` segments dropped
-    /// (`./src//x.ts` is `src/x.ts`; a leading `/` stays); a `test` or
-    /// `claimed-command` with each run of White_Space read as one space.
-    /// Every ref is trimmed first.
+    /// of evidence spelled two ways is one item: a `commit` lowercased (as
+    /// ECMAScript lowercases: `ecmaScriptLowercased`); a `file` path with `\`
+    /// read as `/` and empty and `.` segments dropped (`./src//x.ts` is
+    /// `src/x.ts`; a leading `/` stays); a `test` or `claimed-command` with
+    /// each run of White_Space read as one space. Every ref is trimmed first.
     static func evidenceRefKey(kind: String, ref: String) -> String {
         let ref = trimWhiteSpace(ref)
         switch kind {
         case "commit":
-            return ref.lowercased()
+            return ecmaScriptLowercased(ref)
         case "file":
             var segments: [String.UnicodeScalarView] = [String.UnicodeScalarView()]
             for scalar in ref.unicodeScalars {

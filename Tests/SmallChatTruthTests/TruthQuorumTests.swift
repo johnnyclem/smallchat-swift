@@ -339,6 +339,73 @@ struct TruthQuorumTests {
 
     // MARK: Agreeing with stenographer's reading, code unit for code unit
 
+    @Test("SW-QUORUM-1: the agent: and detector: prefixes compare code point for code point, as stenographer's startsWith does")
+    func prefixesByCodePoint() throws {
+        // `:` and a combining mark, or an emoji modifier, are one Character, but the key still starts with `agent:`
+        for spelling in ["agent:\u{0301}claude-code", "agent:\u{1F3FB}claude-code"] {
+            let scalars = "\(spelling.unicodeScalars.map { String($0.value, radix: 16) })"
+            #expect(TruthQuorum.isAgent(spelling, signers: nil), "\(scalars)")
+            let alone = #"{"id":"TB-A","type":"TB","ts":"2026-09-01T10:14:00.000Z","author":"\#(spelling)","claim":"searchV1 is gone.","evidence":[{"kind":"commit","ref":"c4fe0b1"}],"signedBy":"\#(spelling)","literals":[{"dead":"searchV1"}],"status":"active"}"#
+            let read = TruthWiki.parse(lines: [line(alone)])
+            #expect(read.errors.isEmpty, "\(scalars)")
+            #expect(read.entries.first?.inadmissible?.reason == .agentWithoutQuorum, "\(scalars): signed alone, without a quorum")
+            #expect(read.entries.map(TruthWiki.classify) == [.history], "\(scalars)")
+
+            // As a member, it is an agent's session
+            let together = quorumTB(members: [member(spelling, "sess_a", "2026-09-01T10:13:00.000Z", [commitItem]), codexAt1014])
+            #expect(TruthWiki.parse(lines: [line(together)]).entries.map(TruthWiki.classify) == [.groundTruth], "\(scalars)")
+        }
+
+        // A registry's `agent:*` lists it too
+        let signers = try TruthSignerRegistry(signers: [TruthSigner(id: "agent:*", role: .agent)])
+        #expect(signers.lookup("agent:\u{0301}claude-code")?.role == .agent)
+        // A `*` after a prepended mark (one Character with it) still ends a prefix entry
+        let prepended = try TruthSignerRegistry(signers: [TruthSigner(id: "bot\u{0600}*", role: .agent)])
+        #expect(prepended.lookup("bot\u{0600}x")?.role == .agent)
+
+        // `detector:` is reserved whatever follows the colon
+        #expect(isReservedIdentity("detector:\u{0301}scan"))
+        #expect(identityIssue("detector:\u{0301}scan") != nil)
+        #expect(identityIssue("detector:\u{0301}scan", allowDetector: true) == nil)
+    }
+
+    @Test("SW-QUORUM-2: keys and commit refs lowercase as ECMAScript's toLowerCase does: a word-final Σ is ς")
+    func finalSigma() {
+        // Expected values are node 22's String.prototype.toLowerCase
+        let cases: [(String, String)] = [
+            ("Σ", "σ"), ("AΣ", "aς"), ("AΣA", "aσa"), ("AΣ.", "aς."), ("AΣ'A", "aσ'a"), ("A.Σ", "a.ς"),
+            ("\u{02B0}Σ", "\u{02B0}σ"), ("1Σ", "1σ"), ("AΣ1", "aς1"), ("AΣ\u{0301}", "aς\u{0301}"),
+            ("AΣ\u{0301}A", "aσ\u{0301}a"), ("ΣΣ", "σς"), (" Σ", " σ"), ("\u{0345}Σ", "\u{0345}σ"),
+            ("AΣ\u{0345}", "aς\u{0345}"), ("\u{2163}Σ", "\u{2173}ς"), ("ΟΔΥΣΣΕΥΣ", "οδυσσευς"), ("abcΣ", "abcς"),
+        ]
+        for (input, expected) in cases {
+            #expect(ecmaScriptLowercased(input).unicodeScalars.elementsEqual(expected.unicodeScalars), "\(input)")
+        }
+        #expect(identityKey("agent:ΟΔΥΣΣΕΥΣ").unicodeScalars.elementsEqual("agent:οδυσσευς".unicodeScalars))
+
+        // Rule 2: the writer is the member whose key is its key
+        let odysseus = "agent:ΟΔΥΣΣΕΥΣ"
+        let finalForm = member("agent:οδυσσευς", "sess_b", "2026-09-01T10:14:00.000Z", [fileItem])
+        let medialForm = member("agent:οδυσσευσ", "sess_b", "2026-09-01T10:14:00.000Z", [fileItem])
+        #expect(refusal(quorumTB(author: odysseus, signedBy: odysseus, members: [claudeAt1013, finalForm])) == nil)
+        #expect(refusal(quorumTB(author: odysseus, signedBy: odysseus, members: [claudeAt1013, medialForm]))?.contains("is not a quorum member") == true)
+        #expect(refusal(quorumTB(author: "agent:οδυσσευσ", signedBy: odysseus, members: [claudeAt1013, medialForm]))?.contains("signed by its author") == true)
+
+        // Rule 3: a commit ref compares lowercased, so abcΣ is abcς, not abcσ
+        func pair(_ first: String, _ second: String) -> String {
+            let own = (item("test", "test/a.test.ts"), item("wiki", "TB-0"))
+            return quorumTB(
+                evidence: [first, own.0, second, own.1],
+                members: [
+                    member("agent:claude-code", "sess_a", "2026-09-01T10:13:00.000Z", [first, own.0]),
+                    member("agent:codex", "sess_b", "2026-09-01T10:14:00.000Z", [second, own.1]),
+                ]
+            )
+        }
+        #expect(refusal(pair(item("commit", "abcΣ"), item("commit", "abcς")))?.contains("both cite commit") == true)
+        #expect(refusal(pair(item("commit", "abcΣ"), item("commit", "abcσ"))) == nil)
+    }
+
     @Test("SW-QUORUM-3: a leading U+FEFF belongs to its string: a session, a ref, and the line's hash")
     func leadingByteOrderMark() throws {
         // Rule 1: \u{FEFF}sess_b and sess_b are two sessions (U+FEFF is not White_Space)

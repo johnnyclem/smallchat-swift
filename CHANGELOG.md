@@ -366,7 +366,11 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   invisible characters (`ａｓｓｉｓｔａｎｔ` is anonymous), and
   `assertAccountableAuthor` also refuses control characters and the reserved
   `migration` and `detector:*` (unless `allowDetector`). `TruthError.malformedLine`
-  with line 0 describes itself as just its reason.
+  with line 0 describes itself as just its reason. As in Stenographer, a key is
+  lowercased as ECMAScript's `toLowerCase` lowercases (a word-final `Σ` is `ς`; a
+  quorum's `commit` refs compare the same way), and the `agent:` and `detector:`
+  prefixes and a signer registry's `*` entries match code point for code point, so
+  `agent:` followed by a combining mark is an agent (SW-QUORUM-1, SW-QUORUM-2).
 
 #### Messenger (`SmallChatAgents`, `SmallChatUI`)
 
