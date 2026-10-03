@@ -42,14 +42,31 @@ func ecmaScriptTrim(_ s: String) -> String {
     return String(scalars[first...last])
 }
 
-/// `s.toLowerCase()` as ECMAScript lowercases on Node 22 (ICU 77.1): each
-/// scalar's full lowercase mapping in Unicode 16.0, and Final_Sigma, the one
-/// context Unicode's default mapping has (see `Unicode16.lowercased`).
-/// `String.lowercased()` maps every Σ to σ, where at the end of a word Σ is
-/// ς, so `ΟΔΥΣΣΕΥΣ` is `οδυσσευς`, as in stenographer; and it reads the
-/// Swift runtime's Unicode version, not 16.0.
+/// `s.toLowerCase()` as ECMAScript lowercases: each scalar's full lowercase
+/// mapping, and Final_Sigma, the one context Unicode's default mapping has.
+/// `String.lowercased()` maps every Σ to σ; at the end of a word (after a
+/// cased letter, and before none, case-ignorables skipped both ways, as ICU
+/// skips them) Σ is ς. So `ΟΔΥΣΣΕΥΣ` is `οδυσσευς`, as in stenographer.
 func ecmaScriptLowercased(_ s: String) -> String {
-    Unicode16.lowercased(s)
+    guard s.unicodeScalars.contains("\u{03A3}") else { return s.lowercased() }
+    let scalars = Array(s.unicodeScalars)
+    /// Whether the first scalar at `indices` that isn't case-ignorable is cased.
+    func reachesCased(_ indices: some Sequence<Int>) -> Bool {
+        for i in indices where !scalars[i].properties.isCaseIgnorable {
+            return scalars[i].properties.isCased
+        }
+        return false
+    }
+    var out = String.UnicodeScalarView()
+    for (i, scalar) in scalars.enumerated() {
+        if scalar == "\u{03A3}" {
+            let final = reachesCased(stride(from: i - 1, through: 0, by: -1)) && !reachesCased(i + 1 ..< scalars.count)
+            out.append(final ? "\u{03C2}" : "\u{03C3}")
+        } else {
+            out.append(contentsOf: scalar.properties.lowercaseMapping.unicodeScalars)
+        }
+    }
+    return String(out)
 }
 
 /// `s.startsWith(prefix)` as ECMAScript compares, code unit for code unit.
@@ -59,25 +76,22 @@ func hasCodeUnitPrefix(_ s: String, _ prefix: String) -> Bool {
     s.utf8.starts(with: prefix.utf8)
 }
 
-/// The comparison form of an identity: NFKC (full-width, outlined and
-/// ligature look-alikes fold), default-ignorable code points removed,
-/// trimmed, lowercased (as ECMAScript lowercases, see `ecmaScriptLowercased`).
-/// Every step reads Unicode 16.0's data (`Unicode16`), as stenographer's
-/// identityKey does on Node 22 (ICU 77.1), whatever Unicode version the
-/// platform's Foundation and Swift runtime know.
+/// The comparison form of an identity: NFKC (full-width and ligature
+/// look-alikes fold), default-ignorable code points removed, trimmed,
+/// lowercased (as ECMAScript lowercases, see `ecmaScriptLowercased`).
 /// Compare two keys byte for byte (`sameIdentity`), not with `==`.
+///
+/// Each step reads the platform's Unicode data: Foundation's NFKC (Unicode
+/// 15.x on Linux) and the Swift runtime's properties. Stenographer reads its
+/// runtime's ICU, so, as the spec's *Unicode version* note says, a character
+/// assigned or changed after Unicode 15.0 may key differently there.
 public func identityKey(_ identity: String) -> String {
     var scalars = String.UnicodeScalarView()
-    for scalar in Unicode16.nfkc(identity.unicodeScalars) where !Unicode16.isDefaultIgnorable(scalar) {
+    for scalar in identity.precomposedStringWithCompatibilityMapping.unicodeScalars
+    where !scalar.properties.isDefaultIgnorableCodePoint {
         scalars.append(scalar)
     }
     return ecmaScriptLowercased(ecmaScriptTrim(String(scalars)))
-}
-
-/// The stored form of an identity, as stenographer's canonicalIdentity:
-/// Unicode 16.0's NFC, trimmed (as ECMAScript trims).
-func canonicalIdentity(_ identity: String) -> String {
-    ecmaScriptTrim(Unicode16.nfc(identity))
 }
 
 /// Whether two identities are one by key: their `identityKey`s compared
@@ -172,7 +186,7 @@ public struct TruthSignerRegistry: Sendable {
     /// Throws on an empty id or a name listed for two signers.
     public init(signers: [TruthSigner]) throws {
         for (i, signer) in signers.enumerated() {
-            let id = canonicalIdentity(signer.id)
+            let id = ecmaScriptTrim(signer.id.precomposedStringWithCanonicalMapping)
             guard !id.isEmpty else {
                 throw TruthError.malformedLine(line: 0, reason: "signer registry: signers[\(i)].id must be a non-empty string")
             }
