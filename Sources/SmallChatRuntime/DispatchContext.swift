@@ -32,6 +32,8 @@ public actor DispatchContext {
     public let dispatchConfig: DispatchConfig
     /// LLM client for verification, decomposition and refinement questions.
     public let llmClient: any LLMClient
+    /// Jev judge for below-HIGH or ambiguous shortlists. Nil leaves dispatch unchanged.
+    public let jev: JevJudge?
     /// Opt-in semantic rate limiter (nil unless `RuntimeOptions.rateLimiter` is set).
     public let rateLimiter: SemanticRateLimiter?
     /// contentHash of the artifact the tools came from, recorded in every proof.
@@ -69,6 +71,7 @@ public actor DispatchContext {
         intentPins: IntentPinRegistry? = nil,
         dispatchConfig: DispatchConfig = DispatchConfig(),
         llmClient: any LLMClient = NoOpLLMClient(),
+        jev: JevJudge? = nil,
         rateLimiter: SemanticRateLimiter? = nil,
         artifactHash: String? = nil,
         observer: DispatchObserver? = nil
@@ -81,6 +84,7 @@ public actor DispatchContext {
         self.intentPins = intentPins ?? IntentPinRegistry()
         self.dispatchConfig = dispatchConfig
         self.llmClient = llmClient
+        self.jev = jev
         self.rateLimiter = rateLimiter
         self.artifactHash = artifactHash
         self.observer = observer
