@@ -91,7 +91,10 @@ checks is the set of vectors in @smallchat/core's `spec/`, copied into
 
 Outside those vectors the TypeScript runtime is the reference. Proof digests are per
 runtime (the proof step texts differ). Not ported yet: argument coercion, the semantic
-map (learned choices), observer feedback, the decision log, replay and explain. The only
+map (learned choices), observer feedback, the decision log, replay and explain. Nor is
+the optional shortlist judge (`spec/judge`): this runtime never consults one, but it
+decodes what TypeScript proofs record about one (the decision codes `judge-approved` and
+`judge-declined`, the `judge` step and `ResolutionProof.judge`). The only
 built-in embedder is the hash embedder (`LocalEmbedder`, the same vectors as
 @smallchat/core's hash embedder), so an artifact compiled by @smallchat/core with its
 default ONNX embedder needs an `Embedder` of yours that declares the same fingerprint.
