@@ -17,6 +17,8 @@ public struct RuntimeOptions: Sendable {
     /// LLM client for verification (required below HIGH by default),
     /// decomposition and refinement questions.
     public var llmClient: any LLMClient
+    /// Jev judge for below-HIGH or ambiguous shortlists. Nil leaves dispatch unchanged.
+    public var jev: JevJudge?
     /// Intent pins (see `IntentPinRegistry`).
     public var intentPins: [IntentPin]
     /// contentHash of the artifact the tools came from, recorded in every proof.
@@ -31,6 +33,7 @@ public struct RuntimeOptions: Sendable {
         rateLimiter: SemanticRateLimiterOptions? = nil,
         dispatchConfig: DispatchConfig = DispatchConfig(),
         llmClient: any LLMClient = NoOpLLMClient(),
+        jev: JevJudge? = nil,
         intentPins: [IntentPin] = [],
         artifactHash: String? = nil
     ) {
@@ -42,6 +45,7 @@ public struct RuntimeOptions: Sendable {
         self.rateLimiter = rateLimiter
         self.dispatchConfig = dispatchConfig
         self.llmClient = llmClient
+        self.jev = jev
         self.intentPins = intentPins
         self.artifactHash = artifactHash
     }
@@ -106,6 +110,7 @@ public actor ToolRuntime {
             intentPins: pins,
             dispatchConfig: options.dispatchConfig,
             llmClient: options.llmClient,
+            jev: options.jev,
             rateLimiter: options.rateLimiter.map { SemanticRateLimiter(options: $0) },
             artifactHash: options.artifactHash
         )

@@ -492,11 +492,46 @@ extension DispatchContext {
             return finish(.resolved, .decomposed, ranked: ranked, chosen: nil, decomposition: subIntents)
         }
 
-        // 10. VERIFICATION -- below HIGH, or below EXACT in strict mode. The
-        // best candidate and every alternate get the same strategies.
+        // 10. JEV -- only for a below-HIGH winner, or the same ambiguous case
+        // dispatch stamps later (more than one candidate, winner <= 0.90).
+        // A decline does not authorize dispatch.
         var chosen: Candidate? = best
         var llmApproved = false
-        let needsVerification = subHigh(bestTier) || (config.strict && bestTier != .exact)
+        var jevDeclined = false
+        if let jev = jev {
+            if let trigger = jevTrigger(bestTier: bestTier, bestScore: best.score, candidateCount: ranked.count) {
+                let shortlist = Array(ranked.filter { computeTier($0.score, thresholds: thresholds) != .none }.prefix(jev.maxCandidates))
+                var described: [JevCandidate] = []
+                for c in shortlist {
+                    let schema = c.imp.schema ?? (try? await c.imp.loadSchema())
+                    described.append(JevCandidate(
+                        toolId: c.toolId,
+                        description: schema?.description ?? c.selector.canonical,
+                        score: c.score
+                    ))
+                }
+                let verdict = await jev.judge(intent: intent, candidates: described, trigger: trigger)
+                state.step(.verification, verdict.reason, [
+                    "judge": .string("jev"),
+                    "trigger": .string(verdict.trigger.rawValue),
+                    "toolId": .string(verdict.toolId ?? ""),
+                    "probability": .double(verdict.probability),
+                ])
+                if let id = verdict.toolId, let match = ranked.first(where: { $0.toolId == id }) {
+                    chosen = match
+                    llmApproved = true
+                } else {
+                    jevDeclined = true
+                }
+            }
+        }
+        if jevDeclined {
+            return await disambiguate(.verificationFailed, ranked, reason: "Jev declined to judge \"\(intent)\"")
+        }
+
+        // 11. VERIFICATION -- below HIGH, or below EXACT in strict mode. Skipped
+        // when Jev already approved a shortlisted id.
+        let needsVerification = !llmApproved && (subHigh(bestTier) || (config.strict && bestTier != .exact))
         if needsVerification {
             let llmVerifier = llm.providesVerification
             if subHigh(bestTier) && config.requireLLMForSubHighDispatch && !llmVerifier {
@@ -534,7 +569,7 @@ extension DispatchContext {
             }
         }
 
-        // 11. POLICY -- the same rule set as every other path.
+        // 12. POLICY -- the same rule set as every other path.
         let pick = chosen!
         let verdict = try await judge(pick, llmApproved: llmApproved)
         state.step(.policy, verdict.reason, ["code": .string(verdict.code.rawValue), "toolId": .string(pick.toolId)])
@@ -841,7 +876,7 @@ extension DispatchContext {
         await observer?.record(.accepted(toolName: toolId, tier: resolution.tier, confidence: resolution.confidence ?? 0))
 
         // Annotate ambiguous results so callers know another tool was close.
-        if resolution.candidates.count > 1, (resolution.confidence ?? 0) <= 0.90 {
+        if resolution.candidates.count > 1, (resolution.confidence ?? 0) <= ambiguousConfidence {
             var meta = result.metadata ?? [:]
             meta["ambiguous"] = true
             meta["candidateCount"] = resolution.candidates.count
