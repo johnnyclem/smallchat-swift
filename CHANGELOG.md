@@ -481,7 +481,8 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   (name, model, verdict, tool id, probability, confidence, reason, margin,
   maxCandidates, request id). `proofDigest` covers only the record's name, model,
   verdict and tool id (smallchat `spec/judge`, D4). This runtime has no judge and
-  never sets them; it reads and re-encodes the ones TypeScript proofs carry.
+  never sets them; it reads and re-encodes the ones TypeScript proofs carry. The
+  conformance target decodes every resolve and replay expectation in `spec/judge`.
 - **Truth format v2 conformance in `swift test` (XSUITE-19).** `Scripts/sync-truth-fixtures.sh
   <stenographer checkout>` copies Stenographer's `spec/truth-format` (README, JSON
   Schema, golden fixtures) into `Tests/Fixtures/truth-format`, recording the commit

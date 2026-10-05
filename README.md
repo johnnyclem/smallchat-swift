@@ -88,6 +88,9 @@ checks is the set of vectors in @smallchat/core's `spec/`, copied into
 - **Artifacts:** the golden artifact loads and round-trips, every invalid artifact and
   embedder mismatch is refused, and compiling the golden manifest reproduces its
   content hash.
+- **Shortlist judge records:** every resolve and replay expectation in `spec/judge`
+  (decision, outcome, tier, `judge` step and `proof.judge`) decodes as a proof. The judge
+  itself is not ported, so its trigger, resolve, replay and wire cases do not run.
 
 Outside those vectors the TypeScript runtime is the reference. Proof digests are per
 runtime (the proof step texts differ). Not ported yet: argument coercion, the semantic
