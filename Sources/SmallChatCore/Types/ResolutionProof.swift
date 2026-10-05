@@ -42,6 +42,10 @@ public enum DecisionCode: String, Sendable, Codable, Equatable {
     case ranked
     /// Sub-HIGH candidate approved by the LLM verifier
     case llmVerified = "llm-verified"
+    /// The shortlist judge chose this candidate among the near-ties it was
+    /// offered (any tier or rank). Decoded from TypeScript proofs; this
+    /// runtime has no judge and never decides this.
+    case judgeApproved = "judge-approved"
     /// Sub-HIGH candidate passed schema/keyword verification (requireLLMForSubHighDispatch off)
     case verified
     /// LOW-tier or unmatched intent split into sub-intents, each dispatched separately
@@ -50,6 +54,10 @@ public enum DecisionCode: String, Sendable, Codable, Equatable {
     case needsLLMVerifier = "needs-llm-verifier"
     /// Every candidate failed verification
     case verificationFailed = "verification-failed"
+    /// The shortlist judge answered and chose none of the offered tools
+    /// (abstained, an id not offered, a low probability). Decoded from
+    /// TypeScript proofs; this runtime has no judge and never decides this.
+    case judgeDeclined = "judge-declined"
     /// Destructive tool below EXACT tier
     case destructiveNeedsExact = "destructive-needs-exact"
     /// Tool pinned 'exact' and the intent is not one of its pinned phrases
@@ -75,6 +83,8 @@ public enum ProofStage: String, Sendable, Codable, Equatable {
     case vectorSearch = "vector_search"
     case overload
     case `protocol`
+    /// The shortlist judge's step (TypeScript proofs only)
+    case judge
     case verification
     case policy
     case decomposition
@@ -86,6 +96,95 @@ public enum ProofStage: String, Sendable, Codable, Equatable {
 }
 
 // MARK: - Proof
+
+/// The shortlist judge's part in a decision: the shape of @smallchat/core
+/// 1.0's `JudgeRecord` (smallchat spec/judge, D4).
+///
+/// This runtime has no judge, so it never records one. It decodes the
+/// records TypeScript proofs carry and encodes them back unchanged.
+public struct JudgeRecord: Sendable, Codable, Equatable {
+    /// What the judge's answer came to.
+    public enum Verdict: String, Sendable, Codable, Equatable {
+        case approved
+        case declined
+        case unavailable
+    }
+
+    /// The judge's name (`recorded` for a verdict replayed without one)
+    public var name: String
+    /// The model that answered (`unknown` for a verdict replayed without one)
+    public var model: String
+    public var verdict: Verdict
+    /// The tool the judge approved, or nil
+    public var toolId: String?
+    public var probability: Double?
+    public var confidence: Double?
+    /// `approved`, why it declined (`abstained`, `outside-shortlist`,
+    /// `below-threshold`) or why it was unavailable (`TIMEOUT`, `HTTP_503`,
+    /// ...); nil only when a replayed record carried none
+    public var reason: String?
+    /// The settings the shortlist was built with
+    public var margin: Double
+    public var maxCandidates: Int
+    /// The provider's request id, when it sent one
+    public var requestId: String?
+
+    public init(
+        name: String,
+        model: String,
+        verdict: Verdict,
+        toolId: String? = nil,
+        probability: Double? = nil,
+        confidence: Double? = nil,
+        reason: String? = nil,
+        margin: Double,
+        maxCandidates: Int,
+        requestId: String? = nil
+    ) {
+        self.name = name
+        self.model = model
+        self.verdict = verdict
+        self.toolId = toolId
+        self.probability = probability
+        self.confidence = confidence
+        self.reason = reason
+        self.margin = margin
+        self.maxCandidates = maxCandidates
+        self.requestId = requestId
+    }
+
+    public var jsonValue: AnyCodableValue {
+        func optional(_ s: String?) -> AnyCodableValue { s.map { .string($0) } ?? .null }
+        var object: [String: AnyCodableValue] = [
+            "name": .string(name),
+            "model": .string(model),
+            "verdict": .string(verdict.rawValue),
+            "toolId": optional(toolId),
+            "probability": probability.map { .double($0) } ?? .null,
+            "confidence": confidence.map { .double($0) } ?? .null,
+            "reason": optional(reason),
+            "margin": .double(margin),
+            "maxCandidates": .int(maxCandidates),
+        ]
+        if let requestId { object["requestId"] = .string(requestId) }
+        return .dict(object)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(jsonValue)
+    }
+
+    /// The fields `proofDigest` covers: name, model, verdict and toolId.
+    public var digestedJSON: AnyCodableValue {
+        .dict([
+            "name": .string(name),
+            "model": .string(model),
+            "verdict": .string(verdict.rawValue),
+            "toolId": toolId.map { .string($0) } ?? .null,
+        ])
+    }
+}
 
 /// One row of a proof's candidate table.
 public struct ProofCandidate: Sendable, Codable, Equatable {
@@ -193,7 +292,8 @@ public struct ProofTimings: Sendable, Codable, Equatable {
 /// call digest of what executed. Raw arguments are never recorded.
 ///
 /// `proofDigest` is `sha256hex(UTF8("smallchat.proof.v1") || 0x00 ||
-/// UTF8(JCS(proof without "timings" and "proofDigest"))`, so two runs that
+/// UTF8(JCS(proof without "timings" and "proofDigest", and with "judge"
+/// reduced to its name, model, verdict and toolId)))`, so two runs that
 /// made the same decision from the same inputs have the same digest
 /// whatever their timings. The step texts are this implementation's, so a
 /// Swift and a TypeScript proof of the same decision have the same shape,
@@ -225,9 +325,14 @@ public struct ResolutionProof: Sendable, Codable, Equatable {
     /// contentHash of the artifact the runtime was loaded from, when known
     public var artifactHash: String?
     public var steps: [ProofStep] = []
+    /// The shortlist judge's part, when a TypeScript runtime consulted one
+    /// (nil otherwise; this runtime never sets it). The digest covers only
+    /// its name, model, verdict and toolId.
+    public var judge: JudgeRecord?
     /// Excluded from `proofDigest`
     public var timings: ProofTimings = ProofTimings()
-    /// Digest of everything above except timings (see the type's documentation)
+    /// Digest of everything above except timings and the judge's undigested
+    /// fields (see the type's documentation)
     public var proofDigest: String = ""
 
     public init(
@@ -262,6 +367,13 @@ public struct ResolutionProof: Sendable, Codable, Equatable {
 
     /// The decision content (everything but `timings` and `proofDigest`) as JSON.
     public var bodyJSON: [String: AnyCodableValue] {
+        var object = baseJSON
+        if let judge { object["judge"] = judge.jsonValue }
+        return object
+    }
+
+    /// The body without the judge (absent, as in TypeScript, when none was consulted).
+    private var baseJSON: [String: AnyCodableValue] {
         func optional(_ s: String?) -> AnyCodableValue { s.map { .string($0) } ?? .null }
         return [
             "version": .int(version),
@@ -311,7 +423,9 @@ public struct ResolutionProof: Sendable, Codable, Equatable {
     public func computeDigest() -> String {
         // The body holds only finite numbers and strings from runtime state;
         // canonicalization cannot fail on it.
-        (try? domainDigest(Self.digestDomain, canonicalJSON(.dict(bodyJSON)))) ?? ""
+        var body = baseJSON
+        if let judge { body["judge"] = judge.digestedJSON }
+        return (try? domainDigest(Self.digestDomain, canonicalJSON(.dict(body)))) ?? ""
     }
 
     /// Recompute and store `proofDigest`. Call after the last change.
@@ -326,7 +440,7 @@ public struct ResolutionProof: Sendable, Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case version, intent, outcome, decision, tier, chosen, confidence, ran, callDigest, resolutionDigest
-        case candidates, thresholds, guards, embedder, artifactHash, steps, timings, proofDigest
+        case candidates, thresholds, guards, embedder, artifactHash, steps, judge, timings, proofDigest
     }
 
     public init(from decoder: Decoder) throws {
@@ -347,6 +461,7 @@ public struct ResolutionProof: Sendable, Codable, Equatable {
         embedder = try c.decodeIfPresent(EmbedderFingerprint.self, forKey: .embedder)
         artifactHash = try c.decodeIfPresent(String.self, forKey: .artifactHash)
         steps = try c.decodeIfPresent([ProofStep].self, forKey: .steps) ?? []
+        judge = try c.decodeIfPresent(JudgeRecord.self, forKey: .judge)
         timings = try c.decodeIfPresent(ProofTimings.self, forKey: .timings) ?? ProofTimings()
         proofDigest = try c.decodeIfPresent(String.self, forKey: .proofDigest) ?? ""
     }

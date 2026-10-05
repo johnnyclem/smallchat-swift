@@ -475,6 +475,13 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   and `boundPort` (start on port 0 and read the port). `serve` gains `--provider`,
   `--no-resolve-tool`, `--auth-token-file` and `--max-connections`.
 - `smallchat compile --dims` (hash embedder dimensions) and `smallchat resolve --json`.
+- **Proofs decode @smallchat/core's shortlist judge records.** `DecisionCode`
+  gains `judgeApproved` (`judge-approved`) and `judgeDeclined` (`judge-declined`),
+  `ProofStage` gains `judge`, and `ResolutionProof.judge` holds a `JudgeRecord`
+  (name, model, verdict, tool id, probability, confidence, reason, margin,
+  maxCandidates, request id). `proofDigest` covers only the record's name, model,
+  verdict and tool id (smallchat `spec/judge`, D4). This runtime has no judge and
+  never sets them; it reads and re-encodes the ones TypeScript proofs carry.
 - **Truth format v2 conformance in `swift test` (XSUITE-19).** `Scripts/sync-truth-fixtures.sh
   <stenographer checkout>` copies Stenographer's `spec/truth-format` (README, JSON
   Schema, golden fixtures) into `Tests/Fixtures/truth-format`, recording the commit
@@ -937,8 +944,9 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   compiled by @smallchat/core with its default ONNX embedder loads only with an
   `Embedder` of yours that declares the same fingerprint.
 - Not ported from @smallchat/core 1.0: argument coercion, the semantic map (learned
-  choices), observer feedback, the decision log, replay and explain. Proof digests
-  are per runtime (the proof step texts differ from TypeScript's).
+  choices), observer feedback, the decision log, replay, explain and the optional
+  shortlist judge (only its proof records are decoded). Proof digests are per
+  runtime (the proof step texts differ from TypeScript's).
 - `SmallChatImportance`, `SmallChatCRDT`, `SmallChatCompaction` and
   `SmallChatShorthand` are ports of smallchat's 0.4-era modules (TS PRs #55–#58),
   not of @shorthand/core 1.0, whose versions of them differ.
