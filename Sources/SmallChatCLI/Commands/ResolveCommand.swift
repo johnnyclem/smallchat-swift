@@ -9,7 +9,8 @@ struct ResolveCommand: AsyncParsableCommand {
         discussion: """
         Prints the runtime's decision: the outcome (resolved, needs-disambiguation, \
         unresolved), tier, decision code, the chosen tool id, the ranked candidates and \
-        the proof digest. This is the same resolution serve's smallchat_resolve tool and \
+        the proof digest. With --judge, the shortlist judge decides near-ties as it would in \
+        serve. This is the same resolution serve's smallchat_resolve tool and \
         an intent dispatch make; nothing is executed.
         """
     )
@@ -20,11 +21,13 @@ struct ResolveCommand: AsyncParsableCommand {
     @Argument(help: "Natural language intent to resolve")
     var intent: String
 
+    @OptionGroup var judgeOptions: JudgeOptions
+
     @Flag(help: "Print the resolution proof as JSON")
     var json: Bool = false
 
     func run() async throws {
-        let toolkit = try await loadArtifactRuntime(file)
+        let toolkit = try await loadArtifactRuntime(file, options: try judgeOptions.runtimeOptions())
         let resolution = try await toolkit.runtime.resolve(intent)
         if json {
             print(try prettyJSON(resolution.proof.jsonValue), terminator: "")

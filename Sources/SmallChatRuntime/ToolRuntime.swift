@@ -17,8 +17,20 @@ public struct RuntimeOptions: Sendable {
     /// LLM client for verification (required below HIGH by default),
     /// decomposition and refinement questions.
     public var llmClient: any LLMClient
-    /// Jev judge for below-HIGH or ambiguous shortlists. Nil leaves dispatch unchanged.
-    public var jev: JevJudge?
+    /// Shortlist judge (Judge.swift, spec/judge): an optional tie-breaker,
+    /// asked for a MEDIUM or LOW winner, or a HIGH winner whose runner-up is
+    /// within the margin; never for EXACT or NONE. Unreachable or failing,
+    /// it leaves the decision what it would be without one (the call still
+    /// waits up to its timeout, records the attempt and is not cached).
+    /// `D1Judge` (a local llama-server) and `JevJudge` (TypeSafe) ship here.
+    public var judge: (any ShortlistJudge)?
+    /// Where the judge's context comes from: truth entries and transcript
+    /// lines offered with the intent (`StenographerJudgeContext` in
+    /// SmallChatStenographer reads a running stenographer). Ignored without a judge.
+    public var judgeContext: (any JudgeContextProvider)?
+    /// Durable decision log: every resolve, dispatch and dispatch by id
+    /// appends one hash-chained JSONL line before anything executes.
+    public var decisionLog: DecisionLog?
     /// Intent pins (see `IntentPinRegistry`).
     public var intentPins: [IntentPin]
     /// contentHash of the artifact the tools came from, recorded in every proof.
@@ -33,7 +45,9 @@ public struct RuntimeOptions: Sendable {
         rateLimiter: SemanticRateLimiterOptions? = nil,
         dispatchConfig: DispatchConfig = DispatchConfig(),
         llmClient: any LLMClient = NoOpLLMClient(),
-        jev: JevJudge? = nil,
+        judge: (any ShortlistJudge)? = nil,
+        judgeContext: (any JudgeContextProvider)? = nil,
+        decisionLog: DecisionLog? = nil,
         intentPins: [IntentPin] = [],
         artifactHash: String? = nil
     ) {
@@ -45,7 +59,9 @@ public struct RuntimeOptions: Sendable {
         self.rateLimiter = rateLimiter
         self.dispatchConfig = dispatchConfig
         self.llmClient = llmClient
-        self.jev = jev
+        self.judge = judge
+        self.judgeContext = judgeContext
+        self.decisionLog = decisionLog
         self.intentPins = intentPins
         self.artifactHash = artifactHash
     }
@@ -110,7 +126,9 @@ public actor ToolRuntime {
             intentPins: pins,
             dispatchConfig: options.dispatchConfig,
             llmClient: options.llmClient,
-            jev: options.jev,
+            judge: options.judge,
+            judgeContext: options.judgeContext,
+            decisionLog: options.decisionLog,
             rateLimiter: options.rateLimiter.map { SemanticRateLimiter(options: $0) },
             artifactHash: options.artifactHash
         )
@@ -236,6 +254,54 @@ public actor ToolRuntime {
     /// Resolve an intent to at most one tool (`Resolution`). Never executes.
     /// Run the proposal with `dispatchById(_:args:options:)`, passing
     /// `resolution.proof.proofDigest` as `resolutionDigest` to link the two.
+    /// The decision log every resolution and dispatch is appended to, or nil (RuntimeOptions.decisionLog).
+    public var decisionLog: DecisionLog? {
+        get async { await context.decisionLog }
+    }
+
+    /// Grade a decision the shortlist judge took part in (one whose proof
+    /// carries `judge`): a correct guess is rewarded, a wrong one corrected.
+    /// The grade is appended to the decision log as a `judge-feedback` line
+    /// (when one is configured) and handed to the judge's `feedback()`; a
+    /// correction names the right tool when known. A resolution without a
+    /// judge record is refused: there is no judgement to grade. The result
+    /// says what happened, including a judge that threw.
+    public func gradeJudgement(
+        _ resolution: Resolution,
+        correct: Bool,
+        correctToolId: String? = nil,
+        reason: String? = nil,
+        principal: String? = nil
+    ) async throws -> (feedback: JudgeFeedback, logged: Bool, judgeInformed: Bool, judgeError: String?) {
+        guard let judge = resolution.proof.judge else {
+            throw JudgeSettingsError(message: "gradeJudgement: the resolution has no judge record (its proof.judge is absent), so there is no judgement to grade")
+        }
+        let chosen = resolution.chosen ?? judge.toolId
+        let right = correct ? chosen : correctToolId
+        if !correct, let right, right == chosen {
+            throw JudgeSettingsError(message: "gradeJudgement: a correction names a tool other than the one chosen (or none)")
+        }
+        let feedback = JudgeFeedback(outcome: correct ? .rewarded : .corrected, intent: resolution.intent, proofDigest: resolution.proof.proofDigest,
+                                     judge: judge, chosenToolId: chosen, correctToolId: right, reason: reason, principal: principal)
+        var logged = false
+        if let log = await context.decisionLog {
+            try await log.record(kind: .judgeFeedback, proof: resolution.proof, execution: .none, principal: principal, toolId: chosen,
+                                 feedback: DecisionFeedback(outcome: feedback.outcome, correctToolId: right, reason: reason))
+            logged = true
+        }
+        var informed = false
+        var judgeError: String?
+        if let target = await context.judge, target.name == judge.name {
+            do {
+                try await target.feedback(feedback)
+                informed = true
+            } catch {
+                judgeError = "\(error)"
+            }
+        }
+        return (feedback, logged, informed, judgeError)
+    }
+
     public func resolve(_ intent: String, options: ResolveOptions = ResolveOptions()) async throws -> Resolution {
         try await context.resolve(intent, options: options)
     }

@@ -88,19 +88,56 @@ checks is the set of vectors in @smallchat/core's `spec/`, copied into
 - **Artifacts:** the golden artifact loads and round-trips, every invalid artifact and
   embedder mismatch is refused, and compiling the golden manifest reproduces its
   content hash.
-- **Shortlist judge records:** every resolve and replay expectation in `spec/judge`
-  (decision, outcome, tier, `judge` step and `proof.judge`) decodes as a proof. The judge
-  itself is not ported, so its trigger, resolve, replay and wire cases do not run.
+- **Shortlist judge:** every case in `spec/judge`: the trigger (when a judge is asked),
+  resolve (what it may choose among, accept, decline and unavailable, what the proof
+  records and what its digest covers), replay (a recorded verdict answers without the
+  network) and the System One wire (the request sent, the answers accepted and refused).
 
 Outside those vectors the TypeScript runtime is the reference. Proof digests are per
 runtime (the proof step texts differ). Not ported yet: argument coercion, the semantic
-map (learned choices), observer feedback, the decision log, replay and explain. Nor is
-the optional shortlist judge (`spec/judge`): this runtime never consults one, but it
-decodes what TypeScript proofs record about one (the decision codes `judge-approved` and
-`judge-declined`, the `judge` step and `ResolutionProof.judge`). The only
+map (learned choices) and observer feedback. The optional shortlist judge, the decision
+log, replay and explain are ported (see [The shortlist judge](#the-shortlist-judge)). The only
 built-in embedder is the hash embedder (`LocalEmbedder`, the same vectors as
 @smallchat/core's hash embedder), so an artifact compiled by @smallchat/core with its
 default ONNX embedder needs an `Embedder` of yours that declares the same fingerprint.
+
+### The shortlist judge
+
+A judge is an optional tie-breaker for near-ties (`spec/judge`): asked for a MEDIUM or
+LOW winner, or a HIGH winner whose runner-up is within the margin, never for EXACT or
+NONE, and only to choose among candidates the dispatch policy would already let run. A
+judge that is down, slow or answers badly leaves the decision what it would be without
+one (recorded as `unavailable`, never cached). Three ship in `SmallChatRuntime`, all
+speaking the System One wire (`POST /v1/systemone`):
+
+- **`D1Judge`**: Liquid AI's open-weight d1-omni 600M decision model, served locally by
+  llama.cpp's `llama-server` (`smallchat judge download && smallchat judge serve` in the
+  TypeScript CLI, or any llama-server on `http://127.0.0.1:8080`). No key, loopback only
+  unless `allowRemote`.
+- **`JevJudge`**: TypeSafe's hosted Jev (`TYPESAFE_API_KEY`).
+- **`SystemOneJudge`**: any compatible endpoint you run (`judgeFromSpec("https://…")`).
+
+```swift
+let runtime = try await MCPToolkit.make(artifact: artifact, options: RuntimeOptions(
+    judge: try D1Judge(),
+    judgeContext: StenographerJudgeContext(client: try StenographerClient()),   // optional
+    decisionLog: try DecisionLog(path: "decisions.jsonl")                       // optional
+))
+```
+
+With a `judgeContext`, the judge decides with the session's truth in front of it: the
+tombstones and unverified claims most relevant to the intent (graded `verified`,
+`asserted`, `migration` or `advisory`) and the newest transcript lines, read from a
+running stenographer by `SmallChatStenographer`. The proof records only that context was
+offered and by whom, never its text. Grade a judged resolution with
+`runtime.gradeJudgement(resolution, correct: false, correctToolId: "mail/send")`: the
+grade goes to the decision log as a `judge-feedback` line, to the judge's `feedback`
+hook (System One judges hand it to `onFeedback`), and to the runtime's negative examples
+when the judge was wrong. `ToolRuntime.explain(intent)` says which judge is configured and
+whether a live dispatch would ask it; `replayDecisionLog` re-decides a log with its
+recorded verdicts and reports any divergence. The CLI exposes all of it: `smallchat
+resolve|explain|repl --judge d1|jev|<url> [--judge-context http://127.0.0.1:8787]
+[--decision-log decisions.jsonl]`.
 
 ## Quick Start
 
@@ -140,6 +177,7 @@ CI builds every "yes" cell and runs the test suite on macOS and Linux (see `.git
 |---|---|---|---|
 | `SmallChatCore`, `SmallChatRuntime`, `SmallChatCompiler`, `SmallChatEmbedding` | yes | yes | yes |
 | `SmallChatShorthand`, `SmallChatImportance`, `SmallChatCRDT`, `SmallChatCompaction`, `SmallChatTruth`, `SmallChatMemex`, `SmallChatDream` | yes | yes | yes |
+| `SmallChatStenographer` | yes | yes | yes, without `StenographerProcess` (spawns `npx`) |
 | `SmallChatTransport`, `SmallChatMCP`, `SmallChatChannel` | yes | yes | yes, without subprocess APIs ¹ |
 | `SmallChat` (umbrella) | yes | yes, without `SmallChatUI` ² | yes |
 | `SmallChatUI` | yes | no (needs SwiftUI/WebKit) | yes |
@@ -304,7 +342,8 @@ swift run smallchat <command> [options]
 |---------|-------------|---------|
 | `setup` | Interactive wizard — auto-detect MCP servers and compile a toolkit | `smallchat setup` |
 | `compile` | Compile manifests into a dispatch artifact (`--strict` treats collisions as errors) | `smallchat compile --source ~/.mcp.json` |
-| `resolve` | Show how an intent resolves (outcome, tool id, candidates, proof digest; nothing runs) | `smallchat resolve tools.toolkit.json "search for code"` |
+| `resolve` | Show how an intent resolves (outcome, tool id, candidates, proof digest; nothing runs); `--judge d1\|jev\|<url>`, `--judge-context <stenographer url>`, `--decision-log <file>` | `smallchat resolve tools.toolkit.json "search for code"` |
+| `explain` | Explain a resolution: thresholds, guards, every candidate's policy verdict, the judge and what it would be asked (nothing runs) | `smallchat explain tools.toolkit.json "search for code" --judge d1` |
 | `serve` | Serve a toolkit as an MCP server over Streamable HTTP | `smallchat serve --source ./manifests --port 3001` |
 | `channel` | Run a Claude Code channel server over stdio (optional HTTP bridge) | `smallchat channel --name ci` |
 | `install` | Render an install plan for a registry entry or bundle | `smallchat install examples/registry/github.json` |
@@ -353,7 +392,7 @@ SmallChatAgents ─── Agent messenger core: session discovery, handles, @men
 | Module | Description |
 |--------|-------------|
 | **SmallChatCore** | Type system, selectors, dispatch tables, resolution cache, overload tables, canonicalization, vector math, intent pinning, rate limiting, confidence tiers (`DispatchConfig`, incl. the `miniLM` preset), App/UI types (`ComponentSelector`, `AppManifest`, `AppArtifact`) |
-| **SmallChatRuntime** | `ToolRuntime` actor, `resolve` / `dispatchById` / intent dispatch, the dispatch policy, verification, decomposition, refinement, `DispatchBuilder` fluent API, streaming events, method swizzling, `AppRuntime` for UI dispatch |
+| **SmallChatRuntime** | `ToolRuntime` actor, `resolve` / `dispatchById` / intent dispatch, the dispatch policy, verification, decomposition, refinement, the shortlist judge (`D1Judge`, `JevJudge`, `SystemOneJudge`, judge context and grading), the hash-chained decision log with replay, `explain`, `DispatchBuilder` fluent API, streaming events, method swizzling, `AppRuntime` for UI dispatch |
 | **SmallChatCompiler** | 4-phase compilation pipeline: parse → embed → link → output, plus `AppCompiler` for the App/UI layer |
 | **SmallChatEmbedding** | `LocalEmbedder` (FNV-1a hash, 384 dims by default; the same vectors as @smallchat/core's hash embedder), `MemoryVectorIndex` for dev/test |
 | **SmallChatTransport** | Protocol-agnostic transport layer — HTTP, MCP stdio, MCP SSE, local — with auth, retry, timeout, and circuit breaker middleware; `LoomMCPClient` for loom-mcp; `RtkTransport` for `rtk`-based prefixing/filtering |
@@ -365,6 +404,7 @@ SmallChatAgents ─── Agent messenger core: session discovery, handles, @men
 | **SmallChatCRDT** | Replicated types for multi-agent shared memory: `LWWMap`, `ORSet`, `GCounter`, `VectorClock`. `LWWMap` merges are not commutative when two writes share a timestamp and replica (see the CHANGELOG's known issues) |
 | **SmallChatCompaction** | `CompactionVerifier` — three-strategy verification (resampling, contradiction detection, invariants) for safe history compaction |
 | **SmallChatTruth** | Truth format v2 reader (Stenographer's truth streams): hash-chain checks, TRANSITION fold, multi-file merge, fail-closed statuses, evidence classes and the agent quorum, §7 consumption rules, marker escaping, truth-preserving compaction invariants, proposal-only write path |
+| **SmallChatStenographer** | Swift adapter over the TypeScript stenographer: `StenographerClient` for its REST API (status, messages, truth search, docket, objections, decision-model advice and consults, proposals and the notary), `StenographerJudgeContext` (its tombstones and transcript as the judge's context) and `StenographerLaunch` / `StenographerProcess` (`npx -y @stenographer/core start …`) |
 | **SmallChatAgents** | Agent messenger core: Claude Code session discovery (live registry + transcripts), durable renamable handles, `@mention` parsing, direct/group routing with private-until-shared replies, the switchboard relay over Claude Code inter-agent messaging, headless `claude -p --resume`, and the stenographer watcher |
 | **SmallChatMemex** | Knowledge-base compiler: the same Read → Extract → Embed → Link → Emit pipeline as `ToolCompiler`, driving `smallchat memex` |
 | **SmallChatUI** | SwiftUI `WKWebView` wrapper (`AppWebView`) for rendering App/UI content, with sandboxed navigation and CSP injection |
@@ -513,9 +553,10 @@ smallchat-swift is part of the smallchat suite. It follows
 `spec/` vectors, and it is wired to [Stenographer](https://github.com/johnnyclem/stenographer):
 `SmallChatTruth` reads Stenographer's truth format v2 and runs its golden fixtures, the
 messenger receives Stenographer's objections on its channel bridge and submits
-tombstones to Stenographer's REST API for a person to notarize, and the copied launch
-command runs `npx -y @stenographer/core`. None of these is a SwiftPM dependency: the
-contracts are the vendored fixtures.
+tombstones to Stenographer's REST API for a person to notarize, `SmallChatStenographer`
+wraps that REST API (and launches `npx -y @stenographer/core`) so a shortlist judge can
+read the ledger and transcript, and the copied launch command runs the same package. None
+of these is a SwiftPM dependency: the contracts are the vendored fixtures.
 
 [@shorthand/core](https://github.com/johnnyclem/short-hand) is a separate TypeScript
 package. This repo's `SmallChatShorthand`, `SmallChatImportance`, `SmallChatCRDT` and
@@ -564,7 +605,7 @@ smallchat-swift/
 │   │   ├── IntentPinRegistry.swift # Collision attack guards
 │   │   ├── VectorMath.swift        # Cosine similarity (Accelerate)
 │   │   └── Canonicalize.swift      # Intent normalization
-│   ├── SmallChatRuntime/           # Dispatch engine (ToolRuntime, AppRuntime, DispatchBuilder)
+│   ├── SmallChatRuntime/           # Dispatch engine (ToolRuntime, AppRuntime, DispatchBuilder, Judge, DecisionLog, Explain)
 │   ├── SmallChatCompiler/          # 4-phase compiler (tools + apps)
 │   ├── SmallChatEmbedding/         # Hash-based embeddings
 │   ├── SmallChatTransport/         # Network transports + middleware (incl. RTK/, Loom/)
@@ -576,12 +617,13 @@ smallchat-swift/
 │   ├── SmallChatCRDT/              # Multi-agent shared memory (LWWMap, ORSet, GCounter)
 │   ├── SmallChatCompaction/        # History-compaction verification
 │   ├── SmallChatMemex/             # Knowledge-base compiler
+│   ├── SmallChatStenographer/      # Adapter over the TypeScript stenographer (REST client, judge context, launcher)
 │   ├── SmallChatAgents/            # Agent messenger core (sessions, handles, routing, switchboard)
 │   ├── SmallChatUI/                # WKWebView wrapper for App/UI surfaces
-│   ├── SmallChatCLI/               # CLI entry point + 13 commands (Commands/)
+│   ├── SmallChatCLI/               # CLI entry point + 14 commands (Commands/)
 │   └── SmallChatApp/               # macOS SwiftUI messenger (Messenger/) + Toolkit panels (Views/)
 ├── Tests/                          # One *Tests target per module above, plus SmallChatConformanceTests
-│   └── Fixtures/                   # Vendored contracts: spec/ (@smallchat/core), truth-format/ (Stenographer)
+│   └── Fixtures/                   # Vendored contracts: spec/ (@smallchat/core), truth-format/ (Stenographer), decision-log/ (a TypeScript log)
 ├── Scripts/                        # sync-spec.sh, sync-truth-fixtures.sh
 ├── examples/                       # loom-mcp manifest, registry entries (GitHub, Slack, Postgres, loom)
 ├── docs/                           # Archived: ecosystem evaluation, 0.5.0 roadmap

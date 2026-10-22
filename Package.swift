@@ -44,13 +44,16 @@ let package = Package(
         .library(name: "SmallChatCompaction", targets: ["SmallChatCompaction"]),
         .library(name: "SmallChatTruth", targets: ["SmallChatTruth"]),
         .library(name: "SmallChatMemex", targets: ["SmallChatMemex"]),
+        .library(name: "SmallChatStenographer", targets: ["SmallChatStenographer"]),
         .library(name: "SmallChatAgents", targets: ["SmallChatAgents"]),
         .library(name: "SmallChat", targets: ["SmallChat"]),
         .executable(name: "smallchat", targets: ["SmallChatCLI"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
-        .package(url: "https://github.com/stephencelis/SQLite.swift", from: "0.15.0"),
+        // SQLite.swift 0.17 declares Swift language mode 6 and does not compile on Linux Swift 6.1
+        // (DispatchSpecificKey is not Sendable there); 0.15 and 0.16 build everywhere CI runs.
+        .package(url: "https://github.com/stephencelis/SQLite.swift", "0.15.0" ..< "0.17.0"),
         .package(url: "https://github.com/apple/swift-nio", from: "2.70.0"),
         .package(url: "https://github.com/apple/swift-collections", from: "1.1.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0" ..< "6.0.0"),
@@ -155,6 +158,11 @@ let package = Package(
                 "SmallChatImportance",
             ]
         ),
+        // ---- Stenographer (a Swift client for the TypeScript stenographer: REST, the notary, the judge's context) ----
+        .target(
+            name: "SmallChatStenographer",
+            dependencies: ["SmallChatCore", "SmallChatRuntime", "SmallChatTruth"]
+        ),
         // ---- Agents (messenger: Claude Code sessions, groups, switchboard, stenographer) ----
         .target(
             name: "SmallChatAgents",
@@ -186,6 +194,7 @@ let package = Package(
                 "SmallChatCompaction",
                 "SmallChatTruth",
                 "SmallChatMemex",
+                "SmallChatStenographer",
             ] + (includeAppleUI
                 ? [.target(name: "SmallChatUI", condition: .when(platforms: [.macOS, .iOS]))]
                 : [])
@@ -242,6 +251,7 @@ let package = Package(
         // Tests/Fixtures/truth-format by Scripts/sync-truth-fixtures.sh).
         .testTarget(name: "SmallChatTruthTests", dependencies: ["SmallChatTruth", "SmallChatCompaction", "SmallChatCore"]),
         .testTarget(name: "SmallChatMemexTests", dependencies: ["SmallChatMemex", "SmallChatCore"]),
+        .testTarget(name: "SmallChatStenographerTests", dependencies: ["SmallChatStenographer", "SmallChatRuntime", "SmallChatCore"]),
         .testTarget(
             name: "SmallChatAgentsTests",
             dependencies: [

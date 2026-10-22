@@ -475,14 +475,50 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   and `boundPort` (start on port 0 and read the port). `serve` gains `--provider`,
   `--no-resolve-tool`, `--auth-token-file` and `--max-connections`.
 - `smallchat compile --dims` (hash embedder dimensions) and `smallchat resolve --json`.
-- **Proofs decode @smallchat/core's shortlist judge records.** `DecisionCode`
-  gains `judgeApproved` (`judge-approved`) and `judgeDeclined` (`judge-declined`),
-  `ProofStage` gains `judge`, and `ResolutionProof.judge` holds a `JudgeRecord`
-  (name, model, verdict, tool id, probability, confidence, reason, margin,
-  maxCandidates, request id). `proofDigest` covers only the record's name, model,
-  verdict and tool id (smallchat `spec/judge`, D4). This runtime has no judge and
-  never sets them; it reads and re-encodes the ones TypeScript proofs carry. The
-  conformance target decodes every resolve and replay expectation in `spec/judge`.
+- **The shortlist judge (smallchat `spec/judge`).** `RuntimeOptions.judge` takes a
+  `ShortlistJudge`, an optional tie-breaker asked for a MEDIUM or LOW winner, or a
+  HIGH winner whose runner-up is within the margin (never EXACT or NONE), and only
+  to choose among near-ties the dispatch policy would let run (D1–D3). Accept,
+  decline and unavailable follow the spec; the `judge` step and
+  `ResolutionProof.judge` (`JudgeRecord`: name, model, verdict, tool id,
+  probability, confidence, reason, margin, maxCandidates, request id) are recorded
+  and `proofDigest` covers only name, model, verdict and tool id (D4). Judged
+  resolutions are never cached. `ResolveOptions.judge` is `.off` (no judge) or
+  `.recorded(verdict)` (replay without the network). The conformance target runs
+  every trigger, resolve, replay and wire case in `spec/judge`.
+- **Three System One judges.** `D1Judge` runs Liquid AI's open-weight d1-omni 600M
+  decision model through a local llama-server (default `http://127.0.0.1:8080`, no
+  key, loopback unless `allowRemote`; `SMALLCHAT_D1_URL`, `SMALLCHAT_D1_MODEL`),
+  `JevJudge` is TypeSafe's hosted Jev (`TYPESAFE_API_KEY`), and `SystemOneJudge`
+  any compatible endpoint. `judgeFromSpec("d1" | "jev" | url)` builds one from a
+  CLI spec or `SMALLCHAT_JUDGE`. Keys are never logged, serialized or echoed.
+- **Judge context and grading.** `RuntimeOptions.judgeContext` names a
+  `JudgeContextProvider` whose truth entries (graded `verified`, `asserted`,
+  `migration`, `advisory`) and transcript lines are folded into the judge's state
+  (bounded by `JudgeContextLimits`); the proof records that context was offered and
+  by whom, never its text. `ToolRuntime.gradeJudgement(_:correct:correctToolId:)`
+  rewards or corrects a judged resolution: a `judge-feedback` decision-log line,
+  the judge's `feedback` hook (`SystemOneJudgeOptions.onFeedback`) and, when the
+  judge was wrong, a negative example for the runtime.
+- **The decision log, replay and explain.** `DecisionLog` appends one hash-chained
+  JSONL line (`smallchat.decision.v1`, the same chain as @smallchat/core's: a
+  TypeScript log verifies here and vice versa, `Tests/Fixtures/decision-log`) for
+  every resolve, dispatch and dispatch by id before anything executes;
+  `verifyDecisionLog`, `readDecisionLog` and `ToolRuntime.replayDecisionLog` re-decide
+  a log with its recorded judge verdicts and report divergences.
+  `ToolRuntime.explain(intent)` / `explain(resolution)` and `formatExplanation`
+  give every candidate's policy verdict against the thresholds and guards, the
+  judge configured, what it decided or whether a live dispatch would ask it.
+- **`SmallChatStenographer`**, an adapter over the TypeScript stenographer:
+  `StenographerClient` (its REST API: status, messages, truth and truth search,
+  docket, precedents, derivations, objections, decision-model advice, stats and
+  consults, proposals and the notary routes; loopback only unless `allowRemote`),
+  `StenographerJudgeContext` (its tombstones and transcript as the judge's
+  context, within a time budget) and `StenographerLaunch` / `StenographerProcess`
+  (`npx -y @stenographer/core start …`, secrets through the environment).
+- `smallchat explain`, and `--judge`, `--judge-context`,
+  `--judge-context-token-file` and `--decision-log` on `resolve`, `explain` and
+  `repl`.
 - **Truth format v2 conformance in `swift test` (XSUITE-19).** `Scripts/sync-truth-fixtures.sh
   <stenographer checkout>` copies Stenographer's `spec/truth-format` (README, JSON
   Schema, golden fixtures) into `Tests/Fixtures/truth-format`, recording the commit
@@ -945,9 +981,9 @@ See [`MIGRATION.md`](MIGRATION.md) for how to update.
   compiled by @smallchat/core with its default ONNX embedder loads only with an
   `Embedder` of yours that declares the same fingerprint.
 - Not ported from @smallchat/core 1.0: argument coercion, the semantic map (learned
-  choices), observer feedback, the decision log, replay, explain and the optional
-  shortlist judge (only its proof records are decoded). Proof digests are per
-  runtime (the proof step texts differ from TypeScript's).
+  choices) and observer feedback. Proof digests are per runtime (the proof step
+  texts differ from TypeScript's), so a TypeScript decision log replays here with
+  the same decisions and different digests.
 - `SmallChatImportance`, `SmallChatCRDT`, `SmallChatCompaction` and
   `SmallChatShorthand` are ports of smallchat's 0.4-era modules (TS PRs #55–#58),
   not of @shorthand/core 1.0, whose versions of them differ.

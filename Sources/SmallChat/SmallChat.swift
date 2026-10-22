@@ -12,6 +12,7 @@
 @_exported import SmallChatCRDT
 @_exported import SmallChatCompaction
 @_exported import SmallChatTruth
+@_exported import SmallChatStenographer
 @_exported import SmallChatMemex
 // SmallChatUI (SwiftUI + WKWebView) is part of the umbrella on Apple platforms
 // only; see the platform notes in Package.swift.

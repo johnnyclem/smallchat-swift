@@ -59,6 +59,11 @@ extension AnyCodableValue {
         return nil
     }
 
+    var dictValue: [String: AnyCodableValue] {
+        if case .dict(let object) = self { return object }
+        return [:]
+    }
+
     var isNull: Bool {
         if case .null = self { return true }
         return false

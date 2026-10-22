@@ -43,8 +43,7 @@ public enum DecisionCode: String, Sendable, Codable, Equatable {
     /// Sub-HIGH candidate approved by the LLM verifier
     case llmVerified = "llm-verified"
     /// The shortlist judge chose this candidate among the near-ties it was
-    /// offered (any tier or rank). Decoded from TypeScript proofs; this
-    /// runtime has no judge and never decides this.
+    /// offered (any tier or rank).
     case judgeApproved = "judge-approved"
     /// Sub-HIGH candidate passed schema/keyword verification (requireLLMForSubHighDispatch off)
     case verified
@@ -55,8 +54,7 @@ public enum DecisionCode: String, Sendable, Codable, Equatable {
     /// Every candidate failed verification
     case verificationFailed = "verification-failed"
     /// The shortlist judge answered and chose none of the offered tools
-    /// (abstained, an id not offered, a low probability). Decoded from
-    /// TypeScript proofs; this runtime has no judge and never decides this.
+    /// (abstained, an id not offered, a low probability).
     case judgeDeclined = "judge-declined"
     /// Destructive tool below EXACT tier
     case destructiveNeedsExact = "destructive-needs-exact"
@@ -83,7 +81,7 @@ public enum ProofStage: String, Sendable, Codable, Equatable {
     case vectorSearch = "vector_search"
     case overload
     case `protocol`
-    /// The shortlist judge's step (TypeScript proofs only)
+    /// The shortlist judge's step
     case judge
     case verification
     case policy
@@ -98,10 +96,8 @@ public enum ProofStage: String, Sendable, Codable, Equatable {
 // MARK: - Proof
 
 /// The shortlist judge's part in a decision: the shape of @smallchat/core
-/// 1.0's `JudgeRecord` (smallchat spec/judge, D4).
-///
-/// This runtime has no judge, so it never records one. It decodes the
-/// records TypeScript proofs carry and encodes them back unchanged.
+/// 1.0's `JudgeRecord` (smallchat spec/judge, D4), written by this runtime
+/// when it consults a judge and decoded from TypeScript proofs unchanged.
 public struct JudgeRecord: Sendable, Codable, Equatable {
     /// What the judge's answer came to.
     public enum Verdict: String, Sendable, Codable, Equatable {
@@ -325,7 +321,7 @@ public struct ResolutionProof: Sendable, Codable, Equatable {
     /// contentHash of the artifact the runtime was loaded from, when known
     public var artifactHash: String?
     public var steps: [ProofStep] = []
-    /// The shortlist judge's part, when a TypeScript runtime consulted one
+    /// The shortlist judge's part, when one was consulted
     /// (nil otherwise; this runtime never sets it). The digest covers only
     /// its name, model, verdict and toolId.
     public var judge: JudgeRecord?
