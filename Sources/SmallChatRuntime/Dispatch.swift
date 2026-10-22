@@ -14,12 +14,25 @@ public struct ResolveOptions: Sendable {
     public var args: [String: any Sendable]?
     /// Who is asking (scopes the rate limiter).
     public var principal: String?
+    /// The shortlist judge for this call. Nil: the runtime's
+    /// (RuntimeOptions.judge). `.off`: no judge; the call decides as a
+    /// runtime without one. `.recorded`: a recorded verdict answers in the
+    /// judge's place and no judge is called, which is how replay
+    /// reproduces judged decisions without the network.
+    public var judge: JudgeOverride?
 
-    public init(learn: Bool = false, args: [String: any Sendable]? = nil, principal: String? = nil) {
+    public init(learn: Bool = false, args: [String: any Sendable]? = nil, principal: String? = nil, judge: JudgeOverride? = nil) {
         self.learn = learn
         self.args = args
         self.principal = principal
+        self.judge = judge
     }
+}
+
+/// `ResolveOptions.judge`: no judge, or a recorded verdict in its place.
+public enum JudgeOverride: Sendable, Equatable {
+    case off
+    case recorded(RecordedJudgeVerdict)
 }
 
 /// What `resolve(intent)` decided. Nothing has executed.
@@ -102,6 +115,15 @@ public enum DispatchMetadataKey {
     public static let refinement = "refinement"
     /// `Int` (outcome throttled)
     public static let retryAfterMs = "retryAfterMs"
+    /// `JudgeMetadata` when a shortlist judge took part: who it was, its verdict and the tool it chose
+    public static let judge = "judge"
+}
+
+/// `metadata["judge"]` of a dispatch result a shortlist judge took part in.
+public struct JudgeMetadata: Sendable, Equatable {
+    public var name: String
+    public var verdict: JudgeRecord.Verdict
+    public var toolId: String?
 }
 
 // MARK: - Internal state
@@ -135,6 +157,16 @@ struct ResolveRun: Sendable {
     var depth: Int
     /// intentKeys of the intents this one was decomposed from
     var ancestors: [String]
+    /// ResolveOptions.judge (nil: the runtime's judge, asked live)
+    var judge: JudgeOverride? = nil
+    /// explain(intent): with `.off`, note whether the runtime's judge would have been asked
+    var judgeProbe: JudgeProbe? = nil
+}
+
+/// Whether a live dispatch would ask the runtime's judge (explain never asks it).
+final class JudgeProbe: @unchecked Sendable {
+    /// Set when it would: the trigger and the offered tool ids. Nil when not.
+    var wouldAsk: (trigger: JudgeTrigger, offered: [String])?
 }
 
 /// Mutable state of one resolution (proof, exclusions, the intent's own vector).
@@ -155,6 +187,10 @@ private final class ResolveState: @unchecked Sendable {
 
 /// Nearest tools offered as refinement options start at this similarity.
 let refinementFloor = 0.3
+/// The cutoff `dispatch` uses when it stamps `metadata["ambiguous"]`: more
+/// than one candidate and a winner at or under this score. A flag for
+/// callers; it decides nothing (the judge's trigger is `judgeTrigger`).
+public let ambiguousConfidence = 0.90
 /// How many vector matches resolution considers.
 let searchTopK = 5
 
@@ -178,14 +214,31 @@ extension DispatchContext {
     /// not enter into it. An LLM verifier's answers are an input like any
     /// other.
     public func resolve(_ intent: String, options: ResolveOptions = ResolveOptions()) async throws -> Resolution {
-        try await resolveInternal(intent, run: ResolveRun(
+        let r = try await resolveInternal(intent, run: ResolveRun(
             learn: options.learn,
             args: options.args,
             principal: options.principal,
             allowDecomposition: false,
             depth: 0,
-            ancestors: []
-        )).resolution
+            ancestors: [],
+            judge: options.judge
+        ))
+        try await decisionLog?.record(kind: .resolve, proof: r.resolution.proof, execution: .none, principal: options.principal)
+        return r.resolution
+    }
+
+    /// Resolve as `explain(intent)` does: learning off, no judge asked (a
+    /// recorded verdict in `options.judge` still answers in its place), and
+    /// whether a live dispatch would ask the runtime's judge noted.
+    func resolveForExplain(_ intent: String, options: ResolveOptions) async throws -> (resolution: Resolution, wouldAsk: (trigger: JudgeTrigger, offered: [String])??) {
+        let judge = options.judge ?? JudgeOverride.off
+        let probe: JudgeProbe? = (options.judge == nil && self.judge != nil) ? JudgeProbe() : nil
+        let r = try await resolveInternal(intent, run: ResolveRun(
+            learn: false, args: options.args, principal: options.principal, allowDecomposition: false, depth: 0, ancestors: [],
+            judge: judge, judgeProbe: probe
+        ))
+        try await decisionLog?.record(kind: .resolve, proof: r.resolution.proof, execution: .none, principal: options.principal)
+        return (r.resolution, probe.map { $0.wouldAsk })
     }
 
     func resolveInternal(_ rawIntent: String, run: ResolveRun) async throws -> InternalResolution {
@@ -492,47 +545,117 @@ extension DispatchContext {
             return finish(.resolved, .decomposed, ranked: ranked, chosen: nil, decomposition: subIntents)
         }
 
-        // 10. JEV -- only for a below-HIGH winner, or the same ambiguous case
-        // dispatch stamps later (more than one candidate, winner <= 0.90).
-        // A decline does not authorize dispatch.
+        // 10. JUDGE (optional; Judge.swift, spec/judge) -- a below-HIGH winner,
+        // or a HIGH winner with a runner-up within the margin; never EXACT,
+        // and never a winner the policy refuses. The judge may only pick
+        // among near-ties of the winner it could then run. Unavailable:
+        // decide as without a judge. Declined: needs-disambiguation. A
+        // recorded verdict (replay) answers in the judge's place.
         var chosen: Candidate? = best
         var llmApproved = false
-        var jevDeclined = false
-        if let jev = jev {
-            if let trigger = jevTrigger(bestTier: bestTier, bestScore: best.score, candidateCount: ranked.count) {
-                let shortlist = Array(ranked.filter { computeTier($0.score, thresholds: thresholds) != .none }.prefix(jev.maxCandidates))
-                var described: [JevCandidate] = []
-                for c in shortlist {
-                    let schema = c.imp.schema ?? (try? await c.imp.loadSchema())
-                    described.append(JevCandidate(
-                        toolId: c.toolId,
-                        description: schema?.description ?? c.selector.canonical,
-                        score: c.score
-                    ))
-                }
-                let verdict = await jev.judge(intent: intent, candidates: described, trigger: trigger)
-                state.step(.verification, verdict.reason, [
-                    "judge": .string("jev"),
-                    "trigger": .string(verdict.trigger.rawValue),
-                    "toolId": .string(verdict.toolId ?? ""),
-                    "probability": .double(verdict.probability),
-                ])
-                if let id = verdict.toolId, let match = ranked.first(where: { $0.toolId == id }) {
-                    chosen = match
-                    llmApproved = true
+        var judgeAsked = false
+        var judgeApproved = false
+        let verifiedTier: (DispatchTier) -> Bool = { subHigh($0) || (config.strict && $0 != .exact) }
+        var recorded: RecordedJudgeVerdict?
+        var liveJudge: (any ShortlistJudge)?
+        var probe: JudgeProbe?
+        switch run.judge {
+        case nil: liveJudge = self.judge
+        case .off?: probe = run.judgeProbe
+        case .recorded(let verdict)?: recorded = verdict
+        }
+        let settings: JudgeSettings? = recorded.map { recordedJudgeSettings($0, configured: judgeSettings) } ?? (liveJudge != nil || probe != nil ? judgeSettings : nil)
+        if let settings {
+            let trigger = judgeTrigger(tier: bestTier, bestScore: best.score, runnerUpScore: ranked.count > 1 ? ranked[1].score : nil, margin: settings.margin)
+            var offered: [Candidate] = []
+            if trigger != nil {
+                offered = await shortlistFor(ranked, settings: settings,
+                    allowed: { c in (try? await judge(c, llmApproved: true))?.allow ?? false },
+                    passes: { c in
+                        // What an approval still has to pass: the required parameters when the
+                        // arguments are known and, where the tier is verified, keyword overlap.
+                        let verifiedHere = verifiedTier(computeTier(c.score, thresholds: thresholds))
+                        return await verify(c.imp, intent: intent, args: args ?? [:], llm: NoOpLLMClient(), options: VerificationOptions(
+                            skipLLMCheck: true, skipSchemaCheck: args == nil, minOverlap: verifiedHere ? 0.15 : 0
+                        )).pass
+                    })
+            }
+            let ids = offered.map(\.toolId)
+            // A HIGH winner alone is no near-tie: the judge is asked only to choose among two or more.
+            let asks = !offered.isEmpty && (subHigh(bestTier) || offered.count > 1)
+            if let trigger, asks, let probe {
+                probe.wouldAsk = (trigger, ids)
+            } else if let trigger, asks {
+                judgeAsked = true
+                // A recorded verdict is recorded under its own name and model, never the runtime judge's.
+                let name = recorded.map { $0.name ?? "recorded" } ?? liveJudge!.name
+                let configuredModel = recorded.map { $0.model ?? "unknown" } ?? liveJudge!.model
+                var contextName: String?
+                let judged: JudgeVerdict
+                if let recorded {
+                    judged = replayJudgeVerdict(recorded, offered: ids, model: configuredModel)
                 } else {
-                    jevDeclined = true
+                    var described: [JudgeCandidate] = []
+                    for c in offered {
+                        var schema = c.imp.schema
+                        if schema == nil { schema = try? await c.imp.loadSchema() }
+                        let description = (schema?.description).flatMap { $0.isEmpty ? nil : $0 } ?? c.selector.canonical
+                        described.append(JudgeCandidate(toolId: c.toolId, description: judgeDescription(description)))
+                    }
+                    let asked = await askJudge(liveJudge!, request: JudgeRequest(intent: intent, trigger: trigger, candidates: described),
+                                               timeoutMs: settings.timeoutMs, provider: judgeContext, principal: run.principal)
+                    contextName = asked.contextName
+                    judged = acceptJudgeAnswer(asked.answer, offered: ids, acceptThreshold: settings.acceptThreshold, configuredModel: configuredModel)
+                }
+                state.proof.judge = JudgeRecord(
+                    name: name, model: judged.model, verdict: judged.verdict, toolId: judged.toolId, probability: judged.probability,
+                    confidence: judged.confidence, reason: judged.reason, margin: settings.margin, maxCandidates: settings.maxCandidates, requestId: judged.requestId
+                )
+                var detail: [String: AnyCodableValue] = [
+                    "judge": .string(name),
+                    "model": .string(judged.model),
+                    "verdict": .string(judged.verdict.rawValue),
+                    "toolId": judged.toolId.map { .string($0) } ?? .null,
+                    "trigger": .string(trigger.rawValue),
+                    "offered": .array(ids.map { .string($0) }),
+                ]
+                if let contextName { detail["context"] = .string(contextName) }
+                state.step(.judge, judgeStepText(name: name, judged: judged, offered: ids.count, trigger: trigger), detail)
+                if judged.verdict == .declined {
+                    return await disambiguate(.judgeDeclined, ranked,
+                        reason: "The \(name) judge chose none of the \(ids.count) offered tool(s) for \"\(intent)\" (\(judged.reason ?? "no reason recorded"))")
+                }
+                if judged.verdict == .approved, let approved = offered.first(where: { $0.toolId == judged.toolId }) {
+                    chosen = approved
+                    judgeApproved = true
+                    llmApproved = true
                 }
             }
         }
-        if jevDeclined {
-            return await disambiguate(.verificationFailed, ranked, reason: "Jev declined to judge \"\(intent)\"")
-        }
 
-        // 11. VERIFICATION -- below HIGH, or below EXACT in strict mode. Skipped
-        // when Jev already approved a shortlisted id.
-        let needsVerification = !llmApproved && (subHigh(bestTier) || (config.strict && bestTier != .exact))
-        if needsVerification {
+        // 11. VERIFICATION -- below HIGH, or below EXACT in strict mode. The
+        // best candidate and every alternate get the same strategies, the LLM
+        // included. A judge's approval stands in for the LLM check only: its
+        // choice still gets the deterministic strategies wherever the ranked
+        // winner would.
+        if judgeApproved, let pick = chosen {
+            if verifiedTier(computeTier(pick.score, thresholds: thresholds)) {
+                let v = await verify(pick.imp, intent: intent, args: args ?? [:], llm: NoOpLLMClient(),
+                                     options: VerificationOptions(skipLLMCheck: true, skipSchemaCheck: args == nil))
+                state.step(.verification, v.pass
+                    ? "Verification passed for \(pick.toolId) (overlap \(Int((v.descriptionOverlap * 100).rounded()))%, judge approved)"
+                    : "Verification failed for \(pick.toolId): \(v.reason ?? "")", [
+                        "toolId": .string(pick.toolId),
+                        "pass": .bool(v.pass),
+                        "schemaMatch": .bool(v.schemaMatch),
+                        "descriptionOverlap": .double(v.descriptionOverlap),
+                        "llmConfirmed": .null,
+                    ])
+                if !v.pass {
+                    return await disambiguate(.verificationFailed, ranked, reason: "\(pick.toolId), the judge's choice for \"\(intent)\", failed verification")
+                }
+            }
+        } else if verifiedTier(bestTier) {
             let llmVerifier = llm.providesVerification
             if subHigh(bestTier) && config.requireLLMForSubHighDispatch && !llmVerifier {
                 state.step(.verification, "Best candidate is \(bestTier.rawValue); no LLM verifier is configured to approve it")
@@ -578,13 +701,17 @@ extension DispatchContext {
         }
 
         let pickTier = computeTier(pick.score, thresholds: thresholds)
-        let decision: DecisionCode = llmApproved && subHigh(pickTier) ? .llmVerified : subHigh(pickTier) ? .verified : .ranked
+        let decision: DecisionCode = judgeApproved ? .judgeApproved : llmApproved && subHigh(pickTier) ? .llmVerified : subHigh(pickTier) ? .verified : .ranked
 
         // Learn: cache plain vector resolutions of ordinary tools (never
-        // pinned or destructive ones). Every later hit is judged again.
+        // pinned or destructive ones), and only ones ranking alone decided
+        // under the runtime's own judge setting: a resolution the judge took
+        // part in is asked again next time, and one a per-call override kept
+        // from the runtime's judge must not answer later calls in its place.
         // Only a decision made against the registry as it still is: one that
         // raced a registry change may hold a tool that is gone or outranked.
-        if run.learn, pick.source == .vector, !isPinnedTool(pick.toolId, via: pick.selector.canonical),
+        let judgeOverridden = self.judge != nil && run.judge != nil
+        if run.learn, !judgeAsked, !judgeOverridden, pick.source == .vector, !isPinnedTool(pick.toolId, via: pick.selector.canonical),
            !isDestructive(pick.imp.annotations, treatUnannotatedAsDestructive: config.treatUnannotatedAsDestructive),
            registryGeneration == generation, isRegistered(pick.imp) {
             await cache.store(selector, imp: pick.imp, confidence: pick.score, registryGeneration: generation)
@@ -592,6 +719,97 @@ extension DispatchContext {
 
         return finish(.resolved, decision, ranked: ranked, chosen: pick)
     }
+}
+
+// MARK: - The shortlist judge's helpers
+
+extension DispatchContext {
+    /// D2: the candidates a judge is offered -- near-ties of the winner that
+    /// it could choose and then run: each one's schema loads, the policy would
+    /// run it on the judge's approval (`allowed`), and the deterministic
+    /// checks the approval still gets would pass (`passes`). At most
+    /// maxCandidates, best-ranked first, returned sorted by tool id. A winner
+    /// whose schema cannot be loaded or that the policy refuses means nothing
+    /// is offered: a judge breaks ties, it never overrules a refusal.
+    func shortlistFor(
+        _ ranked: [Candidate],
+        settings: JudgeSettings,
+        allowed: (Candidate) async -> Bool,
+        passes: (Candidate) async -> Bool
+    ) async -> [Candidate] {
+        guard let best = ranked.first else { return [] }
+        var offered: [Candidate] = []
+        for c in ranked {
+            if offered.count >= settings.maxCandidates { break }
+            if !withinJudgeMargin(best: best.score, score: c.score, margin: settings.margin) { break }
+            var schema = c.imp.schema
+            if schema == nil { schema = try? await c.imp.loadSchema() }
+            var usable = schema != nil
+            if usable { usable = await allowed(c) }
+            if !usable {
+                if c.toolId == best.toolId { return [] }
+                continue
+            }
+            if !(await passes(c)) { continue }
+            offered.append(c)
+        }
+        return offered.sorted { judgeToolIdPrecedes($0.toolId, $1.toolId) }
+    }
+}
+
+/// Ask a judge, held to `timeoutMs` whatever the judge does: past the
+/// deadline the answer is TIMEOUT and the judge's task is cancelled. The
+/// context provider is asked first, within the same budget; nil, a throw
+/// or a timeout means the judge is asked with the intent alone.
+func askJudge(
+    _ judge: any ShortlistJudge,
+    request: JudgeRequest,
+    timeoutMs: Int,
+    provider: (any JudgeContextProvider)?,
+    principal: String?
+) async -> (answer: JudgeAnswer, contextName: String?) {
+    if Task.isCancelled { return (.unavailable(error: .aborted), nil) }
+    let work: @Sendable () async -> (JudgeAnswer, String?) = {
+        var withContext = request
+        var contextName: String?
+        if let provider {
+            if let context = try? await provider.context(intent: request.intent, principal: principal) {
+                withContext.context = context
+                contextName = provider.name
+            }
+        }
+        if Task.isCancelled { return (.unavailable(error: .timeout), contextName) }
+        return (await judge.judge(withContext), contextName)
+    }
+    return await withTaskGroup(of: (JudgeAnswer, String?)?.self) { group in
+        group.addTask { await work() }
+        group.addTask {
+            try? await Task.sleep(nanoseconds: UInt64(max(1, timeoutMs)) * 1_000_000)
+            return nil
+        }
+        var result: (JudgeAnswer, String?)?
+        for await first in group {
+            result = first
+            break
+        }
+        group.cancelAll()
+        return result.map { ($0.0, $0.1) } ?? (.unavailable(error: Task.isCancelled ? .aborted : .timeout), nil)
+    }
+}
+
+/// The judge's proof step: fixed wording from its name, model, verdict and tool id only (no numbers, no remote text).
+func judgeStepText(name: String, judged: JudgeVerdict, offered: Int, trigger: JudgeTrigger) -> String {
+    let who = "\(name) (\(judged.model))"
+    switch judged.verdict {
+    case .approved: return "judge-approved: \(who) chose \(judged.toolId ?? "") from \(offered) offered (\(trigger.rawValue))"
+    case .declined: return "judge-declined: \(who) chose none of the \(offered) offered (\(trigger.rawValue))"
+    case .unavailable: return "judge-unavailable: \(who) gave no usable answer (\(trigger.rawValue)); deciding as without a judge"
+    }
+}
+
+/// `metadata["judge"]` when a shortlist judge took part.
+func judgeMetadata(_ proof: ResolutionProof) -> JudgeMetadata? {
+    proof.judge.map { JudgeMetadata(name: $0.name, verdict: $0.verdict, toolId: $0.toolId) }
 }
 
 // MARK: - Execution -- the one boundary every dispatch path goes through
@@ -673,12 +891,16 @@ func invalidArgumentsResult(toolId: String, errors: [ValidationError], proof: Re
             "errors": .array(errors.map { .string($0.path.isEmpty ? $0.message : "\($0.path): \($0.message)") }),
         ]),
         isError: true,
-        metadata: [
-            DispatchMetadataKey.outcome: DispatchOutcomeCode.invalidArguments.rawValue,
-            DispatchMetadataKey.toolId: toolId,
-            DispatchMetadataKey.validationErrors: errors,
-            DispatchMetadataKey.proof: proof,
-        ]
+        metadata: {
+            var meta: [String: any Sendable] = [
+                DispatchMetadataKey.outcome: DispatchOutcomeCode.invalidArguments.rawValue,
+                DispatchMetadataKey.toolId: toolId,
+                DispatchMetadataKey.validationErrors: errors,
+                DispatchMetadataKey.proof: proof,
+            ]
+            if let judged = judgeMetadata(proof) { meta[DispatchMetadataKey.judge] = judged }
+            return meta
+        }()
     )
 }
 
@@ -692,6 +914,7 @@ func annotateExecuted(_ result: ToolResult, toolId: String, proof: ResolutionPro
     meta[DispatchMetadataKey.confidence] = proof.confidence
     meta[DispatchMetadataKey.tier] = proof.tier.rawValue
     meta[DispatchMetadataKey.proof] = proof
+    if let judged = judgeMetadata(proof) { meta[DispatchMetadataKey.judge] = judged }
     annotated.metadata = meta
     return annotated
 }
@@ -704,11 +927,15 @@ func abortedResult(toolId: String, proof: inout ResolutionProof) -> ToolResult {
     return ToolResult(
         content: AnyCodableValue.dict(["error": .string("Dispatch of \(toolId) was cancelled; nothing was executed.")]),
         isError: true,
-        metadata: [
-            DispatchMetadataKey.outcome: DispatchOutcomeCode.aborted.rawValue,
-            DispatchMetadataKey.toolId: toolId,
-            DispatchMetadataKey.proof: proof,
-        ]
+        metadata: {
+            var meta: [String: any Sendable] = [
+                DispatchMetadataKey.outcome: DispatchOutcomeCode.aborted.rawValue,
+                DispatchMetadataKey.toolId: toolId,
+                DispatchMetadataKey.proof: proof,
+            ]
+            if let judged = judgeMetadata(proof) { meta[DispatchMetadataKey.judge] = judged }
+            return meta
+        }()
     )
 }
 
@@ -746,6 +973,7 @@ func notExecutedResult(_ resolution: Resolution) -> ToolResult {
         DispatchMetadataKey.tier: resolution.tier.rawValue,
         DispatchMetadataKey.proof: resolution.proof,
     ]
+    if let judged = judgeMetadata(resolution.proof) { metadata[DispatchMetadataKey.judge] = judged }
     if let refinement = resolution.refinement { metadata[DispatchMetadataKey.refinement] = refinement }
     if let retry = resolution.retryAfterMs { metadata[DispatchMetadataKey.retryAfterMs] = retry }
     return ToolResult(content: AnyCodableValue.dict(content), isError: true, metadata: metadata)
@@ -805,16 +1033,24 @@ extension DispatchContext {
         }
 
         var proof = exactIdProof(toolId, tool: tool, options: options)
-        if Task.isCancelled { return abortedResult(toolId: toolId, proof: &proof) }
+        if Task.isCancelled {
+            let aborted = abortedResult(toolId: toolId, proof: &proof)
+            try await decisionLog?.record(kind: .dispatchById, proof: proof, execution: .aborted, principal: options.principal, toolId: toolId)
+            return aborted
+        }
         let clock = ProofTimer()
         let prepared = await prepareCall(tool.imp, toolId: toolId, args: args)
         recordCall(&proof, toolId: toolId, prepared, elapsedMs: clock.milliseconds())
         guard case .ready(let call) = prepared else {
+            try await decisionLog?.record(kind: .dispatchById, proof: proof, execution: .invalidArguments, principal: options.principal, toolId: toolId)
             if case .rejected(let errors) = prepared { return invalidArgumentsResult(toolId: toolId, errors: errors, proof: proof) }
             return invalidArgumentsResult(toolId: toolId, errors: [], proof: proof)
         }
-        // Checked on this actor with no suspension before the call starts:
-        // once unregisterClass/registerClass returns, the old tool never starts.
+        // Recorded before the tool runs: nothing runs unrecorded. The log
+        // write suspends, so the registry is checked after it, with no
+        // suspension before the call starts.
+        try await decisionLog?.record(kind: .dispatchById, proof: proof, execution: .ran, principal: options.principal, toolId: toolId)
+        // Once unregisterClass/registerClass returns, the old tool never starts.
         guard isRegistered(tool.imp) else { return unregisteredResult(toolId: toolId, proof: &proof) }
         let result = try await tool.imp.execute(args: call.args)
         return annotateExecuted(result, toolId: toolId, proof: proof)
@@ -856,21 +1092,29 @@ extension DispatchContext {
 
         guard resolution.outcome == .resolved, let imp = r.imp, let toolId = resolution.chosen else {
             await observer?.record(.refined(intent: resolution.intent, tier: resolution.tier))
+            try await decisionLog?.record(kind: .dispatch, proof: resolution.proof, execution: .none, principal: frame.principal)
             return notExecutedResult(resolution)
         }
 
         var proof = resolution.proof
-        if Task.isCancelled { return abortedResult(toolId: toolId, proof: &proof) }
+        if Task.isCancelled {
+            let aborted = abortedResult(toolId: toolId, proof: &proof)
+            try await decisionLog?.record(kind: .dispatch, proof: proof, execution: .aborted, principal: frame.principal)
+            return aborted
+        }
         let clock = ProofTimer()
         let prepared = await prepareCall(imp, toolId: toolId, args: args ?? [:])
         recordCall(&proof, toolId: toolId, prepared, elapsedMs: clock.milliseconds())
         guard case .ready(let call) = prepared else {
+            try await decisionLog?.record(kind: .dispatch, proof: proof, execution: .invalidArguments, principal: frame.principal)
             if case .rejected(let errors) = prepared { return invalidArgumentsResult(toolId: toolId, errors: errors, proof: proof) }
             return invalidArgumentsResult(toolId: toolId, errors: [], proof: proof)
         }
         // Resolution and validation can suspend; the registry may have
         // changed since the tool was chosen.
         guard isRegistered(imp) else { return unregisteredResult(toolId: toolId, proof: &proof) }
+        // Recorded before the tool runs: nothing runs unrecorded.
+        try await decisionLog?.record(kind: .dispatch, proof: proof, execution: .ran, principal: frame.principal)
 
         var result = annotateExecuted(try await imp.execute(args: call.args), toolId: toolId, proof: proof)
         await observer?.record(.accepted(toolName: toolId, tier: resolution.tier, confidence: resolution.confidence ?? 0))

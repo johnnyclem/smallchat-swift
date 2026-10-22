@@ -11,8 +11,10 @@ struct ReplCommand: AsyncParsableCommand {
     @Argument(help: "Path to the compiled toolkit file")
     var file: String
 
+    @OptionGroup var judgeOptions: JudgeOptions
+
     func run() async throws {
-        let toolkit = try await loadArtifactRuntime(file)
+        let toolkit = try await loadArtifactRuntime(file, options: try judgeOptions.runtimeOptions())
         let artifact = toolkit.artifact
         let catalog = MCPToolCatalog(artifact: artifact)
 

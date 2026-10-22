@@ -6,10 +6,10 @@ import SmallChat
 /// against it with the embedder its fingerprint names. Exits with a readable
 /// message when the file is not an intact 1.0 artifact (a 0.x artifact asks
 /// for a recompile) or its embedder is not available.
-func loadArtifactRuntime(_ path: String) async throws -> MCPToolkit {
+func loadArtifactRuntime(_ path: String, options: RuntimeOptions = RuntimeOptions()) async throws -> MCPToolkit {
     do {
         let artifact = try ArtifactV1.read(contentsOf: URL(fileURLWithPath: path))
-        return try await MCPToolkit.make(artifact: artifact)
+        return try await MCPToolkit.make(artifact: artifact, options: options)
     } catch let error as ArtifactVersionError {
         FileHandle.standardError.write(Data("\(error.message)\n".utf8))
         throw ExitCode.failure
@@ -47,6 +47,9 @@ func describeResolution(_ resolution: Resolution, catalog: MCPToolCatalog) -> St
     }
     for excluded in resolution.proof.candidates where excluded.excluded != nil {
         lines.append("  excluded: \(excluded.toolId) (\(excluded.excluded!))")
+    }
+    if let judge = resolution.proof.judge {
+        lines.append("Judge:   \(judge.name) (\(judge.model)) \(judge.verdict.rawValue)\(judge.toolId.map { " → \($0)" } ?? "")")
     }
     lines.append("Proof:   \(resolution.proof.proofDigest)")
     lines.append("Nothing was executed.")

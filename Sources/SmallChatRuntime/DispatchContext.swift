@@ -32,8 +32,16 @@ public actor DispatchContext {
     public let dispatchConfig: DispatchConfig
     /// LLM client for verification, decomposition and refinement questions.
     public let llmClient: any LLMClient
-    /// Jev judge for below-HIGH or ambiguous shortlists. Nil leaves dispatch unchanged.
-    public let jev: JevJudge?
+    /// The shortlist judge (Judge.swift, spec/judge): nil leaves dispatch unchanged.
+    public let judge: (any ShortlistJudge)?
+    /// Its validated margin, maxCandidates, acceptThreshold and timeoutMs (nil without a judge).
+    public let judgeSettings: JudgeSettings?
+    /// Where the judge's context comes from (nil without a provider, or without a judge).
+    public let judgeContext: (any JudgeContextProvider)?
+    /// Why the configured judge is not consulted (a setting out of range), or nil.
+    public let judgeConfigurationError: String?
+    /// The decision log every resolution and dispatch is appended to, or nil.
+    public let decisionLog: DecisionLog?
     /// Opt-in semantic rate limiter (nil unless `RuntimeOptions.rateLimiter` is set).
     public let rateLimiter: SemanticRateLimiter?
     /// contentHash of the artifact the tools came from, recorded in every proof.
@@ -71,7 +79,9 @@ public actor DispatchContext {
         intentPins: IntentPinRegistry? = nil,
         dispatchConfig: DispatchConfig = DispatchConfig(),
         llmClient: any LLMClient = NoOpLLMClient(),
-        jev: JevJudge? = nil,
+        judge: (any ShortlistJudge)? = nil,
+        judgeContext: (any JudgeContextProvider)? = nil,
+        decisionLog: DecisionLog? = nil,
         rateLimiter: SemanticRateLimiter? = nil,
         artifactHash: String? = nil,
         observer: DispatchObserver? = nil
@@ -84,7 +94,18 @@ public actor DispatchContext {
         self.intentPins = intentPins ?? IntentPinRegistry()
         self.dispatchConfig = dispatchConfig
         self.llmClient = llmClient
-        self.jev = jev
+        // A judge whose settings are out of range is not consulted: the
+        // error is kept here, and the runtime decides as without a judge.
+        var settings: JudgeSettings?
+        var configurationError: String?
+        if let judge {
+            do { settings = try SmallChatRuntime.judgeSettings(of: judge) } catch { configurationError = "\(error)" }
+        }
+        self.judge = settings == nil ? nil : judge
+        self.judgeSettings = settings
+        self.judgeConfigurationError = configurationError
+        self.judgeContext = settings == nil ? nil : judgeContext
+        self.decisionLog = decisionLog
         self.rateLimiter = rateLimiter
         self.artifactHash = artifactHash
         self.observer = observer

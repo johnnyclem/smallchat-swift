@@ -33,6 +33,7 @@ struct SmallChatCLI: AsyncParsableCommand {
             ServeCommand.self,
             ChannelCommand.self,
             ResolveCommand.self,
+            ExplainCommand.self,
             InspectCommand.self,
             InitCommand.self,
             ReplCommand.self,
